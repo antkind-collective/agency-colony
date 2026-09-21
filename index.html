@@ -4,6 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Agency Colony - Resource &amp; Leave Platform</title>
+  <!-- Loaded in the HEAD, not with the others at the end of body: the splash
+       paints long before those run, so on clients.youragency.com it showed "Ant
+       Colony" for the whole load (8 Sep 2026). config.js is pure — no
+       DOM, no side effects — so it is safe this early, and it keeps the
+       hostname rule in one place instead of duplicating it inline. -->
+  <script src="js/config.js?v=20260409a"></script>
+  <script>
+    // Title before first paint. The splash text is handled below, right after
+    // the element exists.
+    if (typeof isCircleHost === 'function' && isCircleHost(location.hostname)) {
+      document.title = productName(location.hostname);
+      document.documentElement.setAttribute('data-product', 'circle');
+    }
+  </script>
   <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
   <meta name="googlebot" content="noindex, nofollow" />
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
@@ -23,12 +37,19 @@
     <svg class="splash-logo" viewBox="0 0 83 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M82.4759 4.4827C79.7392 0.617762 75.9253 3.49426 72.5746 4.62022C70.3708 5.34507 67.8716 5.17317 65.6765 5.84932C64.6542 6.13869 63.7072 6.84635 62.7719 7.26751C62.4823 7.38784 62.2564 7.42796 62.1145 7.35919C61.654 6.97241 62.1376 6.1215 62.3114 5.49979C62.6705 4.57724 63.0122 3.5974 62.9051 2.70064C62.1405 -1.75735 54.1593 -0.0268709 52.636 3.08169C51.5964 4.62308 52.1292 7.3506 54.4518 6.79192C55.2482 6.61142 56.0793 6.02982 56.7628 5.43962C57.3448 5.007 59.2707 2.91839 59.5081 3.56589C59.2649 4.66892 58.3642 5.72326 57.8632 6.7604C57.0437 8.17573 56.6035 9.71712 54.9817 9.93773C48.5064 9.85178 49.3086 11.8516 43.618 7.42796C41.6401 6.0556 39.2538 6.44238 37.0992 7.31622C34.8375 8.07259 30.5949 10.8116 29.9028 6.94663C29.6248 4.82364 30.1026 1.82394 27.6295 0.835505C24.554 -0.221693 20.462 2.0245 19.4832 4.98408C18.8982 6.45098 19.6569 8.91777 21.5914 8.37915C23.3 8.02102 24.6206 4.84656 25.6892 3.92974C26.3871 3.49712 25.7066 5.5886 25.6458 5.87797C25.0637 7.95226 24.6669 11.1038 21.8289 10.6454C20.3259 10.4248 18.9532 9.43635 17.5545 8.8748C14.7628 7.55975 12.3533 9.96351 10.3638 11.7255C6.88869 14.8799 1.68756 16.7794 0.181668 21.4953C-0.385939 22.9135 0.395969 25.5264 2.25517 24.303C3.88849 22.8762 4.00722 20.3579 5.51601 18.8107C6.01701 18.1604 7.55186 16.8998 6.5962 18.7133C6.10099 19.6445 5.33936 20.9624 5.46967 22.0597C5.54786 23.0825 6.32688 23.7014 7.18987 23.3318C9.48057 22.0396 8.66101 18.5615 10.5173 16.8912C11.2587 16.4012 11.4614 18.7506 12.4257 17.745C13.5378 16.258 13.5841 13.5677 15.6403 12.7741C17.2852 12.0464 19.3644 12.8744 20.7371 14.1493C22.718 15.8254 22.495 18.6933 20.7661 20.5212C18.8721 22.8333 15.4723 23.7615 14.1112 26.5234C11.9392 31.7349 18.5739 33.7462 21.5625 36.445C23.3667 38.0982 24.5772 40.5764 24.0617 43.0318C23.1118 47.613 18.2003 50.0396 16.5699 54.2885C15.5679 56.5633 16.1297 59.9326 18.849 60.646C20.5112 61.1159 22.5268 60.4827 24.3136 60.6976C27.4557 60.7663 29.7204 64.5711 32.8422 63.9265C33.459 63.7374 33.9108 63.2102 34.0151 62.5856C34.2902 60.1418 31.6954 58.0446 29.6451 57.0103C27.6179 55.7096 23.2479 55.9474 23.1263 53.2685C23.497 50.1027 28.4838 50.0855 28.4027 44.3841C28.4461 41.095 26.6478 38.1354 26.0193 34.9753C25.501 32.371 27.1951 30.5574 28.9558 33.3336C30.7716 36.3276 31.8083 40.4074 34.9678 42.1465C36.187 42.7997 37.7161 42.8971 38.6573 41.9774C40.5976 39.7427 37.7537 37.0839 35.7324 36.0096C31.539 33.9209 30.9946 28.7839 27.5194 28.0935C26.0483 27.7783 25.1332 29.42 24.0819 29.9958C23.7055 30.1506 23.4217 29.8927 23.3927 29.3312C23.8619 24.0251 33.9629 24.6268 34.3133 19.1488C34.3423 17.7994 33.8152 16.3354 34.435 15.0518C35.5586 12.9346 38.0665 11.376 40.4701 11.3559C43.062 11.3502 44.3073 13.9058 45.9985 15.3985C48.5991 17.5759 50.6118 15.261 52.7084 13.8571C53.8929 13.1322 55.0918 13.7626 55.0049 15.1807C54.9586 16.3411 54.3128 17.4527 53.4903 18.3065C51.6746 20.3006 48.7641 20.3922 46.43 21.4638C42.5813 23.157 41.9731 27.4975 44.1017 30.8038C46.737 35.1243 52.7663 39.6396 50.0644 45.2579C48.3992 48.1602 44.7243 49.7388 42.923 52.5838C41.449 54.5463 40.3166 58.4428 43.4617 59.2278C44.8227 59.4914 46.207 58.9356 47.5536 58.7465C49.0595 58.503 50.5625 58.7035 52.0858 59.3567C54.614 60.4111 56.7483 62.6573 59.6471 62.5828C60.846 62.5828 62.2216 61.9152 62.546 60.8208C63.0875 58.8811 61.1993 57.5747 59.4676 56.9215C57.5707 56.1422 55.3553 56.1995 53.499 55.5864C51.5558 55.0162 50.6784 53.0193 51.3357 51.1427C54.2722 44.4901 54.2549 41.3958 51.3039 34.6916C50.2729 32.5285 49.3694 27.5491 53.3368 28.7467C54.8254 29.291 56.2878 30.2594 57.7561 30.715C59.2533 31.2708 60.7418 31.2794 61.877 32.3366C64.9757 36.382 58.2802 38.9663 56.5832 41.9516C55.9345 42.9974 55.4856 44.3096 55.7202 45.5329C55.8824 46.6188 56.9018 47.3436 57.9124 46.8279C59.2185 46.1088 60.4783 44.301 61.9697 43.5074C65.3348 41.6823 68.6564 39.7771 69.4962 35.746C70.2347 32.5429 68.7723 28.8326 65.9313 27.0764C64.1619 25.8988 61.8162 25.7327 59.7977 25.4806C58.1644 25.2972 57.4288 23.8819 58.1905 22.5582C58.7986 21.4065 59.9425 20.567 60.9213 19.7648C62.7284 18.4182 64.3675 16.3439 64.8714 14.1379C65.2073 12.9346 65.1465 11.6539 66.0327 10.7142C67.0926 9.55381 69.7916 9.05816 71.6624 8.25882C73.0438 7.71446 74.4049 6.95522 75.8789 6.72602C77.463 6.40514 78.827 7.45947 78.2362 9.07249C76.4958 13.3471 71.1672 15.9371 70.6691 20.8363C70.562 22.9679 72.8324 23.667 74.2833 22.2115C75.9542 20.7819 76.0614 17.51 77.2632 15.9801C77.9843 15.3097 76.7593 19.7104 78.7199 19.0342C80.4603 17.745 79.6581 14.6221 80.5588 12.7541C81.4768 10.1698 84.0658 7.35919 82.5164 4.53427L82.4846 4.47983L82.4759 4.4827ZM26.3582 2.3024C25.2635 3.09888 22.0287 6.769 20.7806 5.09009C20.4852 4.36523 21.0673 3.56016 21.5798 3.05591C22.5645 2.12477 23.9372 1.51452 25.2519 1.15352C26.4827 0.79826 28.0639 0.801125 26.4132 2.25656L26.3582 2.30527V2.3024ZM60.0612 2.04455C58.4772 2.67486 55.949 4.57151 54.2722 3.90109C53.2558 3.1963 54.5763 2.0245 55.3119 1.66064C56.5745 0.995947 58.1267 0.732364 59.5458 0.712309C60.846 0.692253 61.9697 1.0819 60.1278 2.00731L60.0612 2.04169V2.04455Z" fill="currentColor"/></svg>
     <p class="splash-title">Agency Colony</p>
     <div class="splash-spinner"></div>
-    <p class="splash-text">Setting up your workspace...</p>
+    <p class="splash-text" id="splashText">Setting up your workspace...</p>
   </div>
+  <script>
+    // Runs during parse, before the splash is painted, so the client never
+    // sees "Agency Colony" flash on the way in.
+    if (typeof isCircleHost === 'function' && isCircleHost(location.hostname)) {
+      document.querySelector('.splash-title').textContent = productName(location.hostname);
+    }
+  </script>
 
   <div class="app-shell">
     <header class="global-header hidden">
-      <a href="https://colony.youragency.com" class="header-logo" target="_blank" rel="noopener">
+      <a href="https://app.youragency.com" class="header-logo" id="headerLogo" target="_blank" rel="noopener">
         <svg class="header-ant-icon" viewBox="0 0 83 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Agency Colony"><path d="M82.4759 4.4827C79.7392 0.617762 75.9253 3.49426 72.5746 4.62022C70.3708 5.34507 67.8716 5.17317 65.6765 5.84932C64.6542 6.13869 63.7072 6.84635 62.7719 7.26751C62.4823 7.38784 62.2564 7.42796 62.1145 7.35919C61.654 6.97241 62.1376 6.1215 62.3114 5.49979C62.6705 4.57724 63.0122 3.5974 62.9051 2.70064C62.1405 -1.75735 54.1593 -0.0268709 52.636 3.08169C51.5964 4.62308 52.1292 7.3506 54.4518 6.79192C55.2482 6.61142 56.0793 6.02982 56.7628 5.43962C57.3448 5.007 59.2707 2.91839 59.5081 3.56589C59.2649 4.66892 58.3642 5.72326 57.8632 6.7604C57.0437 8.17573 56.6035 9.71712 54.9817 9.93773C48.5064 9.85178 49.3086 11.8516 43.618 7.42796C41.6401 6.0556 39.2538 6.44238 37.0992 7.31622C34.8375 8.07259 30.5949 10.8116 29.9028 6.94663C29.6248 4.82364 30.1026 1.82394 27.6295 0.835505C24.554 -0.221693 20.462 2.0245 19.4832 4.98408C18.8982 6.45098 19.6569 8.91777 21.5914 8.37915C23.3 8.02102 24.6206 4.84656 25.6892 3.92974C26.3871 3.49712 25.7066 5.5886 25.6458 5.87797C25.0637 7.95226 24.6669 11.1038 21.8289 10.6454C20.3259 10.4248 18.9532 9.43635 17.5545 8.8748C14.7628 7.55975 12.3533 9.96351 10.3638 11.7255C6.88869 14.8799 1.68756 16.7794 0.181668 21.4953C-0.385939 22.9135 0.395969 25.5264 2.25517 24.303C3.88849 22.8762 4.00722 20.3579 5.51601 18.8107C6.01701 18.1604 7.55186 16.8998 6.5962 18.7133C6.10099 19.6445 5.33936 20.9624 5.46967 22.0597C5.54786 23.0825 6.32688 23.7014 7.18987 23.3318C9.48057 22.0396 8.66101 18.5615 10.5173 16.8912C11.2587 16.4012 11.4614 18.7506 12.4257 17.745C13.5378 16.258 13.5841 13.5677 15.6403 12.7741C17.2852 12.0464 19.3644 12.8744 20.7371 14.1493C22.718 15.8254 22.495 18.6933 20.7661 20.5212C18.8721 22.8333 15.4723 23.7615 14.1112 26.5234C11.9392 31.7349 18.5739 33.7462 21.5625 36.445C23.3667 38.0982 24.5772 40.5764 24.0617 43.0318C23.1118 47.613 18.2003 50.0396 16.5699 54.2885C15.5679 56.5633 16.1297 59.9326 18.849 60.646C20.5112 61.1159 22.5268 60.4827 24.3136 60.6976C27.4557 60.7663 29.7204 64.5711 32.8422 63.9265C33.459 63.7374 33.9108 63.2102 34.0151 62.5856C34.2902 60.1418 31.6954 58.0446 29.6451 57.0103C27.6179 55.7096 23.2479 55.9474 23.1263 53.2685C23.497 50.1027 28.4838 50.0855 28.4027 44.3841C28.4461 41.095 26.6478 38.1354 26.0193 34.9753C25.501 32.371 27.1951 30.5574 28.9558 33.3336C30.7716 36.3276 31.8083 40.4074 34.9678 42.1465C36.187 42.7997 37.7161 42.8971 38.6573 41.9774C40.5976 39.7427 37.7537 37.0839 35.7324 36.0096C31.539 33.9209 30.9946 28.7839 27.5194 28.0935C26.0483 27.7783 25.1332 29.42 24.0819 29.9958C23.7055 30.1506 23.4217 29.8927 23.3927 29.3312C23.8619 24.0251 33.9629 24.6268 34.3133 19.1488C34.3423 17.7994 33.8152 16.3354 34.435 15.0518C35.5586 12.9346 38.0665 11.376 40.4701 11.3559C43.062 11.3502 44.3073 13.9058 45.9985 15.3985C48.5991 17.5759 50.6118 15.261 52.7084 13.8571C53.8929 13.1322 55.0918 13.7626 55.0049 15.1807C54.9586 16.3411 54.3128 17.4527 53.4903 18.3065C51.6746 20.3006 48.7641 20.3922 46.43 21.4638C42.5813 23.157 41.9731 27.4975 44.1017 30.8038C46.737 35.1243 52.7663 39.6396 50.0644 45.2579C48.3992 48.1602 44.7243 49.7388 42.923 52.5838C41.449 54.5463 40.3166 58.4428 43.4617 59.2278C44.8227 59.4914 46.207 58.9356 47.5536 58.7465C49.0595 58.503 50.5625 58.7035 52.0858 59.3567C54.614 60.4111 56.7483 62.6573 59.6471 62.5828C60.846 62.5828 62.2216 61.9152 62.546 60.8208C63.0875 58.8811 61.1993 57.5747 59.4676 56.9215C57.5707 56.1422 55.3553 56.1995 53.499 55.5864C51.5558 55.0162 50.6784 53.0193 51.3357 51.1427C54.2722 44.4901 54.2549 41.3958 51.3039 34.6916C50.2729 32.5285 49.3694 27.5491 53.3368 28.7467C54.8254 29.291 56.2878 30.2594 57.7561 30.715C59.2533 31.2708 60.7418 31.2794 61.877 32.3366C64.9757 36.382 58.2802 38.9663 56.5832 41.9516C55.9345 42.9974 55.4856 44.3096 55.7202 45.5329C55.8824 46.6188 56.9018 47.3436 57.9124 46.8279C59.2185 46.1088 60.4783 44.301 61.9697 43.5074C65.3348 41.6823 68.6564 39.7771 69.4962 35.746C70.2347 32.5429 68.7723 28.8326 65.9313 27.0764C64.1619 25.8988 61.8162 25.7327 59.7977 25.4806C58.1644 25.2972 57.4288 23.8819 58.1905 22.5582C58.7986 21.4065 59.9425 20.567 60.9213 19.7648C62.7284 18.4182 64.3675 16.3439 64.8714 14.1379C65.2073 12.9346 65.1465 11.6539 66.0327 10.7142C67.0926 9.55381 69.7916 9.05816 71.6624 8.25882C73.0438 7.71446 74.4049 6.95522 75.8789 6.72602C77.463 6.40514 78.827 7.45947 78.2362 9.07249C76.4958 13.3471 71.1672 15.9371 70.6691 20.8363C70.562 22.9679 72.8324 23.667 74.2833 22.2115C75.9542 20.7819 76.0614 17.51 77.2632 15.9801C77.9843 15.3097 76.7593 19.7104 78.7199 19.0342C80.4603 17.745 79.6581 14.6221 80.5588 12.7541C81.4768 10.1698 84.0658 7.35919 82.5164 4.53427L82.4846 4.47983L82.4759 4.4827ZM26.3582 2.3024C25.2635 3.09888 22.0287 6.769 20.7806 5.09009C20.4852 4.36523 21.0673 3.56016 21.5798 3.05591C22.5645 2.12477 23.9372 1.51452 25.2519 1.15352C26.4827 0.79826 28.0639 0.801125 26.4132 2.25656L26.3582 2.30527V2.3024ZM60.0612 2.04455C58.4772 2.67486 55.949 4.57151 54.2722 3.90109C53.2558 3.1963 54.5763 2.0245 55.3119 1.66064C56.5745 0.995947 58.1267 0.732364 59.5458 0.712309C60.846 0.692253 61.9697 1.0819 60.1278 2.00731L60.0612 2.04169V2.04455Z" fill="currentColor"/></svg>
       </a>
       <div class="header-center"></div>
@@ -50,6 +71,10 @@
       <aside class="sidebar">
         <nav id="screen-nav" class="screen-nav">
           <button id="loginNavButton" class="screen-link active sidebar-item" data-screen="login" data-role="all">Login</button>
+          <!-- Circle only: who is signed in, for which client. Not a
+               screen-link, so the Circle build keeps it (it strips every
+               non-partner nav button, the login button included). -->
+          <div id="circleIdentity" class="sidebar-item sidebar-identity circle-identity hidden"></div>
           <div class="sidebar-nav-separator" aria-hidden="true"></div>
           <button class="screen-link sidebar-item" data-screen="home-feed" data-role="all">Home</button>
           <button class="screen-link sidebar-item leadership-only" data-screen="executive-dashboard" data-role="leadership">Agency Overview</button>
@@ -59,21 +84,27 @@
           <button class="screen-link sidebar-item" data-screen="my-allocations" data-role="all">My Allocation</button>
           <button class="screen-link sidebar-item" data-screen="leave-center" data-role="all" id="leaveNavButton">My Leave</button>
           <button class="screen-link sidebar-item" data-screen="people-directory" data-role="all">Team Directory</button>
+          <button class="screen-link sidebar-item hidden" data-screen="hiring" data-role="all" id="hiringNavButton">Hiring</button>
           <button class="screen-link sidebar-item" data-screen="client-projects" data-role="all">Clients</button>
+          <button class="screen-link sidebar-item hidden" data-screen="briefs-pipeline" data-role="all" id="briefsNavButton">Briefs</button>
           <button class="screen-link sidebar-item hidden" data-screen="invoice-center" data-role="all" id="invoiceNavButton">Invoices</button>
           <button class="screen-link sidebar-item superadmin-only" data-screen="admin-settings" data-role="admin">Admin Settings</button>
+          <button class="screen-link sidebar-item hidden" data-screen="partner-home" data-role="partner">My Briefs</button>
+          <button class="screen-link sidebar-item hidden" data-screen="partner-timeline" data-role="partner">Timeline</button>
+          <button class="screen-link sidebar-item hidden" data-screen="partner-team" data-role="partner">Team</button>
+          <button class="screen-link sidebar-item hidden" data-screen="partner-feedback" data-role="partner">Feedback</button>
         </nav>
 
-        <a href="https://colony.youragency.com" class="sidebar-brand" target="_blank" rel="noopener">
-          <img src="assets/colony-logo-the.svg" alt="the" class="sidebar-brand-the" />
-          <img src="assets/colony-logo-text.svg" alt="COLONY" class="sidebar-brand-colony" />
+        <a href="https://app.youragency.com" class="sidebar-brand" id="sidebarBrand" target="_blank" rel="noopener">
+          <img src="assets/wordmark-the.svg" alt="the" class="sidebar-brand-the" data-product-mark />
+          <img src="assets/wordmark-text.svg" alt="COLONY" class="sidebar-brand-wordmark" data-product-mark />
         </a>
       </aside>
 
       <main class="canvas">
         <section id="login" class="screen active">
           <div class="login-content">
-            <div class="auth-actions">
+            <div class="auth-actions" id="staffAuthActions">
               <button id="signInBtn" class="google-btn" type="button">
                 <svg class="google-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
                   <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
@@ -85,11 +116,368 @@
                 <span>Sign in with Google</span>
               </button>
             </div>
-            <p class="helper-text">Use your <code>@youragency.com</code> Workspace account to sign in.</p>
+            <p class="helper-text" id="staffAuthHelp">Your Agency employees — use your <code>@youragency.com</code> Workspace account.</p>
+            <div class="login-partner-entrance" id="invitedEntrance">
+              <p class="helper-text" id="invitedEntranceTitle">Invited sign in</p>
+              <button id="partnerSignInBtn" class="google-btn google-btn-secondary" type="button">
+                <span>Sign in with Google</span>
+              </button>
+              <p class="mini-meta" id="invitedEntranceHint">Not part of Your Agency? Sign in with the Google account your invite was sent to.</p>
+            </div>
             <button id="registerBtn" class="hidden" type="button">Register</button>
             <p id="loginMessage" class="status hidden" aria-live="polite"></p>
             <p id="authSessionLine" class="mini-meta hidden"></p>
           </div>
+        </section>
+
+        <section id="partner-home" class="screen partner-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow" id="partnerGreeting">My Briefs</p>
+              <button id="newBriefBtn" class="primary" type="button">New request</button>
+            </div>
+            <p class="mini-meta">Creative briefs and quick notifications for the team — status updates live here.</p>
+          </div>
+          <div id="partnerBriefList" class="feed-list"></div>
+          <p id="partnerBriefEmpty" class="mini-meta hidden">No requests yet — hit "New request" to send your first one.</p>
+          <!-- Bottom of the list, not the top (17 Sep 2026). -->
+          <p id="partnerHolidayNote" class="mini-meta hidden" style="margin-top:18px;"></p>
+          <!-- Only ever shown to an Your Agency reviewer signed in here, so it can
+               name Your Agency; a client never sees this line. -->
+          <p id="staffCircleNote" class="mini-meta hidden">You're viewing the client's workspace as it looks to them. You can read everything and reply to feedback, but not raise or edit requests on their behalf.</p>
+        </section>
+
+        <section id="partner-brief-form" class="screen partner-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow">New Request</p>
+              <button id="briefFormBackBtn" class="ghost small" type="button">← Back</button>
+            </div>
+          </div>
+          <div class="panel"><div>
+            <div class="form-grid" id="briefFormGrid">
+              <label class="form-field">
+                <span>Request type</span>
+                <select id="bfRequestType">
+                  <option value="brief">Full creative brief</option>
+                  <option value="notify_only">Quick notification / FYI</option>
+                </select>
+              </label>
+              <label class="form-field">
+                <span>Title <em class="req">*</em></span>
+                <input type="text" id="bfTitle" placeholder="What is this request called?">
+              </label>
+              <!-- Attribution, not permission: naming someone here changes
+                   nothing about who may approve or see the brief, and sends
+                   them no email. Outside #bfFullFields on purpose — a quick
+                   FYI can be on someone's behalf too. -->
+              <label class="form-field">
+                <span>Raising this for someone else?</span>
+                <select id="bfOnBehalf">
+                  <option value="">No — this is my own request</option>
+                </select>
+                <input type="text" id="bfOnBehalfOther" class="hidden" placeholder="Their name" style="margin-top:6px;">
+                <input type="email" id="bfOnBehalfEmail" class="hidden" placeholder="Their email (optional)" style="margin-top:6px;">
+                <span class="mini-meta">Use this when someone asked you on Slack or by email. We will show the request as theirs and come back to them with questions.</span>
+              </label>
+              <div id="bfFullFields">
+                <label class="form-field">
+                  <span>Objective <em class="req">*</em></span>
+                  <textarea id="bfObjective" rows="2" placeholder="What are we trying to achieve?"></textarea>
+                </label>
+                <label class="form-field">
+                  <span>Key message <em class="req">*</em></span>
+                  <textarea id="bfKeyMessage" rows="2" placeholder="What should the audience take away?"></textarea>
+                </label>
+                <label class="form-field">
+                  <span>Audience <em class="req">*</em></span>
+                  <input type="text" id="bfAudience" placeholder="Who is this for?">
+                </label>
+                <div class="form-field">
+                  <span>Deliverable(s) <em class="req">*</em></span>
+                  <div id="bfDeliverables" class="check-grid"></div>
+                </div>
+                <div class="form-field">
+                  <span>Platform(s) <em class="req">*</em></span>
+                  <div id="bfPlatforms" class="check-grid"></div>
+                </div>
+                <label class="form-field">
+                  <span>Copy / content inputs <em class="req">*</em></span>
+                  <textarea id="bfContent" rows="4" placeholder="Copy suggestions, names, dates, links, context…"></textarea>
+                </label>
+                <label class="form-field">
+                  <span>Key dates <em class="req">*</em></span>
+                  <input type="text" id="bfKeyDates" placeholder="Event date, posting window…">
+                </label>
+                <label class="form-field">
+                  <span>Links to include</span>
+                  <textarea id="bfLinks" rows="2" placeholder="Registration links, reference docs…"></textarea>
+                </label>
+                <label class="form-field">
+                  <span>Partners to be tagged</span>
+                  <textarea id="bfPartnersTag" rows="2" placeholder="Names, social media handles/links, and any relevant details"></textarea>
+                </label>
+                <label class="form-field">
+                  <span>Media credits / captions</span>
+                  <input type="text" id="bfCredits">
+                </label>
+                <label class="form-field">
+                  <span>Preferred publication date</span>
+                  <input type="date" id="bfPublishDate">
+                </label>
+                <label class="form-field">
+                  <span>Deadline <em class="req">*</em></span>
+                  <input type="date" id="bfDeadline">
+                  <!-- Filled by renderSlaHint() from app.client_sla + the
+                       holiday calendar; empty until deliverables are picked. -->
+                  <div id="bfSlaHint" class="hidden"></div>
+                </label>
+                <label class="form-field">
+                  <span>Who approves this content? <em class="req">*</em></span>
+                  <select id="bfApprover"><option value="">Select approver</option></select>
+                  <input type="text" id="bfApproverOther" class="hidden" placeholder="Approver name" style="margin-top:6px;">
+                </label>
+              </div>
+              <label class="form-field hidden" id="bfNotifyFieldWrap">
+                <span>Message <em class="req">*</em></span>
+                <textarea id="bfNotifyMessage" rows="4" placeholder="What should the comms team know?"></textarea>
+              </label>
+              <label class="form-field">
+                <span>Priority</span>
+                <select id="bfPriority">
+                  <option value="P2" selected>P2 — Standard (per agreed turnarounds)</option>
+                  <option value="P3">P3 — Low (scheduled)</option>
+                  <option value="P1">P1 — High (within 24 hours)</option>
+                  <option value="P0">P0 — Critical (same day)</option>
+                </select>
+              </label>
+              <label class="form-field hidden" id="bfUrgencyWrap">
+                <span>Reason for urgency <em class="req">*</em></span>
+                <textarea id="bfUrgencyReason" rows="2"></textarea>
+              </label>
+              <label class="form-field">
+                <span>Additional notes</span>
+                <textarea id="bfNotes" rows="2"></textarea>
+              </label>
+              <label class="form-field">
+                <span>Attachments</span>
+                <input type="file" id="bfFiles" multiple>
+                <span class="mini-meta">Reference examples, logos, brand assets, images.</span>
+              </label>
+            </div>
+            <p id="briefFormNotice" class="mini-meta"></p>
+            <div class="action-row">
+              <button id="submitBriefBtn" class="primary" type="button">Submit request</button>
+            </div>
+          </div></div>
+        </section>
+
+        <section id="partner-brief-detail" class="screen partner-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow" id="pbdTitle">Brief</p>
+              <button id="pbdBackBtn" class="ghost small" type="button">← Back</button>
+            </div>
+            <p class="mini-meta" id="pbdStatusLine"></p>
+          </div>
+          <div id="pbdEditBar" class="action-row hidden">
+            <button id="pbdEditBtn" class="ghost small" type="button">Edit &amp; resubmit</button>
+          </div>
+          <div class="action-row">
+            <button id="pbdApproveBtn" class="primary hidden" type="button">Approve &amp; send to Your Agency ✓</button>
+            <button id="pbdRevisionBtn" class="ghost small hidden" type="button">Request changes</button>
+          </div>
+          <div class="panel"><div>
+            <h3>Brief summary</h3>
+            <div id="pbdSummary"></div>
+          </div></div>
+          <div class="panel"><div>
+            <h3>Progress</h3>
+            <div id="pbdTimeline"></div>
+            <div id="pbdDeliverables"></div>
+          </div></div>
+          <div class="panel"><div>
+            <h3>Files</h3>
+            <div id="pbdFiles"></div>
+            <div class="action-row">
+              <input type="file" id="pbdUploadInput" multiple>
+              <button id="pbdUploadBtn" class="ghost small" type="button">Upload</button>
+            </div>
+            <p id="pbdFilesNotice" class="mini-meta"></p>
+          </div></div>
+          <div class="panel"><div>
+            <h3>Comments</h3>
+            <div id="pbdComments"></div>
+            <div class="action-row">
+              <textarea id="pbdCommentInput" rows="2" placeholder="Write a comment for the team…"></textarea>
+              <button id="pbdCommentBtn" class="primary" type="button">Send</button>
+            </div>
+            <p id="pbdCommentNotice" class="mini-meta"></p>
+          </div></div>
+        </section>
+
+        <section id="partner-timeline" class="screen partner-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow">Timeline</p>
+            </div>
+            <p class="mini-meta">Every brief and where it stands — click one to open it.</p>
+          </div>
+          <div id="ptList"></div>
+          <p id="ptEmpty" class="mini-meta hidden">No briefs yet.</p>
+        </section>
+
+        <section id="partner-team" class="screen partner-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow" id="partnerTeamEyebrow">Your team</p>
+            </div>
+            <p class="mini-meta">Who's who on your team — who oversees what, and who to reach when someone's away. Anyone on your team can keep this current.</p>
+          </div>
+          <div id="orgContactsPanelSlotPartner"></div>
+        </section>
+
+        <section id="partner-feedback" class="screen partner-screen staff-circle-screen hidden">
+          <div class="screen-head">
+            <div class="screen-head-top">
+              <p class="eyebrow">Feedback</p>
+            </div>
+            <h2>Bugs &amp; Features</h2>
+            <p>Spotted a bug or want something improved? Tell the team — replies land here.</p>
+          </div>
+          <!-- Same shape as the employee wall (16 Sep 2026): submit on
+               top, ideas left, bugs right, done ones folded away. Clients post
+               here; Your Agency reviewers signing in to answer get the composer
+               hidden — they raise internal work elsewhere. -->
+          <div class="panel" id="pfComposePanel">
+            <h3>Submit</h3>
+            <div class="editor-bar action-row">
+              <select id="pfType">
+                <option value="feature">Idea</option>
+                <option value="bug">Bug</option>
+              </select>
+              <textarea id="pfText" rows="2" placeholder="What happened, or what would help — the more detail the better."></textarea>
+              <div class="fr-submit-row">
+                <button id="pfSubmitBtn" class="primary" type="button">Send</button>
+              </div>
+            </div>
+            <p id="pfNotice" class="mini-meta"></p>
+          </div>
+          <!-- Ideas left, bugs right, always (16 Sep 2026). Open ones
+               first, done ones after them, dimmed — one wall, no folding. -->
+          <div class="panel">
+            <div id="pfList" class="fr-columns">
+              <div class="fr-column"><h4 class="fr-column-heading">Ideas</h4><div id="pfIdeas" class="fr-column"></div></div>
+              <div class="fr-column"><h4 class="fr-column-heading">Bugs</h4><div id="pfBugs" class="fr-column"></div></div>
+            </div>
+            <p id="pfEmpty" class="mini-meta hidden">Nothing sent yet.</p>
+          </div>
+        </section>
+
+        <section id="hire-checklist" class="screen hire-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow" id="hireGreeting">Welcome to Your Agency</p>
+            </div>
+            <p class="mini-meta" id="hireStatusLine"></p>
+          </div>
+          <div class="panel" id="hireFormPanel"><div>
+            <h3>Your joining details</h3>
+            <p class="mini-meta">Fill these in once — they go only to the small team handling your paperwork.</p>
+            <div class="form-grid">
+              <label class="form-field"><span>Full name <em class="req">*</em></span>
+                <input type="text" id="hfFullName" placeholder="First and last name"></label>
+              <label class="form-field"><span>Date of birth <em class="req">*</em></span>
+                <input type="date" id="hfDob"></label>
+              <label class="form-field"><span>Mobile number <em class="req">*</em></span>
+                <input type="tel" id="hfPhone" placeholder="+91 98765 43210" autocomplete="tel">
+                <span class="mini-meta">Used to set up your Your Agency account, and for payroll to reach you.</span></label>
+              <label class="form-field"><span>Start date <em class="req">*</em></span>
+                <input type="date" id="hfStartDate">
+                <span class="mini-meta">Your first working day, as agreed in your offer.</span></label>
+              <label class="form-field"><span>PAN <em class="req">*</em></span>
+                <input type="text" id="hfPan" placeholder="ABCDE1234F" style="text-transform:uppercase;"></label>
+              <label class="form-field"><span>Current address <em class="req">*</em></span>
+                <textarea id="hfAddress" rows="2"></textarea>
+                <span class="mini-meta">Where you live now.</span></label>
+              <div class="form-field">
+                <span>Permanent address <em class="req">*</em></span>
+                <label style="display:flex;flex-direction:row;align-items:center;gap:8px;margin:4px 0 6px;cursor:pointer;">
+                  <input type="checkbox" id="hfSameAddress" style="width:auto;margin:0;">
+                  <span>Same as my current address</span>
+                </label>
+                <textarea id="hfPermanentAddress" rows="2"></textarea>
+                <span class="mini-meta">Your permanent/home address — the employment agreement needs both.</span>
+              </div>
+              <label class="form-field"><span>Bank — account holder name <em class="req">*</em></span>
+                <input type="text" id="hfBankName"></label>
+              <label class="form-field"><span>Bank — account number <em class="req">*</em></span>
+                <input type="text" id="hfBankNumber" inputmode="numeric"></label>
+              <label class="form-field"><span>Bank — IFSC code <em class="req">*</em></span>
+                <input type="text" id="hfIfsc" placeholder="HDFC0000123" style="text-transform:uppercase;"></label>
+              <div class="form-field">
+                <span id="hfSlipsLabel">Salary slips — from the start of the fiscal year to now</span>
+                <input type="file" id="hfSlips" multiple accept=".pdf,.jpg,.jpeg,.png">
+                <span class="mini-meta">Every month from the start of the fiscal year until your last salary. PDFs or photos are both fine.</span>
+                <div id="hfSlipsList"></div>
+                <label style="display:flex;flex-direction:row;align-items:center;gap:8px;margin-top:8px;cursor:pointer;">
+                  <input type="checkbox" id="hfNoSlips" style="width:auto;margin:0;">
+                  <span>I did not have salary slips</span>
+                </label>
+                <span class="mini-meta">Totally fine — first job, or your employer didn't issue them. Tick this and move on.</span>
+              </div>
+              <label class="form-field"><span>Anything we should know about your slips? (optional)</span>
+                <textarea id="hfSlipsNote" rows="2" placeholder="e.g. first job, previous employer didn't issue slips."></textarea></label>
+              <label class="form-field"><span>Income tax regime <em class="req">*</em></span>
+                <select id="hfTaxRegime">
+                  <option value="">Choose one</option>
+                  <option value="new">New regime</option>
+                  <option value="old">Old regime</option>
+                </select>
+                <span class="mini-meta">Not sure? Most people on the default choose New. This is for TDS on your salary.</span>
+              </label>
+              <label class="form-field hidden" id="hfTaxDeclWrap"><span>HRA / 80C / 80D declarations <em class="req">*</em></span>
+                <textarea id="hfTaxDecl" rows="3" placeholder="Your HRA (rent paid), 80C (investments) and 80D (medical insurance) declarations. Attach proofs with your salary slips above if you have them."></textarea></label>
+            </div>
+            <p id="hireFormNotice" class="mini-meta"></p>
+            <div class="action-row">
+              <button id="hireSubmitBtn" class="primary" type="button">Submit details</button>
+            </div>
+          </div></div>
+          <div class="panel hidden" id="hireDonePanel"><div>
+            <h3 id="hireDoneTitle">Details received ✓</h3>
+            <p class="mini-meta" id="hireDoneText"></p>
+            <!-- Shown once the hire's @youragency.com account exists: the Gmail
+                 they are signed in with is now the wrong door. Filled by
+                 renderHireChecklist() from hireSignInPrompt(). -->
+            <div id="hireSwitchCard" class="hidden" style="margin-top:14px;padding:14px 16px;border:1px solid var(--line-strong);border-left:3px solid var(--warn);border-radius:var(--radius-sm);">
+              <p id="hireSwitchTitle" style="margin:0 0 6px;font-weight:600;"></p>
+              <p id="hireSwitchText" class="mini-meta" style="margin:0 0 12px;line-height:1.5;"></p>
+              <button id="hireSwitchAccountBtn" class="primary" type="button">Sign out and use my Your Agency account</button>
+            </div>
+          </div></div>
+        </section>
+
+        <!-- Hiring: one checklist per hire, one owner per row (11 Sep
+             2026). Its own screen under Team rather than a panel inside the
+             directory. The #hiringPanel node is moved in here at load. -->
+        <section id="hiring" class="screen">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top"><p class="eyebrow">Team</p></div>
+            <h2>Hiring</h2>
+            <p class="mini-meta">Every open hire and where it stands. Each row has one owner; finishing it emails the next.</p>
+          </div>
+          <div id="hiringScreenSlot"></div>
+        </section>
+
+        <section id="hiring-only" class="screen hiring-crew-screen hidden">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow">New hire — Your Agency</p>
+            </div>
+            <p class="mini-meta">Contracts and paperwork for hires in progress. You're notified by email when a hire needs you.</p>
+          </div>
+          <div id="hiringOnlyPanelSlot"></div>
         </section>
 
         <section id="home-feed" class="screen">
@@ -99,6 +487,10 @@
             </div>
           </div>
           <div id="homeStatCards" class="home-stats"></div>
+          <!-- Streaks: their own full-width strip, like the birthday and
+               sustainability strips below. A stat card was too cramped to hold
+               a leaderboard as well (26 Aug 2026). -->
+          <div id="homeStreakPanel" class="hidden"></div>
           <div id="homeBirthdayPanel" class="birthday-panel hidden"></div>
           <div id="homeSustainabilityPanel" class="sus-cal-panel hidden"></div>
           <div id="homeFeedList" class="feed-list"></div>
@@ -172,15 +564,17 @@
               <input id="newTaskDescriptionInput" type="text" placeholder="Description / link (optional)" title="Paste a URL — it becomes a clickable link on the task" maxlength="200" />
               <select id="newTaskRepeatSelect" title="Repeat" aria-label="Repeat">
                 <option value="">One-time</option>
+                <option value="weekly">↻ Weekly</option>
                 <option value="monthly">↻ Monthly</option>
               </select>
               <select id="newTaskRepeatDay" class="hidden" aria-label="Day of month"></select>
+              <select id="newTaskRepeatWeekday" class="hidden" aria-label="Day of week"></select>
               <input id="newTaskDeadlineInput" type="date" class="hidden" />
               <button id="addWeeklyTaskBtn" class="primary" type="button">Add</button>
             </div>
             <details class="fr-archived-details" id="recurringTasksDetails">
               <summary><span style="cursor:pointer;">↻ Repeating tasks (<span id="recurringCount">0</span>)</span></summary>
-              <div id="recurringTasksList" style="margin-top:8px;"><p class="mini-meta">None yet — pick "↻ Monthly" when adding a task.</p></div>
+              <div id="recurringTasksList" style="margin-top:8px;"><p class="mini-meta">None yet — pick "↻ Weekly" or "↻ Monthly" when adding a task.</p></div>
             </details>
           </div>
 
@@ -266,7 +660,10 @@
               <tfoot>
                 <tr>
                   <td></td>
-                  <td><p id="allocSummary" class="status alloc-total">0%</p></td>
+                  <!-- Number and unit are separate so the total can sit
+                       directly under the column of right-aligned inputs, whose
+                       unit is likewise a positioned suffix. -->
+                  <td><p id="allocSummary" class="status alloc-total"><span id="allocSummaryValue">0</span><span id="allocSummaryUnit" class="alloc-total-unit">%</span></p></td>
                   <td colspan="3"></td>
                 </tr>
               </tfoot>
@@ -612,7 +1009,7 @@
               <div id="analyticsUploadInline" class="analytics-header-upload" style="display:none;">
                 <span id="analyticsDetectedType" class="analytics-detected-label" style="display:none;"></span>
                 <label for="analyticsFileInput" class="analytics-upload-label">📊 Upload</label>
-                <input type="file" id="analyticsFileInput" accept=".xls,.xlsx,.csv" hidden>
+                <input type="file" id="analyticsFileInput" accept=".xls,.xlsx,.csv,.docx" multiple hidden>
                 <span id="analyticsClientMeta" class="analytics-meta-sub"></span>
               </div>
             </div>
@@ -625,6 +1022,7 @@
             <button class="analytics-inner-tab active" data-analytics-tab="overview" type="button">Overview</button>
             <button class="analytics-inner-tab" data-analytics-tab="linkedin" type="button">LinkedIn</button>
             <button class="analytics-inner-tab" data-analytics-tab="instagram" type="button">Instagram</button>
+            <button class="analytics-inner-tab" data-analytics-tab="facebook" type="button">Facebook</button>
             <button class="analytics-inner-tab" data-analytics-tab="community" type="button">Community Pulse</button>
           </div>
 
@@ -635,7 +1033,23 @@
             <div id="analyticsTabPosts"></div>
           </div>
           <div class="analytics-tab-panel" id="analyticsTabInstagram"></div>
+          <div class="analytics-tab-panel" id="analyticsTabFacebook"></div>
           <div class="analytics-tab-panel" id="analyticsTabCommunity"></div>
+
+          <!-- Uploaded files (Rhea's request, 29 Jul 2026): every raw report
+               file ever uploaded for this client, from the storage bucket.
+               Read-only by design — deleting source files from a list view is
+               how analytics quietly stop being reproducible. -->
+          <div class="panel" id="uploadedFilesPanel" style="margin-top:var(--space-5);display:none;">
+            <button type="button" id="uploadedFilesToggle" style="all:unset;cursor:pointer;display:flex;justify-content:space-between;align-items:center;width:100%;">
+              <h3 style="margin:0;">📁 Uploaded files <span class="mini-meta" id="uploadedFilesCount"></span></h3>
+              <span class="insights-banner-chevron" id="uploadedFilesChevron">›</span>
+            </button>
+            <div id="uploadedFilesBody" style="display:none;margin-top:var(--space-3);">
+              <p class="mini-meta">Every report file uploaded for this client. Read-only — files can't be deleted from here.</p>
+              <div id="uploadedFilesList"></div>
+            </div>
+          </div>
         </section>
 
         <section id="client-scope-coverage" class="screen scope-coverage-only">
@@ -723,6 +1137,74 @@
               <p id="orgChartScope" class="mini-meta">Reporting structure based on leadership mapping.</p>
             </div>
             <div id="orgChartCanvas" class="org-chart-canvas"></div>
+          </div>
+
+          <!-- Hiring pipeline (crew only: Alex, Nadia + Leo, Blake).
+               For Leo's hiring-only login this node is relocated into
+               #hiring-only. Candidate PII lives here — crew eyes only. -->
+          <div class="panel hidden" id="hiringPanel">
+            <div>
+              <p class="hire-section-heading">New hire</p>
+              <div class="editor-bar action-row" id="hiringCreateBar">
+                <label class="inline-filter">Candidate name
+                  <input type="text" id="nhName" placeholder="First and last name">
+                </label>
+                <label class="inline-filter">Personal Gmail
+                  <input type="email" id="nhEmail" placeholder="name@example.com">
+                </label>
+                <label class="inline-filter">Start date
+                  <input type="date" id="nhStartDate">
+                </label>
+                <!-- The job title, at open: it goes into the agreement and onto
+                     their profile at first sign-in (15 Sep 2026). -->
+                <label class="inline-filter">Designation
+                  <input type="text" id="nhDesignation" placeholder="e.g. Senior Strategist">
+                </label>
+                <label class="inline-filter">Hire type
+                  <select id="nhType">
+                    <option value="full-time">Full-time</option>
+                    <option value="fractional">Fractional</option>
+                    <option value="consultant">Consultant</option>
+                  </select>
+                </label>
+                <!-- Compensation is known when a hire is opened (11 Sep
+                     2026) and is what Finance and Legal both work from. The
+                     label follows the type: CTC for employees, a monthly fee
+                     for anyone who invoices. -->
+                <label class="inline-filter"><span id="nhCompLabel">CTC (annual, ₹)</span>
+                  <input type="number" id="nhComp" min="0" step="1000" placeholder="e.g. 1200000">
+                </label>
+                <!-- Only two notice periods exist here, by decision (11 Sep 2026). -->
+                <label class="inline-filter">Notice period
+                  <select id="nhNotice">
+                    <option value="">— Select —</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                  </select>
+                </label>
+                <!-- Who they report to, set at open by whoever hires (Alex or
+                     Nadia). Copied onto their employee profile at first
+                     sign-in so the joiner never picks their own boss. -->
+                <label class="inline-filter">Reports to
+                  <select id="nhReportsTo"><option value="">— Select —</option></select>
+                </label>
+              </div>
+              <!-- Fractionals: tick any number now, none is fine; more can be
+                   added later from the hire's Details once they have joined. -->
+              <div class="form-field hidden" id="nhClientsWrap" style="margin:8px 0 0;">
+                <span>Clients they cover <span class="mini-meta">(tick any, add more later)</span></span>
+                <div class="check-grid" id="nhClients"></div>
+              </div>
+              <label class="form-field" style="margin:8px 0 10px;"><span>Scope of work</span>
+                <textarea id="nhScope" rows="2" placeholder="What this role covers — goes into the agreement."></textarea>
+              </label>
+              <div class="action-row" style="margin-bottom:6px;">
+                <button id="startHireBtn" class="primary" type="button">Open hire</button>
+              </div>
+              <p id="hiringNotice" class="mini-meta"></p>
+              <div id="hiringList"></div>
+              <p class="mini-meta" style="margin-top:16px;"><label style="display:inline-flex;align-items:center;gap:6px;"><input type="checkbox" id="hiringShowDone" style="width:auto;"> Show completed &amp; cancelled</label></p>
+            </div>
           </div>
 
           <div class="panel">
@@ -868,10 +1350,17 @@
                   <label>Full Name
                     <input id="profileNameInput" value="" maxlength="25" />
                   </label>
+                  <!-- Seeded from the hire's designation; leadership can change it. -->
+                  <label>Designation
+                    <input id="profileJobTitle" value="" maxlength="60" placeholder="—" />
+                  </label>
                   <label>Email
                     <input id="profileEmailInput" value="" readonly />
                   </label>
-                  <label>Department / Team
+                  <label class="leadership-only hidden">Department / Team
+                    <!-- Options are replaced at runtime from app.departments
+                         (loadDepartmentOptions). These are an offline fallback
+                         only — do NOT treat them as the team list. -->
                     <select id="profileTeamSelect">
                       <option selected>AM</option>
                       <option>Leadership</option>
@@ -881,17 +1370,19 @@
                       <option>Strategy</option>
                     </select>
                   </label>
-                  <label>Employment Type
+                  <label class="leadership-only hidden">Employment Type
                     <select id="profileEmploymentType">
                       <option value="full-time" selected>Full-time</option>
                       <option value="fractional">Fractional</option>
+                      <option value="consultant">Consultant</option>
                     </select>
                   </label>
                   <label>Birthday
                     <input id="profileBirthday" type="date" value="" />
                   </label>
-                  <label>City
-                    <input id="profileCity" placeholder="e.g. Mumbai" value="" />
+                  <label>Home city
+                    <select id="profileCity"></select>
+                    <small class="mini-meta" id="profileCityTzHint"></small>
                   </label>
                   <label class="leadership-only hidden">Reports To
                     <select id="profileManagerSelect">
@@ -905,7 +1396,7 @@
                       <option value="admin">Admin</option>
                     </select>
                   </label>
-                  <label>Capacity %
+                  <label class="leadership-only hidden">Capacity %
                     <input id="profileCapacityInput" value="100" />
                   </label>
                 </div>
@@ -993,7 +1484,7 @@
               </table>
 
               <div class="editor-bar action-row">
-                <input type="email" id="newOverrideEmail" placeholder="user@youragency.com" aria-label="Override email">
+                <input type="email" id="newOverrideEmail" placeholder="name@youragency.com" aria-label="Override email">
                 <select id="newOverrideRole" aria-label="Override role">
                   <option value="leadership">Leadership</option>
                   <option value="admin">Admin</option>
@@ -1039,6 +1530,14 @@
               <p class="mini-meta">Visibility lists and approver/manager routing that used to be hardcoded. Superadmin-only. Each list/map falls back to a built-in default until you customise it; clearing the last entry restores that default. Changes take effect on each user's next page load.</p>
               <div id="appConfigEditors"><p class="mini-meta">Loading…</p></div>
               <p id="appConfigNotice" class="mini-meta"></p>
+            </div>
+          </div>
+
+          <!-- New joiners awaiting setup (approvers only: Alex + Nadia) -->
+          <div class="panel" id="pendingSetupPanel" style="display:none;">
+            <div>
+              <h3>Awaiting Setup</h3>
+              <div id="pendingSetupList"></div>
             </div>
           </div>
 
@@ -1172,6 +1671,84 @@
         </section>
 
         <!-- ── Deal Flow / BD Pipeline ── -->
+        <section id="briefs-pipeline" class="screen">
+          <div class="screen-head screen-head-tight">
+            <div class="screen-head-top">
+              <p class="eyebrow">Briefs — Example Collective</p>
+              <label class="mini-meta" style="display:inline-flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="briefAssignedToMe" style="width:auto;"> Assigned to me
+              </label>
+            </div>
+            <p class="mini-meta" id="briefBoardMeta"></p>
+          </div>
+          <!-- Above the board, not inside it: .deal-board is a horizontally
+               scrolling flex row, so a banner placed in it becomes a column. -->
+          <div id="briefWaitingBanner"></div>
+          <div id="briefQuickLane"></div>
+          <div id="briefBoard" class="deal-board"></div>
+          <div id="briefDrawer" class="hidden"></div>
+
+          <!-- the client stakeholder map (org_contacts) — shared with partners; the
+               panel node relocates to the partner screen for partner sessions. -->
+          <div class="panel hidden" id="orgContactsPanel">
+            <div>
+              <h3 id="orgContactsTitle">Client stakeholders</h3>
+              <p class="mini-meta">The client's own team — who owns what, who covers whom. Editable by the client's team (and Your Agency's brief reviewers).</p>
+              <div id="orgContactsList"></div>
+              <div class="editor-bar action-row" id="orgContactsForm">
+                <input type="text" id="ocName" placeholder="Full name" aria-label="Name">
+                <input type="text" id="ocRole" placeholder="Team / role" aria-label="Team or role">
+                <input type="email" id="ocEmail" placeholder="Email" aria-label="Email">
+                <input type="text" id="ocOversees" placeholder="Oversees (team/people)" aria-label="Oversees">
+                <input type="text" id="ocBackup" placeholder="In their absence, contact…" aria-label="Backup contact">
+                <select id="ocReportsTo" aria-label="Reports to" style="width:auto;"><option value="">Reports to…</option></select>
+                <button id="ocSaveBtn" class="primary" type="button">Add</button>
+                <button id="ocCancelBtn" class="ghost small hidden" type="button">Cancel</button>
+              </div>
+              <p id="orgContactsNotice" class="mini-meta"></p>
+            </div>
+          </div>
+
+          <!-- Partners (invite-only external users) — managed by the account
+               leads (brief reviewers: Rhea, Mara) + leadership. -->
+          <div class="panel hidden" id="partnersAdminPanel">
+            <div>
+              <h3>Partners</h3>
+              <p class="mini-meta">Client-side collaborators with a Colony login. Invite-only: sign-in works only after their exact email is added here (any domain — it just needs to be a Google account). Partners see only the partner surface — no internal Colony data. Deactivate stops their sign-in immediately.</p>
+              <table class="m-card-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Org</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="partnersAdminTableBody">
+                  <tr><td colspan="6">Loading…</td></tr>
+                </tbody>
+              </table>
+              <div class="editor-bar action-row">
+                <input type="text" id="newPartnerName" placeholder="Full name" aria-label="Partner name">
+                <input type="email" id="newPartnerEmail" placeholder="email@org.com" aria-label="Partner email">
+                <input type="text" id="newPartnerOrg" placeholder="Org" value="Example Collective" aria-label="Partner org">
+                <!-- Options are rebuilt from PARTNER_ROLE_OPTIONS in app.js so
+                     this bar and the per-row role editor cannot drift apart.
+                     These are the no-JS fallback and the initial value. -->
+                <select id="newPartnerRole" aria-label="Partner role">
+                  <option value="submitter">Submitter</option>
+                  <option value="coordinator">Coordinator</option>
+                  <option value="client_viewer">Client viewer</option>
+                </select>
+                <button id="addPartnerBtn" class="primary" type="button">Add partner</button>
+              </div>
+              <p id="partnersAdminNotice" class="mini-meta"></p>
+            </div>
+          </div>
+        </section>
+
         <section id="bd-pipeline" class="screen">
           <div class="screen-head">
             <div class="screen-head-top">
@@ -1183,7 +1760,6 @@
                 <select class="deal-company-select" id="dealCompanySelect">
                   <option value="Your Agency">Your Agency</option>
                   <option value="Varta">Varta</option>
-                  <option value="Sample Client">Sample Client</option>
                 </select>
               </div>
               <div class="deal-flow-header-actions">
@@ -1276,7 +1852,13 @@
                 <span class="policy-version-badge" id="policyPageVersion"></span>
                 <span class="mini-meta" id="policyPageUpdated"></span>
               </div>
-              <button id="policyEditBtn" class="ghost" style="display:none;">Edit</button>
+              <div class="policy-page-actions">
+                <!-- A copy of the page lives in Alex's Drive (14 Sep 2026); the
+                     link appears once it has been made, the button remakes it. -->
+                <a id="policyDriveLink" class="mini-meta" target="_blank" rel="noopener" style="display:none;">Copy in Drive ↗</a>
+                <button id="policyDriveSyncBtn" class="ghost" style="display:none;">Copy to Drive</button>
+                <button id="policyEditBtn" class="ghost" style="display:none;">Edit</button>
+              </div>
             </div>
             <div id="policyPageContent" class="policy-page-content"></div>
             <!-- Edit mode (admin only) -->
@@ -1292,7 +1874,7 @@
             <!-- Version history (admin only) -->
             <div id="policyVersionHistory" style="display:none;">
               <h3>Version History</h3>
-              <p class="mini-meta">Only visible to you and the AM lead.</p>
+              <p class="mini-meta">Only visible to you and Nadia.</p>
               <div id="policyVersionList"></div>
             </div>
           </div>
@@ -1302,7 +1884,7 @@
           <span id="footerVersion">Colony</span>
           <div class="footer-links">
             <a href="#feature-requests" class="footer-link" id="featureRequestsFooterLink">Bugs & Features</a>
-            <span class="footer-sep">|</span>
+            <span class="footer-sep" id="footerPolicySep">|</span>
             <a href="#policy" class="footer-link" id="footerPolicyRemoteWork">Remote Work Policy</a>
           </div>
         </footer>
@@ -1339,15 +1921,30 @@
         <h2>Complete Your Profile</h2>
         <p class="onboarding-intro">Fill in these details so the team knows who you are.</p>
         <div class="onboarding-form">
+          <label><span>Your full name <span class="required">*</span></span>
+            <input type="text" id="onbProfileFullName" placeholder="First and last name" />
+            <span class="mini-meta">As it should appear across Colony — first and last name, not just your first name.</span>
+          </label>
           <label><span>Manager <span class="required">*</span></span>
             <select id="onbProfileManager"><option value="">Select your manager</option></select>
-            <span class="mini-meta">If you're unsure, ask the AM lead at am-lead@youragency.com</span>
+            <span class="mini-meta">If you're unsure, ask Nadia at am-lead@youragency.com</span>
           </label>
-          <label><span>Department <span class="required">*</span></span>
+          <label><span>Team <span class="required">*</span></span>
             <select id="onbProfileDept"></select>
+            <span class="mini-meta">Nadia or Alex will confirm this when they set you up.</span>
           </label>
-          <label><span>City <span class="required">*</span></span>
-            <input type="text" id="onbProfileCity" placeholder="e.g. Mumbai, Delhi, Goa" />
+          <label><span>How do you work with Your Agency? <span class="required">*</span></span>
+            <select id="onbProfileEmploymentType">
+              <option value="">Choose one</option>
+              <option value="full-time">Full-time</option>
+              <option value="fractional">Fractional</option>
+              <option value="consultant">Consultant</option>
+            </select>
+            <span class="mini-meta">Fractional means you're with us for specific clients or projects, not full-time. Consultant means you're with us full-time but invoice us rather than being on payroll. Someone will set up your access once you're done here.</span>
+          </label>
+          <label><span>Home city <span class="required">*</span></span>
+            <select id="onbProfileCity"></select>
+            <span class="mini-meta">Where you're based — this sets your timezone, so Colony emails you at 11 AM your time. Keep it current if you move.</span>
           </label>
           <label><span>Birthday <span class="required">*</span></span>
             <input type="date" id="onbProfileBirthday" />
@@ -1356,7 +1953,30 @@
             <input type="text" id="onbProfileEmergencyName" placeholder="Full name" />
           </label>
           <label><span>Emergency Contact Phone <span class="required">*</span></span>
-            <input type="tel" id="onbProfileEmergencyPhone" placeholder="+91 XXXXX XXXXX" />
+            <div style="display:flex;gap:8px;">
+              <select id="onbProfileEmergencyCode" style="width:auto;flex:0 0 auto;">
+                <option value="+91" selected>🇮🇳 +91</option>
+                <option value="+1">🇺🇸 +1</option>
+                <option value="+44">🇬🇧 +44</option>
+                <option value="+61">🇦🇺 +61</option>
+                <option value="+64">🇳🇿 +64</option>
+                <option value="+65">🇸🇬 +65</option>
+                <option value="+81">🇯🇵 +81</option>
+                <option value="+971">🇦🇪 +971</option>
+                <option value="+49">🇩🇪 +49</option>
+                <option value="+33">🇫🇷 +33</option>
+                <option value="+34">🇪🇸 +34</option>
+                <option value="+351">🇵🇹 +351</option>
+                <option value="+27">🇿🇦 +27</option>
+                <option value="+254">🇰🇪 +254</option>
+                <option value="+234">🇳🇬 +234</option>
+                <option value="+94">🇱🇰 +94</option>
+                <option value="+977">🇳🇵 +977</option>
+                <option value="+880">🇧🇩 +880</option>
+              </select>
+              <input type="tel" id="onbProfileEmergencyNumber" placeholder="Number (digits only)" style="flex:1;" />
+            </div>
+            <span class="mini-meta">Pick the country code, then the number without the code.</span>
           </label>
         </div>
         <p id="onbProfileError" class="status error" style="display:none;"></p>
@@ -1390,15 +2010,21 @@
   <script src="vendor/xlsx.js?v=20260409a"></script>
   <script src="vendor/chart.js?v=20260409a"></script>
   <script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
-  <script src="version.js" onerror="window.COLONY_VERSION='dev'"></script>
-  <script src="js/config.js?v=20260409a"></script>
+  <!-- ?v= is rewritten to the git hash by the Netlify build (like every other
+       asset). Without it, version.js sits in the browser's immutable cache for
+       a year and every fresh page load reports a STALE version — which made
+       the deploy watcher nag "updated, refresh" forever on current code. -->
+  <script src="version.js?v=dev0" onerror="window.APP_VERSION='dev'"></script>
   <script src="js/utils.js?v=20260409a"></script>
   <script src="js/access.js?v=20260409a"></script>
   <script src="js/tasks.js?v=20260409a"></script>
   <script src="js/leave.js?v=20260409a"></script>
   <script src="js/alloc.js?v=20260409a"></script>
+  <script src="js/streaks.js?v=20260409a"></script>
   <script src="js/notify.js?v=20260409a"></script>
   <script src="js/analytics.js?v=20260409a"></script>
+  <script src="js/briefs.js?v=20260409a"></script>
+  <script src="js/hires.js?v=20260409a"></script>
   <script src="js/modal.js?v=20260409a"></script>
   <script src="app.js?v=20260409a"></script>
 </body>

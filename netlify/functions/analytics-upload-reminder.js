@@ -1,7 +1,7 @@
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
 const { logNotification, withCronHeartbeat } = require('./lib/notifications');
-const { formatDateInIST, formatDateTimeInIST, getConfig } = require('./lib/config');
+const { formatDateInIST, formatDateTimeInIST, getConfig, zonedParts, IST_TIME_ZONE } = require('./lib/config');
 
 function escapeHtml(value) {
   return String(value || '')
@@ -40,10 +40,13 @@ const run = async (event) => {
   // "pending" when it has no analytics upload since Monday 00:00 IST. Each
   // pending client is reported to its account owner; project/pitch clients
   // don't have a weekly-report expectation and are never nagged about.
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIst = new Date(runAt.getTime() + IST_OFFSET_MS);
-  const daysSinceMonday = (nowIst.getUTCDay() + 6) % 7;
-  const mondayIst = Date.UTC(nowIst.getUTCFullYear(), nowIst.getUTCMonth(), nowIst.getUTCDate() - daysSinceMonday);
+  // Agency clock: "this reporting week" is one shared week, not per-person.
+  // No hand-rolled offset here on purpose — applying one to mondayIst is
+  // exactly the bug that made the freshness cutoff a day early (see below).
+  const nowIst = zonedParts(runAt, IST_TIME_ZONE);
+  const [istYear, istMonth, istDayOfMonth] = nowIst.iso.split('-').map(Number);
+  const daysSinceMonday = (nowIst.day + 6) % 7;
+  const mondayIst = Date.UTC(istYear, istMonth - 1, istDayOfMonth - daysSinceMonday);
 
   const [clientsRes, uploadsRes] = await Promise.all([
     supabase
@@ -69,7 +72,7 @@ const run = async (event) => {
 
   // Staleness = what the DATA covers (data_through, computed from report
   // contents), never the upload-click timestamp — uploaded_at lies both ways
-  // (frozen stamps under fresh data: Helix Labs Jul 2026; fresh re-upload of an old
+  // (frozen stamps under fresh data: Example Materials Jul 2026; fresh re-upload of an old
   // file). uploaded_at only as fallback for rows predating the column.
   const coverageByClient = new Map();
   (uploadsRes.data || []).forEach((u) => {
@@ -90,13 +93,21 @@ const run = async (event) => {
   };
 
   // Group pending clients by owner. Clients with no active owner fall back to
-  // the AM lead (AM lead) so nothing goes unwatched.
+  // Nadia (AM lead) so nothing goes unwatched.
   const FALLBACK_OWNER_EMAIL = 'am-lead@youragency.com';
   const byOwner = new Map();
   // Fresh = the data covers LAST week: coverage end on/after the previous
   // Monday. (A Monday upload of last week's report has data_through around
   // Sat/Sun — that must count as fresh, so we compare against weekStart - 7d.)
-  const prevMondayIso = new Date(mondayIst - 7 * 86400000 - IST_OFFSET_MS).toISOString().slice(0, 10);
+  // mondayIst is already a FLOATING date pinned to 00:00 UTC (built with
+  // Date.UTC from IST y/m/d parts), so it must not be offset again. The old
+  // version subtracted IST_OFFSET_MS a second time before slicing the UTC date,
+  // which walked the cutoff back an extra day — for the week of Mon 13 Jul it
+  // yielded 05 Jul instead of 06 Jul. The bug was LENIENT (a client whose data
+  // ended the Sunday before last week still counted as fresh), so correcting it
+  // can only ever ADD reminders. Checked against live coverage before changing
+  // it: no client sits in the one-day gap, so no owner is newly nagged today.
+  const prevMondayIso = new Date(mondayIst - 7 * 86400000).toISOString().slice(0, 10);
   for (const client of retainers) {
     const coverage = coverageByClient.get(client.id) || null;
     if (coverage && coverage >= prevMondayIso) continue; // covers last week
@@ -108,7 +119,7 @@ const run = async (event) => {
     if (!byOwner.has(key)) {
       byOwner.set(key, {
         email: ownerOk ? owner.email : FALLBACK_OWNER_EMAIL,
-        firstName: ownerOk ? (owner.full_name || 'there').split(' ')[0] : 'the AM lead',
+        firstName: ownerOk ? (owner.full_name || 'there').split(' ')[0] : 'Nadia',
         employeeId: ownerOk ? owner.id : null,
         clients: []
       });

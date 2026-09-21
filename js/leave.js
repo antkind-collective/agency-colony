@@ -1,4 +1,4 @@
-/* ── Colony leave logic: pure helpers ──
+/* ── Your Agency leave logic: pure helpers ──
    Classic script — loads after utils.js, before app.js. PURE ONLY: no DOM,
    no `state`, no Supabase. The heavy balance math (cycle rollover, taken/
    applied tallies) lives in DB RPCs; this module owns the client-side rules:
@@ -7,7 +7,7 @@
 
    Leave types: PL (8) / CL (8) / SL (12) per Apr-Mar fiscal year. */
 
-// POLICY (the superadmin, 12 Jun 2026): leave costs CALENDAR days, inclusive — a
+// POLICY (12 Jun 2026): leave costs CALENDAR days, inclusive — a
 // Fri→Mon leave is 4 days; weekends/holidays inside the range count.
 // Mirrors app.overlap_days in the DB (the balance math).
 function calendarDayCount(startDate, endDate) {

@@ -366,32 +366,6 @@
     "confirmed": true
   },
   {
-    "id": "world-meteorological-day-2026",
-    "name": "World Meteorological Day",
-    "emoji": "🌤️",
-    "start_date": "2026-03-23",
-    "end_date": "2026-03-23",
-    "duration_type": "day",
-    "category": "un_international_day",
-    "themes": [
-      "climate",
-      "weather",
-      "science"
-    ],
-    "region": "global",
-    "region_detail": null,
-    "organiser": "World Meteorological Organization",
-    "description": "Highlights the role of meteorological and climate services in disaster preparedness, agriculture, and everyday life.",
-    "content_hook": "Climate data storytelling — connect weather extremes to the need for climate adaptation and early warning systems.",
-    "relevance_tags": [
-      "climate_science",
-      "weather_extremes",
-      "adaptation"
-    ],
-    "url": "https://wmo.int/world-meteorological-day",
-    "confirmed": true
-  },
-  {
     "id": "ceraweek-2026",
     "name": "CERAWeek",
     "emoji": "🛢️",
@@ -415,6 +389,32 @@
       "corporate_strategy"
     ],
     "url": "https://ceraweek.com/",
+    "confirmed": true
+  },
+  {
+    "id": "world-meteorological-day-2026",
+    "name": "World Meteorological Day",
+    "emoji": "🌤️",
+    "start_date": "2026-03-23",
+    "end_date": "2026-03-23",
+    "duration_type": "day",
+    "category": "un_international_day",
+    "themes": [
+      "climate",
+      "weather",
+      "science"
+    ],
+    "region": "global",
+    "region_detail": null,
+    "organiser": "World Meteorological Organization",
+    "description": "Highlights the role of meteorological and climate services in disaster preparedness, agriculture, and everyday life.",
+    "content_hook": "Climate data storytelling — connect weather extremes to the need for climate adaptation and early warning systems.",
+    "relevance_tags": [
+      "climate_science",
+      "weather_extremes",
+      "adaptation"
+    ],
+    "url": "https://wmo.int/world-meteorological-day",
     "confirmed": true
   },
   {
@@ -496,6 +496,32 @@
     "confirmed": true
   },
   {
+    "id": "india-ndc-2035",
+    "name": "India's 2035 NDC — submitted April 2026",
+    "emoji": "🇮🇳",
+    "start_date": "2026-04-01",
+    "end_date": "2026-04-30",
+    "duration_type": "month",
+    "category": "policy_regulatory",
+    "themes": [
+      "net_zero",
+      "policy",
+      "targets"
+    ],
+    "region": "india",
+    "region_detail": "India → UNFCCC",
+    "organiser": "Government of India",
+    "description": "Already submitted; no NDC moment remains in 2026. Targets: reduce emissions intensity of GDP 47% by 2035 from 2005 levels; ~60% cumulative electric power installed capacity from non-fossil sources by 2035; carbon sink of 3.5-4.0 billion tonnes CO2e through forest and tree cover by 2035. Baseline stated in the submission: non-fossil capacity was 52.57% as at 28 February 2026.",
+    "content_hook": "The 60%-by-2035 target sits only about 7.5 points above where India already stands. 'Is this ambition or arithmetic?' is the live debate and it will be re-litigated at COP31 Antalya in November. Have a client position ready before then.",
+    "relevance_tags": [
+      "ndc",
+      "india_targets",
+      "cop31"
+    ],
+    "url": "https://unfccc.int/sites/default/files/2026-04/INDIA%20NDC%202031-35.pdf",
+    "confirmed": true
+  },
+  {
     "id": "world-health-day-2026",
     "name": "World Health Day",
     "emoji": "🏥",
@@ -539,7 +565,7 @@
     "region_detail": "San Francisco Bay Area, CA, USA",
     "organiser": "Climatebase / City of San Francisco",
     "description": "Decentralised week-long gathering — 25,000+ attendees, 650+ events across the Bay Area. Connects climate tech, policy, business, art, and community action.",
-    "content_hook": "Directly relevant for Sample Client (SF-based). Opportunity to attend, host side events, or create content around Bay Area climate innovation and startup culture.",
+    "content_hook": "Directly relevant for EXAMPLE WELLNESS (SF-based). Opportunity to attend, host side events, or create content around Bay Area climate innovation and startup culture.",
     "relevance_tags": [
       "climate_tech",
       "bay_area",
@@ -604,6 +630,32 @@
     "confirmed": true
   },
   {
+    "id": "just-transition-fossil-fuels-conference-2026",
+    "name": "International Conference on Just Transition Away from Fossil Fuels",
+    "emoji": "⛽",
+    "start_date": "2026-04-28",
+    "end_date": "2026-04-29",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "energy_transition",
+      "just_transition",
+      "fossil_fuels"
+    ],
+    "region": "latam",
+    "region_detail": "Santa Marta, Colombia",
+    "organiser": "Government of Colombia / international partners",
+    "description": "Landmark gathering uniting governments and experts to push concrete action toward a just, coordinated phase-out of fossil fuels ahead of COP31.",
+    "content_hook": "LATAM climate leadership moment. Relevant for Example Fashion (Ecuador) — regional energy transition narratives and South American climate policy signals.",
+    "relevance_tags": [
+      "fossil_fuel_phaseout",
+      "latam_policy",
+      "just_transition"
+    ],
+    "url": null,
+    "confirmed": true
+  },
+  {
     "id": "world-day-safety-health-work-2026",
     "name": "World Day for Safety and Health at Work",
     "emoji": "🦺",
@@ -627,32 +679,6 @@
       "green_jobs"
     ],
     "url": "https://www.ilo.org/global/topics/safety-and-health-at-work/events-training/events-meetings/safeday2026/lang--en/index.htm",
-    "confirmed": true
-  },
-  {
-    "id": "just-transition-fossil-fuels-conference-2026",
-    "name": "International Conference on Just Transition Away from Fossil Fuels",
-    "emoji": "⛽",
-    "start_date": "2026-04-28",
-    "end_date": "2026-04-29",
-    "duration_type": "event",
-    "category": "conference",
-    "themes": [
-      "energy_transition",
-      "just_transition",
-      "fossil_fuels"
-    ],
-    "region": "latam",
-    "region_detail": "Santa Marta, Colombia",
-    "organiser": "Government of Colombia / international partners",
-    "description": "Landmark gathering uniting governments and experts to push concrete action toward a just, coordinated phase-out of fossil fuels ahead of COP31.",
-    "content_hook": "LATAM climate leadership moment — regional energy transition narratives and South American climate policy signals.",
-    "relevance_tags": [
-      "fossil_fuel_phaseout",
-      "latam_policy",
-      "just_transition"
-    ],
-    "url": null,
     "confirmed": true
   },
   {
@@ -760,6 +786,32 @@
     "confirmed": true
   },
   {
+    "id": "lacs-2026",
+    "name": "Latin America Climate Summit (LACS)",
+    "emoji": "🌎",
+    "start_date": "2026-06-02",
+    "end_date": "2026-06-04",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "carbon_markets",
+      "climate_finance",
+      "latam_policy"
+    ],
+    "region": "latam",
+    "region_detail": "Monterrey, Nuevo León, Mexico",
+    "organiser": "IETA (International Emissions Trading Association), hosted by Secretaría de Medio Ambiente de Nuevo León",
+    "description": "DATE CORRECTED — this already happened. LACS 2026 ran 2-4 June 2026 at EGADE Business School / Escuela de Gobierno, Tec de Monterrey. The previous 'August 2026' entry was a placeholder, not a real date.",
+    "content_hook": "Directly relevant for Example Fashion (Ecuador). LATAM carbon market developments, climate finance signals, and regional policy direction.",
+    "relevance_tags": [
+      "carbon_markets",
+      "latam",
+      "climate_finance"
+    ],
+    "url": "https://www.ieta.org/events/latin-america-climate-summit",
+    "confirmed": true
+  },
+  {
     "id": "world-environment-day-2026",
     "name": "World Environment Day",
     "emoji": "🌿",
@@ -784,6 +836,32 @@
       "global_outreach"
     ],
     "url": "https://www.worldenvironmentday.global/",
+    "confirmed": true
+  },
+  {
+    "id": "unfccc-sb64-2026",
+    "name": "UNFCCC Subsidiary Bodies (SB64)",
+    "emoji": "🏛️",
+    "start_date": "2026-06-08",
+    "end_date": "2026-06-18",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "climate",
+      "policy",
+      "negotiations"
+    ],
+    "region": "global",
+    "region_detail": "Bonn, Germany",
+    "organiser": "UNFCCC",
+    "description": "Technical climate negotiation sessions setting the agenda for COP31. Present in the April copy of this file, dropped from the June copy — restored for a complete year record.",
+    "content_hook": "Past event. Negotiation signals from Bonn are the best early read on what COP31 Antalya will actually deliver.",
+    "relevance_tags": [
+      "unfccc",
+      "pre_cop",
+      "climate_negotiations"
+    ],
+    "url": "https://unfccc.int/",
     "confirmed": true
   },
   {
@@ -894,32 +972,6 @@
     "confirmed": true
   },
   {
-    "id": "sustainable-gastronomy-day-2026",
-    "name": "Sustainable Gastronomy Day",
-    "emoji": "🍲",
-    "start_date": "2026-06-18",
-    "end_date": "2026-06-18",
-    "duration_type": "day",
-    "category": "un_international_day",
-    "themes": [
-      "food",
-      "culture",
-      "sustainability"
-    ],
-    "region": "global",
-    "region_detail": null,
-    "organiser": "United Nations",
-    "description": "Celebrates food traditions that are sustainable, promoting local ingredients, reduced waste, and cultural food heritage.",
-    "content_hook": "Local food systems, farm-to-table, and cultural food traditions. Engaging lifestyle content that connects food to sustainability.",
-    "relevance_tags": [
-      "sustainable_food",
-      "local_sourcing",
-      "food_culture"
-    ],
-    "url": "https://www.un.org/en/observances/sustainable-gastronomy-day",
-    "confirmed": true
-  },
-  {
     "id": "climate-week-london-2026",
     "name": "Climate Week London / World Conference on Climate Change & Sustainability",
     "emoji": "🇬🇧",
@@ -947,6 +999,32 @@
     "confirmed": true
   },
   {
+    "id": "sustainable-gastronomy-day-2026",
+    "name": "Sustainable Gastronomy Day",
+    "emoji": "🍲",
+    "start_date": "2026-06-18",
+    "end_date": "2026-06-18",
+    "duration_type": "day",
+    "category": "un_international_day",
+    "themes": [
+      "food",
+      "culture",
+      "sustainability"
+    ],
+    "region": "global",
+    "region_detail": null,
+    "organiser": "United Nations",
+    "description": "Celebrates food traditions that are sustainable, promoting local ingredients, reduced waste, and cultural food heritage.",
+    "content_hook": "Local food systems, farm-to-table, and cultural food traditions. Engaging lifestyle content that connects food to sustainability.",
+    "relevance_tags": [
+      "sustainable_food",
+      "local_sourcing",
+      "food_culture"
+    ],
+    "url": "https://www.un.org/en/observances/sustainable-gastronomy-day",
+    "confirmed": true
+  },
+  {
     "id": "trellis-impact-2026",
     "name": "Trellis Impact 2026",
     "emoji": "🌉",
@@ -964,7 +1042,7 @@
     "region_detail": "San Francisco, CA, USA",
     "organiser": "Trellis",
     "description": "Major sustainability business conference at Moscone West — 500+ speakers, 4,000+ attendees covering carbon, energy, circular economy, and climate tech.",
-    "content_hook": "Another SF moment for Sample Client. Track trends in corporate sustainability, climate tech, and carbon removal for content ideas and networking.",
+    "content_hook": "Another SF moment for EXAMPLE WELLNESS. Track trends in corporate sustainability, climate tech, and carbon removal for content ideas and networking.",
     "relevance_tags": [
       "climate_tech",
       "corporate_sustainability",
@@ -1017,7 +1095,7 @@
     "region_detail": null,
     "organiser": "UNESCO",
     "description": "Raises awareness of mangrove ecosystems and their role in coastal resilience, blue carbon storage, and marine biodiversity.",
-    "content_hook": "Blue carbon and coastal resilience angle — mangroves as critical coastal ecosystems.",
+    "content_hook": "Blue carbon and coastal resilience angle. Directly relevant for Ecuador (Example Fashion) — mangroves are critical ecosystems along Ecuador's coast.",
     "relevance_tags": [
       "mangroves",
       "blue_carbon",
@@ -1025,32 +1103,6 @@
     ],
     "url": "https://www.worldmangroveday.org/",
     "confirmed": true
-  },
-  {
-    "id": "lacs-2026",
-    "name": "Latin America Climate Summit (LACS)",
-    "emoji": "🌎",
-    "start_date": "2026-08-01",
-    "end_date": "2026-08-31",
-    "duration_type": "event",
-    "category": "conference",
-    "themes": [
-      "carbon_markets",
-      "climate_finance",
-      "latam_policy"
-    ],
-    "region": "latam",
-    "region_detail": "Monterrey, Mexico",
-    "organiser": "IETA",
-    "description": "Premier gathering for carbon market practitioners in Latin America and Caribbean — 800+ delegates on carbon pricing, climate finance, and market cooperation.",
-    "content_hook": "LATAM carbon market developments, climate finance signals, and regional policy direction.",
-    "relevance_tags": [
-      "carbon_markets",
-      "latam",
-      "climate_finance"
-    ],
-    "url": "https://www.ieta.org/events/latin-america-climate-summit",
-    "confirmed": false
   },
   {
     "id": "intl-day-indigenous-peoples-2026",
@@ -1076,6 +1128,261 @@
       "land_stewardship"
     ],
     "url": "https://www.un.org/en/observances/indigenous-day",
+    "confirmed": true
+  },
+  {
+    "id": "india-bioenergy-expo-2026",
+    "name": "India Bio Energy & Tech Expo 2026",
+    "emoji": "🌾",
+    "start_date": "2026-08-11",
+    "end_date": "2026-08-13",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "bioenergy",
+      "waste_to_energy",
+      "biofuels"
+    ],
+    "region": "india",
+    "region_detail": "Greater Noida, India Expo Centre & Mart",
+    "organiser": "Indian Federation of Green Energy (IFGE) with MM Activ, co-organised by UPNEDA",
+    "description": "3rd edition. The only large bioenergy and compressed biogas trade platform in the Aug-Dec window.",
+    "content_hook": "Biofuels, biogas and waste-to-energy clients. CBG is under-covered relative to solar — easier earned media.",
+    "relevance_tags": [
+      "bioenergy",
+      "cbg",
+      "waste_to_energy"
+    ],
+    "url": "https://ibetexpo.com/",
+    "confirmed": true
+  },
+  {
+    "id": "monsoon-session-ends-2026",
+    "name": "Indian Parliament — Monsoon Session ends",
+    "emoji": "🏛️",
+    "start_date": "2026-08-13",
+    "end_date": "2026-08-13",
+    "duration_type": "day",
+    "category": "policy_regulatory",
+    "themes": [
+      "policy",
+      "governance"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi",
+    "organiser": "Parliament of India",
+    "description": "Monsoon Session ran 20 July - 13 August 2026, 19 sittings. No climate, environment or energy bills were listed for this session.",
+    "content_hook": "Question Hour written answers are the year's most quotable source of official Indian climate data — CCTS entity counts, NCAP spend, RE capacity. Mine them.",
+    "relevance_tags": [
+      "parliament",
+      "india_policy",
+      "climate_data"
+    ],
+    "url": "https://prsindia.org/sessiontrack/monsoon-session-2026/session-alert",
+    "confirmed": true
+  },
+  {
+    "id": "unccd-cop17-2026",
+    "name": "UNCCD COP17 — Land/Desertification Conference",
+    "emoji": "🏜️",
+    "start_date": "2026-08-17",
+    "end_date": "2026-08-28",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "land",
+      "desertification",
+      "drought",
+      "climate_adaptation"
+    ],
+    "region": "global",
+    "region_detail": "Ulaanbaatar, Mongolia",
+    "organiser": "UNCCD Secretariat, hosted by the Government of Mongolia",
+    "description": "DATE CORRECTED — and it is imminent. UNCCD COP17 runs 17-28 August 2026 in Ulaanbaatar, Mongolia, not November. Source: unccd.int, 'will be hosted by Mongolia in its capital city, Ulaanbaatar, from 17 to 28 August 2026'.",
+    "content_hook": "Land degradation, drought and desertification — directly relevant to agri-tech and regenerative-agriculture clients. Ten days out: too late for attendance, right on time for commentary.",
+    "relevance_tags": [
+      "land_degradation",
+      "drought",
+      "triple_cop"
+    ],
+    "url": "https://www.unccd.int/cop17",
+    "confirmed": true
+  },
+  {
+    "id": "akshay-urja-diwas-2026",
+    "name": "Akshay Urja Diwas / National Renewable Energy Day",
+    "emoji": "☀️",
+    "start_date": "2026-08-20",
+    "end_date": "2026-08-20",
+    "duration_type": "day",
+    "category": "awareness_campaign",
+    "themes": [
+      "renewables",
+      "energy"
+    ],
+    "region": "india",
+    "region_detail": "India",
+    "organiser": "State renewable energy development agencies (historically MNRE)",
+    "description": "CAUTION: no current MNRE or PIB page confirms this is still an official Government of India observance. It originated as Rajiv Gandhi Akshay Urja Diwas and is now mainly carried by state agencies. Politically sensitive origin.",
+    "content_hook": "Already on Your Agency's own content calendar for 20 Aug (Renewable Energy Day: India). Treat as an observed date, not an official one — do not attribute it to MNRE without checking.",
+    "relevance_tags": [
+      "renewables",
+      "india_observance",
+      "unverified_status"
+    ],
+    "url": "https://mnre.gov.in/",
+    "confirmed": false
+  },
+  {
+    "id": "delhi-water-expo-2026",
+    "name": "Delhi Water Expo 2026",
+    "emoji": "💧",
+    "start_date": "2026-08-20",
+    "end_date": "2026-08-22",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "water",
+      "infrastructure"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi, Hall 12A, ITPO, Pragati Maidan",
+    "organiser": "Water Today",
+    "description": "Water technology buyer show at Pragati Maidan.",
+    "content_hook": "Warm-up for IFAT India in September. Useful for water and ESG clients building a two-event narrative.",
+    "relevance_tags": [
+      "water_tech",
+      "india_water"
+    ],
+    "url": "https://www.waterex.biz/",
+    "confirmed": true
+  },
+  {
+    "id": "agritech-india-2026",
+    "name": "AgriTech India 2026",
+    "emoji": "🚜",
+    "start_date": "2026-08-21",
+    "end_date": "2026-08-23",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "agriculture",
+      "food",
+      "technology"
+    ],
+    "region": "india",
+    "region_detail": "Bengaluru, KTPO Exhibition Centre, Whitefield",
+    "organiser": "Media Today Pvt Ltd",
+    "description": "17th edition, runs alongside DairyTech India. The main South India agri-machinery and agri-processing floor.",
+    "content_hook": "Agri-tech clients. Farmer-facing and B2B in one venue.",
+    "relevance_tags": [
+      "agritech",
+      "india_agri"
+    ],
+    "url": "https://agritechindia.com/",
+    "confirmed": true
+  },
+  {
+    "id": "maharashtra-urja-expo-2026",
+    "name": "Maharashtra Urja Expo 2026 — Pune",
+    "emoji": "⚡",
+    "start_date": "2026-08-26",
+    "end_date": "2026-08-27",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "renewables",
+      "energy"
+    ],
+    "region": "india",
+    "region_detail": "Pune, venue not yet published",
+    "organiser": "FirstView Group / SolarQuarter",
+    "description": "State-level clean energy expo. Venue not published as of Aug 2026 — confirm 6-8 weeks out.",
+    "content_hook": "Home-state event for a Mumbai consultancy. Strong regional media pickup for modest spend.",
+    "relevance_tags": [
+      "solar",
+      "maharashtra",
+      "state_policy"
+    ],
+    "url": "https://solarquarter.com/event/maharashtra-urja-expo-2026-pune-edition/",
+    "confirmed": true
+  },
+  {
+    "id": "cii-global-sustainability-summit-2026",
+    "name": "CII 21st Global Sustainability Summit",
+    "emoji": "🇮🇳",
+    "start_date": "2026-08-27",
+    "end_date": "2026-08-28",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "esg",
+      "sustainability",
+      "corporate"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi, venue TBA",
+    "organiser": "CII-ITC Centre of Excellence for Sustainable Development",
+    "description": "India's most senior corporate-sustainability stage. The CII-ITC Sustainability Awards cycle attaches to it. Venue and agenda still listed as 'stay tuned' — confirm before committing.",
+    "content_hook": "The room where India's CSO and sustainability-head buyers actually sit. Highest-value speaking slot of the Indian calendar.",
+    "relevance_tags": [
+      "esg_strategy",
+      "india_corporate",
+      "cii"
+    ],
+    "url": "https://sustainabledevelopment.in/brands/21st-sustainability-summit/",
+    "confirmed": true
+  },
+  {
+    "id": "prs-india-2026",
+    "name": "Plastics Recycling Show India 2026",
+    "emoji": "♻️",
+    "start_date": "2026-08-31",
+    "end_date": "2026-09-02",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "circular_economy",
+      "plastics",
+      "recycling"
+    ],
+    "region": "india",
+    "region_detail": "Mumbai, Bombay Exhibition Centre, NESCO",
+    "organiser": "PRS Global Events",
+    "description": "The commercially serious circular-economy and EPR event in India.",
+    "content_hook": "Mumbai-local. Packaging, materials and recycling clients. Pairs with the global plastics treaty narrative.",
+    "relevance_tags": [
+      "circular_economy",
+      "epr",
+      "plastics"
+    ],
+    "url": "https://prseventindia.com/",
+    "confirmed": true
+  },
+  {
+    "id": "ev-india-expo-2026",
+    "name": "EV India Expo 2026",
+    "emoji": "🔋",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-03",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "mobility",
+      "ev",
+      "energy"
+    ],
+    "region": "india",
+    "region_detail": "Greater Noida, India Expo Centre",
+    "organiser": "Indian Exhibition Services with GSI",
+    "description": "6th edition. Mid-size EV supply-chain show.",
+    "content_hook": "For component and charging-infrastructure clients priced out of Bharat Mobility.",
+    "relevance_tags": [
+      "ev",
+      "mobility",
+      "india"
+    ],
+    "url": "https://evindiaexpo.in/",
     "confirmed": true
   },
   {
@@ -1105,6 +1412,109 @@
     "confirmed": true
   },
   {
+    "id": "swachh-vayu-diwas-2026",
+    "name": "Swachh Vayu Diwas + Swachh Vayu Survekshan rankings",
+    "emoji": "🌬️",
+    "start_date": "2026-09-07",
+    "end_date": "2026-09-07",
+    "duration_type": "day",
+    "category": "policy_regulatory",
+    "themes": [
+      "air_quality",
+      "policy",
+      "health"
+    ],
+    "region": "india",
+    "region_detail": "India",
+    "organiser": "MoEFCC / CPCB",
+    "description": "India observes Swachh Vayu Divas on the International Day of Clean Air for Blue Skies. MoEFCC ranks 131 NCAP cities and awards the top 3 in each category with cash prize, trophy and certificate.",
+    "content_hook": "The single best India-specific air-quality data hook of the year, and it lands a month before the Delhi smog cycle. Ideal pre-positioning date. Sharpen it: NCAP's target period expired 31 March 2026 with only 23 of 131 cities hitting the 40% PM10 reduction goal, and no successor target announced.",
+    "relevance_tags": [
+      "air_quality",
+      "ncap",
+      "india_policy",
+      "rankings"
+    ],
+    "url": "https://www.pib.gov.in/PressNoteDetails.aspx?NoteId=153186&ModuleId=3",
+    "confirmed": true
+  },
+  {
+    "id": "ifat-india-2026",
+    "name": "IFAT India 2026",
+    "emoji": "💧",
+    "start_date": "2026-09-09",
+    "end_date": "2026-09-11",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "water",
+      "waste",
+      "circular_economy"
+    ],
+    "region": "india",
+    "region_detail": "Mumbai, Bombay Exhibition Centre",
+    "organiser": "Messe München GmbH",
+    "description": "The anchor water, sewage, waste and recycling trade fair in India.",
+    "content_hook": "ANCHOR EVENT. Highest-value single event for water and waste clients — and it is in Mumbai. Build a campaign around it, don't just attend.",
+    "relevance_tags": [
+      "water_tech",
+      "waste_management",
+      "india_water"
+    ],
+    "url": "https://ifat-india.com/en/",
+    "confirmed": true
+  },
+  {
+    "id": "solar-storage-mp-2026",
+    "name": "Solar & Storage Expo Madhya Pradesh 2026",
+    "emoji": "🔆",
+    "start_date": "2026-09-09",
+    "end_date": "2026-09-10",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "renewables",
+      "storage"
+    ],
+    "region": "india",
+    "region_detail": "Madhya Pradesh, venue not published",
+    "organiser": "FirstView Group / SolarQuarter",
+    "description": "State discom and policy officials attend.",
+    "content_hook": "Storage clients targeting state tenders.",
+    "relevance_tags": [
+      "solar",
+      "storage",
+      "state_policy"
+    ],
+    "url": "https://solarquarter.com/event/solar-storage-expo-madhya-pradesh-2026/",
+    "confirmed": true
+  },
+  {
+    "id": "agri-asia-2026",
+    "name": "Agri Asia 2026",
+    "emoji": "🌱",
+    "start_date": "2026-09-11",
+    "end_date": "2026-09-13",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "agriculture",
+      "food",
+      "technology"
+    ],
+    "region": "india",
+    "region_detail": "Gandhinagar, Helipad Exhibition Centre",
+    "organiser": "Radeecal Communications",
+    "description": "15th edition. Large agri-technology and food-processing floor in Gujarat.",
+    "content_hook": "Pairs well with client factory visits in the Gujarat industrial belt.",
+    "relevance_tags": [
+      "agritech",
+      "food_systems"
+    ],
+    "url": "https://agriasia.in/",
+    "confirmed": true
+  },
+  {
     "id": "intl-day-ozone-2026",
     "name": "International Day for Preservation of the Ozone Layer",
     "emoji": "🛡️",
@@ -1131,29 +1541,27 @@
     "confirmed": true
   },
   {
-    "id": "world-cleanup-day-2026",
-    "name": "World Cleanup Day",
-    "emoji": "🧹",
-    "start_date": "2026-09-19",
+    "id": "global-solar-jaipur-2026",
+    "name": "Global Solar Expo — Jaipur",
+    "emoji": "☀️",
+    "start_date": "2026-09-18",
     "end_date": "2026-09-19",
-    "duration_type": "day",
-    "category": "awareness_campaign",
+    "duration_type": "event",
+    "category": "conference",
     "themes": [
-      "waste",
-      "community_action",
-      "pollution"
+      "renewables",
+      "solar"
     ],
-    "region": "global",
-    "region_detail": null,
-    "organiser": "Let's Do It World",
-    "description": "Global social action day combating litter by encouraging communities worldwide to clean up their environments.",
-    "content_hook": "Community engagement and team participation moment. Brands can organise local cleanups and share visual before/after content.",
+    "region": "india",
+    "region_detail": "Jaipur, venue not published",
+    "organiser": "EQ International",
+    "description": "2nd Jaipur edition.",
+    "content_hook": "Rajasthan is India's largest solar state — relevant for developer and O&M clients.",
     "relevance_tags": [
-      "community_action",
-      "waste",
-      "employee_engagement"
+      "solar",
+      "rajasthan"
     ],
-    "url": "https://www.worldcleanupday.org/",
+    "url": "https://globalsolarexpo.com/",
     "confirmed": true
   },
   {
@@ -1186,57 +1594,131 @@
     "confirmed": true
   },
   {
-    "id": "unga-2026",
-    "name": "UN General Assembly (UNGA 81)",
-    "emoji": "🇺🇳",
-    "start_date": "2026-09-15",
-    "end_date": "2026-09-30",
-    "duration_type": "event",
-    "category": "policy_regulatory",
+    "id": "world-cleanup-day-2026",
+    "name": "World Cleanup Day",
+    "emoji": "🧹",
+    "start_date": "2026-09-20",
+    "end_date": "2026-09-20",
+    "duration_type": "day",
+    "category": "awareness_campaign",
     "themes": [
-      "policy",
-      "sdgs",
-      "climate",
-      "development"
+      "waste",
+      "community_action",
+      "pollution"
     ],
     "region": "global",
-    "region_detail": "New York, USA",
-    "organiser": "United Nations",
-    "description": "Annual gathering of world leaders where climate and sustainability are increasingly central. Sets political tone ahead of COP31.",
-    "content_hook": "Track policy announcements and national commitments. Monitor for client-relevant regulatory or policy signals in the lead-up to COP31.",
+    "region_detail": null,
+    "organiser": "Let's Do It World",
+    "description": "DATE CORRECTED to 20 September. Since UN General Assembly resolution 78/122 (8 Dec 2023), World Cleanup Day is a fixed 20 September observance, not the old 'third Saturday of September' convention. The previously recorded 19 Sep was the old floating date.",
+    "content_hook": "Community engagement and team participation moment. Brands can organise local cleanups and share visual before/after content.",
     "relevance_tags": [
-      "geopolitics",
-      "national_commitments",
-      "pre_cop"
+      "community_action",
+      "waste",
+      "employee_engagement"
     ],
-    "url": "https://www.un.org/en/ga/",
+    "url": "https://www.un.org/en/observances/cleanup-day",
     "confirmed": true
   },
   {
-    "id": "plastics-treaty-negotiations-2026",
-    "name": "Global Plastics Treaty Negotiations",
-    "emoji": "🧴",
-    "start_date": "2026-09-01",
-    "end_date": "2026-09-30",
+    "id": "india-water-week-2026",
+    "name": "9th India International Water Week 2026",
+    "emoji": "🇮🇳",
+    "start_date": "2026-09-22",
+    "end_date": "2026-09-26",
     "duration_type": "event",
-    "category": "policy_regulatory",
+    "category": "conference",
     "themes": [
-      "plastic_pollution",
-      "circular_economy",
-      "policy"
+      "water",
+      "policy",
+      "infrastructure"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi, Bharat Mandapam, Pragati Maidan",
+    "organiser": "Ministry of Jal Shakti / National Water Development Agency",
+    "description": "Four-day conference and exhibition 22-25 September, followed by a one-day field study tour on 26 September. Government-hosted, ministerial level.",
+    "content_hook": "ANCHOR EVENT for policy-facing water communications. The best India platform this year for water clients who need government proximity, not just buyers.",
+    "relevance_tags": [
+      "water_policy",
+      "jal_shakti",
+      "india_government"
+    ],
+    "url": "https://indiawaterweek.in/about",
+    "confirmed": true
+  },
+  {
+    "id": "global-solar-indore-2026",
+    "name": "Global Solar Expo — Indore",
+    "emoji": "☀️",
+    "start_date": "2026-09-30",
+    "end_date": "2026-10-01",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "renewables",
+      "solar"
+    ],
+    "region": "india",
+    "region_detail": "Indore, Sheraton Grand Palace",
+    "organiser": "EQ International",
+    "description": "Central India solar EPC and distributor audience.",
+    "content_hook": "Regional reach into the MP/Central India installer base.",
+    "relevance_tags": [
+      "solar",
+      "madhya_pradesh"
+    ],
+    "url": "https://globalsolarexpo.com/indore-expo-30-sep-1-oct-2026/",
+    "confirmed": true
+  },
+  {
+    "id": "unblocktober-2026",
+    "name": "Unblocktober",
+    "emoji": "🚰",
+    "start_date": "2026-10-01",
+    "end_date": "2026-10-31",
+    "duration_type": "month",
+    "category": "awareness_campaign",
+    "themes": [
+      "water",
+      "waste",
+      "oceans"
     ],
     "region": "global",
-    "region_detail": "Location TBC",
-    "organiser": "UNEP / INC",
-    "description": "Next round of global plastics treaty negotiations — potentially August or September 2026. Aiming for a legally binding instrument on plastic pollution.",
-    "content_hook": "Circular economy and plastic reduction messaging. Major regulatory signal for packaging, materials, FMCG, and consumer brands.",
+    "region_detail": "UK-originated",
+    "organiser": "Unblocktober",
+    "description": "Month-long campaign to improve the health of drains, sewers, watercourses, and seas by reducing waste going down the drain.",
+    "content_hook": "Water pollution and waste reduction. Connects everyday consumer behaviour to ocean health — practical tips content that drives engagement.",
     "relevance_tags": [
-      "plastics_treaty",
-      "circular_economy",
-      "packaging"
+      "water_pollution",
+      "behaviour_change",
+      "ocean_health"
     ],
-    "url": null,
-    "confirmed": false
+    "url": "https://www.unblocktober.org/",
+    "confirmed": true
+  },
+  {
+    "id": "wildlife-week-2026",
+    "name": "Wildlife Week (India)",
+    "emoji": "🐅",
+    "start_date": "2026-10-02",
+    "end_date": "2026-10-08",
+    "duration_type": "event",
+    "category": "awareness_campaign",
+    "themes": [
+      "biodiversity",
+      "conservation"
+    ],
+    "region": "india",
+    "region_detail": "India",
+    "organiser": "Ministry of Environment, Forest and Climate Change",
+    "description": "MoEFCC-organised national observance week, 2-8 October, with a themed national celebration presided over by the Union Environment Minister.",
+    "content_hook": "India-specific biodiversity hook with ministerial presence — stronger domestic pickup than the global biodiversity days.",
+    "relevance_tags": [
+      "biodiversity",
+      "india_observance",
+      "moefcc"
+    ],
+    "url": "https://www.pib.gov.in/PressReleasePage.aspx?PRID=2175490",
+    "confirmed": true
   },
   {
     "id": "brazil-presidential-election-2026",
@@ -1265,6 +1747,57 @@
     "confirmed": true
   },
   {
+    "id": "windergy-india-2026",
+    "name": "Windergy India 2026",
+    "emoji": "🌬️",
+    "start_date": "2026-10-07",
+    "end_date": "2026-10-09",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "renewables",
+      "wind",
+      "energy"
+    ],
+    "region": "india",
+    "region_detail": "Chennai, Chennai Trade Centre",
+    "organiser": "Indian Wind Turbine Manufacturers Association (IWTMA) with PDA Ventures",
+    "description": "8th International Trade Fair & Conference for the wind segment. The only dedicated Indian wind event.",
+    "content_hook": "Wind is materially under-covered versus solar in Indian climate media. That makes earned media easier here than at any solar show.",
+    "relevance_tags": [
+      "wind",
+      "india_renewables"
+    ],
+    "url": "https://windergy.in/",
+    "confirmed": true
+  },
+  {
+    "id": "wba-india-congress-2026",
+    "name": "World Biogas Association India Congress 2026",
+    "emoji": "🌾",
+    "start_date": "2026-10-08",
+    "end_date": "2026-10-09",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "bioenergy",
+      "waste_to_energy",
+      "circular_economy"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi, The Lee",
+    "organiser": "World Biogas Association",
+    "description": "International investors and Indian CBG developers in one room.",
+    "content_hook": "Small, senior, high-signal. Better ROI than a large expo for a client with a specific bioenergy story.",
+    "relevance_tags": [
+      "biogas",
+      "cbg",
+      "investment"
+    ],
+    "url": "https://www.worldbiogasassociation.org/india-congress/",
+    "confirmed": true
+  },
+  {
     "id": "intl-day-disaster-risk-2026",
     "name": "International Day for Disaster Risk Reduction",
     "emoji": "🌪️",
@@ -1288,6 +1821,59 @@
       "extreme_weather"
     ],
     "url": "https://www.un.org/en/observances/disaster-reduction-day",
+    "confirmed": true
+  },
+  {
+    "id": "grap-stage-one-2026",
+    "name": "GRAP activation, Delhi-NCR (air quality season opens)",
+    "emoji": "😷",
+    "start_date": "2026-10-14",
+    "end_date": "2026-10-14",
+    "duration_type": "day",
+    "category": "policy_regulatory",
+    "themes": [
+      "air_quality",
+      "policy",
+      "health"
+    ],
+    "region": "india",
+    "region_detail": "Delhi-NCR, India",
+    "organiser": "Commission for Air Quality Management (CAQM)",
+    "description": "FORECAST, NOT A FIXED DATE. GRAP stages are triggered by AQI forecasts, not the calendar. Historical pattern: Stage I invoked 14 Oct 2025 and 15 Oct 2024; Stage IV invoked 13 Dec 2025. Shape of the season is Stage I mid-Oct, escalation through Nov, Stage III/IV peak late Nov to mid-Dec.",
+    "content_hook": "Mid-October to mid-December is India's highest-volume environment news window, full stop. Every stage change is a national headline. Pre-briefing material must be finished by late September. Sharper angle than generic smog commentary: CAQM has been criticised for invoking GRAP reactively — in one recent winter Delhi imposed it after AQI had already crossed the threshold in 13 of 17 instances.",
+    "relevance_tags": [
+      "air_quality",
+      "grap",
+      "delhi",
+      "caqm"
+    ],
+    "url": "https://caqm.nic.in/",
+    "confirmed": false
+  },
+  {
+    "id": "sustainability-summit-awards-2026",
+    "name": "9th Sustainability Summit & Awards 2026",
+    "emoji": "🏆",
+    "start_date": "2026-10-16",
+    "end_date": "2026-10-16",
+    "duration_type": "day",
+    "category": "conference",
+    "themes": [
+      "esg",
+      "sustainability",
+      "corporate"
+    ],
+    "region": "india",
+    "region_detail": "Bengaluru, The Leela Palace",
+    "organiser": "Sustainability Summit & Awards",
+    "description": "Single-day awards-led format.",
+    "content_hook": "The cheapest credible route to a 'recognised for sustainability' client asset. Low effort, real output.",
+    "relevance_tags": [
+      "esg",
+      "awards",
+      "india_corporate"
+    ],
+    "url": "https://sustainability-summit.in/",
     "confirmed": true
   },
   {
@@ -1356,7 +1942,7 @@
       "nature_positive"
     ],
     "region": "global",
-    "region_detail": "Armenia",
+    "region_detail": "Yerevan, Armenia",
     "organiser": "Convention on Biological Diversity (CBD)",
     "description": "Follow-up to the Kunming-Montreal Global Biodiversity Framework. Reviews implementation of 30x30 targets and nature-positive commitments globally.",
     "content_hook": "Nature-positive commitments and biodiversity targets. All clients should be mapping their impact on nature and aligning with the Global Biodiversity Framework.",
@@ -1367,6 +1953,84 @@
       "biodiversity_cop"
     ],
     "url": null,
+    "confirmed": true
+  },
+  {
+    "id": "rei-expo-2026",
+    "name": "Renewable Energy India Expo 2026 (REI)",
+    "emoji": "⚡",
+    "start_date": "2026-10-22",
+    "end_date": "2026-10-24",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "renewables",
+      "solar",
+      "storage"
+    ],
+    "region": "india",
+    "region_detail": "Greater Noida, India Expo Mart",
+    "organiser": "Informa Markets",
+    "description": "Asia's largest clean energy expo.",
+    "content_hook": "ANCHOR EVENT. If a client does one renewables event in 2026, this is it. Co-located with The Battery Show India — one trip covers renewables, storage and EV supply chain.",
+    "relevance_tags": [
+      "renewables",
+      "solar",
+      "india_energy"
+    ],
+    "url": "https://www.renewableenergyindiaexpo.com/",
+    "confirmed": true
+  },
+  {
+    "id": "battery-show-india-2026",
+    "name": "The Battery Show India 2026",
+    "emoji": "🔋",
+    "start_date": "2026-10-22",
+    "end_date": "2026-10-24",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "storage",
+      "ev",
+      "manufacturing"
+    ],
+    "region": "india",
+    "region_detail": "Greater Noida, India Expo Mart & Centre",
+    "organiser": "Informa Markets",
+    "description": "Co-located with REI Expo.",
+    "content_hook": "Plan one campaign across both, not two. October is congested — see the clash note.",
+    "relevance_tags": [
+      "battery",
+      "storage",
+      "ev_supply_chain"
+    ],
+    "url": "https://www.thebatteryshowindia.com/",
+    "confirmed": true
+  },
+  {
+    "id": "urban-mobility-india-2026",
+    "name": "19th Urban Mobility India Conference & Exhibition 2026",
+    "emoji": "🚇",
+    "start_date": "2026-10-23",
+    "end_date": "2026-10-25",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "mobility",
+      "urban",
+      "policy"
+    ],
+    "region": "india",
+    "region_detail": "Bhubaneswar, Hotel Mayfair Sanctuary",
+    "organiser": "Ministry of Housing & Urban Affairs with Government of Odisha",
+    "description": "Ministry-run policy venue for urban transport decarbonisation.",
+    "content_hook": "For public-transport electrification and urban mobility clients who need policy proximity. Clashes with REI — clients must choose.",
+    "relevance_tags": [
+      "urban_mobility",
+      "india_policy",
+      "electrification"
+    ],
+    "url": "https://www.urbanmobilityindia.in/pdf/Event.pdf",
     "confirmed": true
   },
   {
@@ -1396,29 +2060,30 @@
     "confirmed": true
   },
   {
-    "id": "unblocktober-2026",
-    "name": "Unblocktober",
-    "emoji": "🚰",
-    "start_date": "2026-10-01",
-    "end_date": "2026-10-31",
-    "duration_type": "month",
-    "category": "awareness_campaign",
+    "id": "bharat-re-summit-2026",
+    "name": "Bharat Renewable Energy Summit & Expo 2026",
+    "emoji": "🇮🇳",
+    "start_date": "2026-11-02",
+    "end_date": "2026-11-05",
+    "duration_type": "event",
+    "category": "conference",
     "themes": [
-      "water",
-      "waste",
-      "oceans"
+      "renewables",
+      "energy",
+      "policy"
     ],
-    "region": "global",
-    "region_detail": "UK-originated",
-    "organiser": "Unblocktober",
-    "description": "Month-long campaign to improve the health of drains, sewers, watercourses, and seas by reducing waste going down the drain.",
-    "content_hook": "Water pollution and waste reduction. Connects everyday consumer behaviour to ocean health — practical tips content that drives engagement.",
+    "region": "india",
+    "region_detail": "New Delhi, Bharat Mandapam",
+    "organiser": "Ministry of New and Renewable Energy (MNRE), Government of India",
+    "description": "Flagship government clean-energy summit merging three global clean-energy events, with 128 countries invited.",
+    "content_hook": "THE ANCHOR MOMENT of the Indian calendar. Highest-visibility climate event India hosts in 2026, government-run, at Bharat Mandapam. Build client campaigns around this date first and fit everything else around it.",
     "relevance_tags": [
-      "water_pollution",
-      "behaviour_change",
-      "ocean_health"
+      "mnre",
+      "india_renewables",
+      "government",
+      "flagship"
     ],
-    "url": "https://www.unblocktober.org/",
+    "url": "https://mnre.gov.in/en/bharat-re/",
     "confirmed": true
   },
   {
@@ -1466,8 +2131,8 @@
     "region": "global",
     "region_detail": "Antalya, Türkiye",
     "organiser": "UNFCCC",
-    "description": "The biggest climate event of 2026. Joint Türkiye-Australia presidency. Focus on NDCs 3.0, climate finance (NCQG), post-Global Stocktake implementation, and fossil fuel transition roadmaps.",
-    "content_hook": "THE single most important climate moment of 2026. All clients need pre/during/post COP content. Track commitments, controversies, outcomes, and what it means for their sector.",
+    "description": "COP31 confirmed for Antalya, Türkiye, 9-20 November 2026. The hosting contest resolved into a SPLIT PRESIDENCY: Türkiye hosts and holds the COP31 Presidency including the world leaders' summit; Australia holds the separate role of 'President of Negotiations' with exclusive authority over the negotiations. The Pre-COP will be hosted in a Pacific island country supported by Australia — location and date still to be decided by the Pacific.",
+    "content_hook": "The climate moment of the year. For India: the 2035 NDC ambition question and the CBAM equivalence argument both converge here. Have client positions drafted by early October, not November.",
     "relevance_tags": [
       "cop31",
       "ndcs",
@@ -1479,8 +2144,34 @@
     "confirmed": true
   },
   {
+    "id": "agrotech-icfa-2026",
+    "name": "AgroTech 2026 (25th)",
+    "emoji": "🌾",
+    "start_date": "2026-11-12",
+    "end_date": "2026-11-14",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "agriculture",
+      "food",
+      "investment"
+    ],
+    "region": "india",
+    "region_detail": "Lucknow, ICAR-Indian Sugarcane Research Institute",
+    "organiser": "Indian Chamber of Food and Agriculture (ICFA)",
+    "description": "DATE CONFLICT: the official site says 12-14 November; some listings show 17-19 December. Re-check nearer the date.",
+    "content_hook": "Agribusiness investment framing for agri-tech clients.",
+    "relevance_tags": [
+      "agritech",
+      "investment",
+      "icfa"
+    ],
+    "url": "https://globalagrotech.in/",
+    "confirmed": false
+  },
+  {
     "id": "imo-mepc-2026",
-    "name": "IMO Marine Environment Protection Committee",
+    "name": "IMO Marine Environment Protection Committee (MEPC 85)",
     "emoji": "🚢",
     "start_date": "2026-11-16",
     "end_date": "2026-11-20",
@@ -1502,6 +2193,58 @@
       "decarbonisation"
     ],
     "url": "https://www.imo.org/",
+    "confirmed": true
+  },
+  {
+    "id": "bengaluru-tech-summit-2026",
+    "name": "Bengaluru Tech Summit 2026",
+    "emoji": "🔬",
+    "start_date": "2026-11-17",
+    "end_date": "2026-11-19",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "technology",
+      "circular_economy",
+      "innovation"
+    ],
+    "region": "india",
+    "region_detail": "Bengaluru, Bangalore International Exhibition Centre (BIEC)",
+    "organiser": "MM Activ Sci-Tech Communications for Government of Karnataka",
+    "description": "Carries a dedicated Circular Economy track.",
+    "content_hook": "The deep-tech and climate-tech crossover venue with real investor density. Best fit for Your Agency's technical-founder client profile.",
+    "relevance_tags": [
+      "deep_tech",
+      "circular_economy",
+      "investors"
+    ],
+    "url": "https://www.bengalurutechsummit.com/",
+    "confirmed": true
+  },
+  {
+    "id": "igha-hyvolution-india-2026",
+    "name": "IGHA — Hyvolution India 2026",
+    "emoji": "💨",
+    "start_date": "2026-11-17",
+    "end_date": "2026-11-18",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "hydrogen",
+      "energy",
+      "decarbonisation"
+    ],
+    "region": "india",
+    "region_detail": "Greater Noida, India Expo Mart, Delhi NCR",
+    "organiser": "GH2 India + GL Events with Apoltos Events",
+    "description": "First Indian edition of the global Hyvolution franchise.",
+    "content_hook": "The green hydrogen event of the year for India, and it is edition one. First-mover positioning is genuinely available here — that window closes after 2026.",
+    "relevance_tags": [
+      "green_hydrogen",
+      "india_energy",
+      "first_edition"
+    ],
+    "url": "https://www.igha-hyvolution.com",
     "confirmed": true
   },
   {
@@ -1532,6 +2275,84 @@
     "confirmed": true
   },
   {
+    "id": "cii-agrotech-india-2026",
+    "name": "CII AgroTech India 2026",
+    "emoji": "🚜",
+    "start_date": "2026-11-20",
+    "end_date": "2026-11-23",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "agriculture",
+      "sustainability",
+      "innovation"
+    ],
+    "region": "india",
+    "region_detail": "Chandigarh, Parade Ground, Sector 17",
+    "organiser": "Confederation of Indian Industry",
+    "description": "17th edition, biennial. Theme: 'Harvesting Innovation for a Sustainable Agriculture'.",
+    "content_hook": "Squarely on-message for agri-tech clients, and biennial means missing it costs two years.",
+    "relevance_tags": [
+      "agritech",
+      "cii",
+      "sustainable_agriculture"
+    ],
+    "url": "https://www.agrotech-india.com/",
+    "confirmed": true
+  },
+  {
+    "id": "green-building-congress-2026",
+    "name": "Green Building Congress 2026",
+    "emoji": "🏢",
+    "start_date": "2026-11-26",
+    "end_date": "2026-11-28",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "buildings",
+      "materials",
+      "esg"
+    ],
+    "region": "india",
+    "region_detail": "Mumbai, Jio World Convention Centre",
+    "organiser": "CII — Indian Green Building Council (IGBC)",
+    "description": "Built-environment decarbonisation, materials and real estate ESG.",
+    "content_hook": "Mumbai, on Your Agency's doorstep, at Jio World. Low travel cost, high-quality audience for materials and built-environment clients.",
+    "relevance_tags": [
+      "green_buildings",
+      "igbc",
+      "materials"
+    ],
+    "url": "https://greenbuildingcongress.com/",
+    "confirmed": true
+  },
+  {
+    "id": "icc-sustainability-conclave-2026",
+    "name": "ICC Safety & Sustainability Conclave 2026",
+    "emoji": "🧪",
+    "start_date": "2026-11-26",
+    "end_date": "2026-11-27",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "chemicals",
+      "decarbonisation",
+      "industry"
+    ],
+    "region": "india",
+    "region_detail": "Vadodara, Lukshmi Villas Palace",
+    "organiser": "Indian Chemical Council with Department of Chemicals & Petrochemicals, GoI",
+    "description": "Chemicals-sector decarbonisation and CBAM exposure.",
+    "content_hook": "A hard-to-reach industrial audience. Relevant to Example Materials and any specialty-chemicals or materials client.",
+    "relevance_tags": [
+      "chemicals",
+      "cbam",
+      "industrial_decarbonisation"
+    ],
+    "url": "https://www.iccsustainabilityconclave.org/",
+    "confirmed": true
+  },
+  {
     "id": "world-sustainable-transport-day-2026",
     "name": "World Sustainable Transport Day",
     "emoji": "🚲",
@@ -1558,58 +2379,80 @@
     "confirmed": true
   },
   {
-    "id": "unccd-cop17-2026",
-    "name": "UNCCD COP17 — Land/Desertification Conference",
-    "emoji": "🏜️",
-    "start_date": "2026-11-01",
-    "end_date": "2026-11-30",
+    "id": "wastetech-india-2026",
+    "name": "Wastetech India Expo 2026",
+    "emoji": "♻️",
+    "start_date": "2026-11-27",
+    "end_date": "2026-11-29",
     "duration_type": "event",
     "category": "conference",
     "themes": [
-      "land",
-      "desertification",
-      "drought",
-      "climate_adaptation"
+      "waste",
+      "circular_economy",
+      "recycling"
     ],
-    "region": "global",
-    "region_detail": "Location TBC",
-    "organiser": "UN Convention to Combat Desertification",
-    "description": "Third 'triple COP' event of 2026 alongside climate (COP31) and biodiversity (COP17). Focused on land degradation, drought, and desertification.",
-    "content_hook": "Land restoration and drought resilience. Relevant for water-tech clients and agriculture-linked brands. Ties into food security narratives.",
+    "region": "india",
+    "region_detail": "Coimbatore, Codissia Trade Fair Complex",
+    "organiser": "Media Day Marketing",
+    "description": "South India waste-management and recycling machinery buyers.",
+    "content_hook": "Complements IFAT India for full-year waste coverage across both regions.",
     "relevance_tags": [
-      "land_degradation",
-      "drought",
-      "triple_cop"
+      "waste_management",
+      "recycling",
+      "south_india"
     ],
-    "url": null,
+    "url": "https://wastetechindia.com/",
+    "confirmed": true
+  },
+  {
+    "id": "winter-session-2026",
+    "name": "Indian Parliament — Winter Session 2026",
+    "emoji": "🏛️",
+    "start_date": "2026-12-01",
+    "end_date": "2026-12-19",
+    "duration_type": "event",
+    "category": "policy_regulatory",
+    "themes": [
+      "policy",
+      "governance"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi",
+    "organiser": "Parliament of India",
+    "description": "NOT YET ANNOUNCED as of August 2026. Dates shown are an estimate from recent years (25 Nov-20 Dec 2024; 1-19 Dec 2025). Expect announcement via an all-party meeting in mid-to-late November. Do not publish these dates.",
+    "content_hook": "Overlaps peak Delhi smog season, which reliably produces climate and air-quality questions in the House.",
+    "relevance_tags": [
+      "parliament",
+      "india_policy"
+    ],
+    "url": "https://prsindia.org/",
     "confirmed": false
   },
   {
-    "id": "un-water-conference-2026",
-    "name": "UN Water Conference",
-    "emoji": "💧",
+    "id": "national-pollution-control-day-2026",
+    "name": "National Pollution Control Day (India)",
+    "emoji": "🏭",
     "start_date": "2026-12-02",
-    "end_date": "2026-12-04",
-    "duration_type": "event",
-    "category": "conference",
+    "end_date": "2026-12-02",
+    "duration_type": "day",
+    "category": "awareness_campaign",
     "themes": [
-      "water",
-      "sanitation",
-      "sdgs",
-      "climate_adaptation"
+      "air_quality",
+      "pollution",
+      "industry"
     ],
-    "region": "global",
-    "region_detail": "Location TBC",
-    "organiser": "United Nations",
-    "description": "Major UN conference on water — the first in decades. Critical for SDG 6 progress and addressing the global water crisis.",
-    "content_hook": "Landmark water moment. Huge for water-tech brands. Frame around water scarcity, innovation, and the water-climate-food nexus.",
+    "region": "india",
+    "region_detail": "India",
+    "organiser": "Widely observed; official notifying body not confirmed",
+    "description": "CAUTION: extremely widely reported (marks the 1984 Bhopal gas disaster anniversary) but no official MoEFCC or CPCB page notifying it could be found. Every traceable source was secondary. Do not describe it as an official government observance.",
+    "content_hook": "Falls inside peak Delhi smog season, which compounds its news value regardless of official status. Handle the Bhopal association with care.",
     "relevance_tags": [
-      "water_crisis",
-      "sdg6",
-      "water_innovation"
+      "pollution",
+      "india_observance",
+      "unverified_status"
     ],
-    "url": null,
-    "confirmed": true
+    "url": "https://www.moef.gov.in/",
+    "confirmed": false
   },
   {
     "id": "world-soil-day-2026",
@@ -1635,6 +2478,59 @@
       "carbon_sequestration"
     ],
     "url": "https://www.fao.org/world-soil-day",
+    "confirmed": true
+  },
+  {
+    "id": "un-water-conference-2026",
+    "name": "UN Water Conference",
+    "emoji": "💧",
+    "start_date": "2026-12-08",
+    "end_date": "2026-12-10",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "water",
+      "sanitation",
+      "sdgs",
+      "climate_adaptation"
+    ],
+    "region": "global",
+    "region_detail": "Abu Dhabi, United Arab Emirates",
+    "organiser": "United Nations",
+    "description": "UN 2026 Water Conference, co-hosted by Senegal and the UAE. DATE CORRECTED: moved from 2-4 December to 8-10 December 2026 and confirmed for Abu Dhabi. Source: unwater.org, 'The Conference will now take place from 8-10 December 2026 in Abu Dhabi, United Arab Emirates (UAE).'",
+    "content_hook": "Landmark water moment. Huge for water-tech brands. Frame around water scarcity, innovation, and the water-climate-food nexus.",
+    "relevance_tags": [
+      "water_crisis",
+      "sdg6",
+      "water_innovation"
+    ],
+    "url": "https://www.unwater.org/news/2026-un-water-conference-revised-dates",
+    "confirmed": true
+  },
+  {
+    "id": "kisan-agri-show-2026",
+    "name": "KISAN Agri Show 2026",
+    "emoji": "🌾",
+    "start_date": "2026-12-09",
+    "end_date": "2026-12-13",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "agriculture",
+      "food",
+      "technology"
+    ],
+    "region": "india",
+    "region_detail": "Pune, PIECC, Moshi",
+    "organiser": "KISAN",
+    "description": "34th edition. India's largest farmer-facing agriculture exhibition.",
+    "content_hook": "The place to test farmer-facing messaging rather than B2B messaging. Rare and useful for agri-tech clients who only ever talk to investors.",
+    "relevance_tags": [
+      "agritech",
+      "farmers",
+      "maharashtra"
+    ],
+    "url": "https://2026.kisan.in/",
     "confirmed": true
   },
   {
@@ -1715,5 +2611,160 @@
     ],
     "url": null,
     "confirmed": true
+  },
+  {
+    "id": "energy-conservation-day-2026",
+    "name": "National Energy Conservation Day + NECA Awards",
+    "emoji": "💡",
+    "start_date": "2026-12-14",
+    "end_date": "2026-12-14",
+    "duration_type": "day",
+    "category": "policy_regulatory",
+    "themes": [
+      "energy",
+      "efficiency",
+      "policy"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi, Vigyan Bhawan",
+    "organiser": "Bureau of Energy Efficiency / Ministry of Power",
+    "description": "Observed annually on 14 December. The National Energy Conservation Awards are presented the same day, with the President of India attending in recent years. The 2025 edition drew 680 applications across 28 sub-sectors and 7 categories.",
+    "content_hook": "NECA now includes an influencer and content-creator category — a government-run climate-communications prize. Directly relevant to Your Agency's own positioning, not just clients'. Expect the call for entries around October 2026; the 2025 entry deadline was 7 November.",
+    "relevance_tags": [
+      "energy_efficiency",
+      "bee",
+      "awards",
+      "india_observance"
+    ],
+    "url": "https://www.pib.gov.in/PressReleasePage.aspx?PRID=2203158&reg=3&lang=2",
+    "confirmed": true
+  },
+  {
+    "id": "tie-global-summit-2026",
+    "name": "TiE Global Summit 2026",
+    "emoji": "🚀",
+    "start_date": "2026-12-14",
+    "end_date": "2026-12-15",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "entrepreneurship",
+      "climate_finance",
+      "energy_transition"
+    ],
+    "region": "india",
+    "region_detail": "Indore, Brilliant Convention Centre",
+    "organiser": "TiE (TiE Indore)",
+    "description": "Carries a 'Sustainability & ReGrowth' track covering climate finance and energy transition.",
+    "content_hook": "The startup and VC entry point that has a real climate agenda rather than a token panel.",
+    "relevance_tags": [
+      "startups",
+      "climate_finance",
+      "vc"
+    ],
+    "url": "https://tieglobalsummit.org/",
+    "confirmed": true
+  },
+  {
+    "id": "esg-strategy-india-summit-2026",
+    "name": "13th ESG and Sustainability Strategy India Summit",
+    "emoji": "📊",
+    "start_date": "2026-12-17",
+    "end_date": "2026-12-18",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "esg",
+      "reporting",
+      "disclosure"
+    ],
+    "region": "india",
+    "region_detail": "Bengaluru, The Oterra Hotel",
+    "organiser": "Inventicon",
+    "description": "Practitioner-level ESG and BRSR reporting audience.",
+    "content_hook": "These are the people who buy sustainability-communications work. Highest buyer-density event on the list for Your Agency's own BD.",
+    "relevance_tags": [
+      "esg",
+      "brsr",
+      "india_reporting",
+      "bd_opportunity"
+    ],
+    "url": "https://esgsustainabilitysummit.com/",
+    "confirmed": true
+  },
+  {
+    "id": "ev-expo-delhi-2026",
+    "name": "EV EXPO 2026",
+    "emoji": "🔌",
+    "start_date": "2026-12-23",
+    "end_date": "2026-12-25",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "mobility",
+      "ev"
+    ],
+    "region": "india",
+    "region_detail": "New Delhi, Halls 3, 4 & 5, Bharat Mandapam",
+    "organiser": "EvExpo / Address Corp.",
+    "description": "24th edition. Consumer-and-trade EV show, heavy 2W/3W and last-mile presence.",
+    "content_hook": "The mass-market end of Indian EV, not the premium end. Different audience from Bharat Mobility.",
+    "relevance_tags": [
+      "ev",
+      "last_mile",
+      "india_mobility"
+    ],
+    "url": "https://evexpo.in/",
+    "confirmed": true
+  },
+  {
+    "id": "global-solar-chennai-2026",
+    "name": "Global Solar Expo — Chennai",
+    "emoji": "☀️",
+    "start_date": "2026-12-23",
+    "end_date": "2026-12-24",
+    "duration_type": "event",
+    "category": "conference",
+    "themes": [
+      "renewables",
+      "solar"
+    ],
+    "region": "india",
+    "region_detail": "Chennai, venue not published",
+    "organiser": "EQ International",
+    "description": "Tamil Nadu solar manufacturing and C&I market.",
+    "content_hook": "Regional solar manufacturing audience.",
+    "relevance_tags": [
+      "solar",
+      "tamil_nadu"
+    ],
+    "url": "https://globalsolarexpo.com/",
+    "confirmed": true
+  },
+  {
+    "id": "btr2-india-2026",
+    "name": "India Biennial Transparency Report 2 (BTR-2) to UNFCCC",
+    "emoji": "📄",
+    "start_date": "2026-12-31",
+    "end_date": "2026-12-31",
+    "duration_type": "day",
+    "category": "policy_regulatory",
+    "themes": [
+      "reporting",
+      "policy",
+      "transparency"
+    ],
+    "region": "india",
+    "region_detail": "India → UNFCCC",
+    "organiser": "MoEFCC",
+    "description": "UNCONFIRMED DEADLINE. UNFCCC states Parties submit BTRs every two years with the first due 31 December 2024, but does not explicitly publish a BTR-2 date. 31 Dec 2026 follows logically and is high-probability, but was not confirmable on an official page. Verify before publishing.",
+    "content_hook": "If it holds, the only India-facing international climate reporting deadline in the window — and it lands in the last week of December.",
+    "relevance_tags": [
+      "unfccc",
+      "transparency",
+      "india_reporting"
+    ],
+    "url": "https://unfccc.int/biennial-transparency-reports",
+    "confirmed": false
   }
 ]

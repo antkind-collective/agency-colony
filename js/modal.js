@@ -1,4 +1,4 @@
-/* ── Colony modals: Promise-based replacements for native prompt/alert ──
+/* ── Your Agency modals: Promise-based replacements for native prompt/alert ──
    Classic script — loaded after js/utils.js (uses escapeHtml), before app.js.
    Built on <dialog> for focus-trapping + Esc handling, but resolution is
    driven by explicit button handlers and the `cancel` event rather than the
@@ -7,27 +7,27 @@
    prompt/alert, which freeze rendering and are invisible to automation).
 
    API (all return Promises):
-     colonyAlert(message, { title })                        → void
-     colonyConfirm(message, { title, confirmLabel,
+     appAlert(message, { title })                        → void
+     appConfirm(message, { title, confirmLabel,
                   cancelLabel, danger })                     → boolean
-     colonyPrompt(message, { title, type, placeholder,
+     appPrompt(message, { title, type, placeholder,
                              okLabel })                      → string | null
-     colonyChoice(message, { title, choices: [{ label,
+     appChoice(message, { title, choices: [{ label,
                   value, variant }], cancelLabel })          → value | null
    Cancel / Esc / backdrop-click resolve to null (false for confirm,
    undefined for alert). */
 
-function _colonyModalOpen({ title, message, buildBody, resolveCancel }) {
+function _appModalOpen({ title, message, buildBody, resolveCancel }) {
   return new Promise((resolve) => {
     const dialog = document.createElement('dialog');
-    dialog.className = 'colony-modal';
+    dialog.className = 'app-modal';
     const messageHtml = message ? escapeHtml(message).replaceAll('\n', '<br>') : '';
     dialog.innerHTML = `
-      <div class="colony-modal-form">
-        ${title ? `<h3 class="colony-modal-title">${escapeHtml(title)}</h3>` : ''}
-        ${message ? `<p class="colony-modal-message">${messageHtml}</p>` : ''}
-        <div class="colony-modal-body"></div>
-        <div class="colony-modal-actions"></div>
+      <div class="app-modal-form">
+        ${title ? `<h3 class="app-modal-title">${escapeHtml(title)}</h3>` : ''}
+        ${message ? `<p class="app-modal-message">${messageHtml}</p>` : ''}
+        <div class="app-modal-body"></div>
+        <div class="app-modal-actions"></div>
       </div>`;
     document.body.appendChild(dialog);
 
@@ -40,8 +40,8 @@ function _colonyModalOpen({ title, message, buildBody, resolveCancel }) {
       resolve(value);
     };
 
-    const body = dialog.querySelector('.colony-modal-body');
-    const actions = dialog.querySelector('.colony-modal-actions');
+    const body = dialog.querySelector('.app-modal-body');
+    const actions = dialog.querySelector('.app-modal-actions');
     buildBody({ dialog, body, actions, finish });
 
     // Esc key fires the dialog `cancel` event (reliable cross-browser).
@@ -53,8 +53,8 @@ function _colonyModalOpen({ title, message, buildBody, resolveCancel }) {
   });
 }
 
-function colonyAlert(message, { title = '' } = {}) {
-  return _colonyModalOpen({
+function appAlert(message, { title = '' } = {}) {
+  return _appModalOpen({
     title, message,
     resolveCancel: () => undefined,
     buildBody: ({ actions, finish }) => {
@@ -64,8 +64,8 @@ function colonyAlert(message, { title = '' } = {}) {
   });
 }
 
-function colonyConfirm(message, { title = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
-  return _colonyModalOpen({
+function appConfirm(message, { title = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+  return _appModalOpen({
     title, message,
     resolveCancel: () => false,
     buildBody: ({ actions, finish }) => {
@@ -82,12 +82,12 @@ function colonyConfirm(message, { title = '', confirmLabel = 'Confirm', cancelLa
   });
 }
 
-function colonyPrompt(message, { title = '', type = 'text', placeholder = '', okLabel = 'OK' } = {}) {
-  return _colonyModalOpen({
+function appPrompt(message, { title = '', type = 'text', placeholder = '', okLabel = 'OK' } = {}) {
+  return _appModalOpen({
     title, message,
     resolveCancel: () => null,
     buildBody: ({ body, actions, finish }) => {
-      body.innerHTML = `<input class="colony-modal-input"
+      body.innerHTML = `<input class="app-modal-input"
         type="${type === 'password' ? 'password' : 'text'}"
         placeholder="${escapeHtml(placeholder)}" autocomplete="off">`;
       actions.innerHTML = `
@@ -103,17 +103,17 @@ function colonyPrompt(message, { title = '', type = 'text', placeholder = '', ok
   });
 }
 
-function colonyChoice(message, { title = '', choices = [], cancelLabel = 'Cancel' } = {}) {
-  return _colonyModalOpen({
+function appChoice(message, { title = '', choices = [], cancelLabel = 'Cancel' } = {}) {
+  return _appModalOpen({
     title, message,
     resolveCancel: () => null,
     buildBody: ({ body, actions, finish }) => {
-      body.innerHTML = '<div class="colony-modal-choices"></div>';
-      const list = body.querySelector('.colony-modal-choices');
+      body.innerHTML = '<div class="app-modal-choices"></div>';
+      const list = body.querySelector('.app-modal-choices');
       choices.forEach((c) => {
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = (c.variant === 'primary' ? 'primary' : 'ghost') + ' colony-modal-choice';
+        btn.className = (c.variant === 'primary' ? 'primary' : 'ghost') + ' app-modal-choice';
         btn.textContent = c.label;
         btn.addEventListener('click', () => finish(c.value)); // closure keeps the real value (any type)
         list.appendChild(btn);

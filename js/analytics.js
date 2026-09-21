@@ -1,4 +1,4 @@
-/* ── Colony analytics parsing: LinkedIn + Instagram report ingestion ──
+/* ── Your Agency analytics parsing: LinkedIn + Instagram report ingestion ──
    Classic script — loads after utils.js, before app.js. Relocated VERBATIM
    from app.js (modularization slice 6) — the full parser toolkit:
    - format helpers (fmtAnalytics, pctAnalytics, trendArrow, week/month labels)
@@ -8,6 +8,7 @@
    - parseInstagramAnalytics (Meta Business Suite post export)
    - detectReportType — SHEET-NAME based by design: vendor xlsx.js sometimes
      can't read cells of real Meta .xls files, so never rely on cell content
+     (CLAUDE.md → Analytics report types)
    - mergeByKey (idempotent re-upload merge by stable key)
    Uses the global XLSX (vendor/xlsx.js) and browser File APIs — not pure;
    pure format helpers are unit-tested in tests/analytics.test.mjs. */
@@ -25,12 +26,58 @@ function pctAnalytics(n) {
   return (n * 100).toFixed(1) + '%';
 }
 
+// Signed % change, formatted, or null when it can't be computed honestly
+// (no baseline). Whole % at ≥10, one decimal below.
+function pctDeltaLabel(current, previous) {
+  const cur = Number(current) || 0;
+  const prev = Number(previous) || 0;
+  if (prev === 0) return null; // "+∞%" helps nobody; trendArrow says "new"
+  // Past ~4x the baseline, relative % stops informing and starts yelling —
+  // "↑ 2700%" against a 6-reaction week reads like a bug, not a win. Show a
+  // multiplier instead: "27×" is the same fact at speaking volume.
+  if (cur / prev >= 4) {
+    const ratio = cur / prev;
+    return `+${ratio >= 10 ? Math.round(ratio) : Math.round(ratio * 10) / 10}×`;
+  }
+  const pct = ((cur - prev) / Math.abs(prev)) * 100;
+  const mag = Math.abs(pct);
+  const rounded = mag >= 10 ? Math.round(mag) : Math.round(mag * 10) / 10;
+  if (rounded === 0) return null;
+  return `${pct > 0 ? '+' : '−'}${rounded}%`;
+}
+
+// Delta for a metric that IS a percentage (engagement rate): percentage
+// POINTS, not relative %. A rate moving 6.96% → 18.2% is "↑ 162%" relatively —
+// arithmetically true and humanly misleading (it reads like the rate hit 162%,
+// and it contradicted the AI brief saying "+11.24 points" about the same move
+// — Alex, 23 Jul 2026). Inputs are FRACTIONS (0.182), matching pctAnalytics.
+function trendArrowPoints(currentFrac, previousFrac) {
+  const cur = Number(currentFrac) || 0;
+  const prev = Number(previousFrac) || 0;
+  if (cur === prev) return '';
+  const pts = Math.round((cur - prev) * 1000) / 10; // fraction → points, 1dp
+  if (pts === 0) return '';
+  const mag = `${Math.abs(pts)} pt${Math.abs(pts) === 1 ? '' : 's'}`;
+  return pts > 0
+    ? ` <span class="trend-up">↑ ${mag}</span>`
+    : ` <span class="trend-down">↓ ${mag}</span>`;
+}
+
+// A bare arrow says "up" without saying by how much — which reads the same for
+// +0.4% and +140% (23 Jul 2026). Arrows carry the % whenever a baseline
+// exists — MAGNITUDE only ("↑ 162%", not "↑ +162%"): the arrow already gives
+// the direction, and the redundant sign made the widest tiles wrap.
 function trendArrow(current, previous) {
   const cur = Number(current) || 0;
   const prev = Number(previous) || 0;
   if (prev === 0 && cur === 0) return '';
-  if (cur > prev) return ' <span class="trend-up">↑</span>';
-  if (cur < prev) return ' <span class="trend-down">↓</span>';
+  // Zero baseline: a bare arrow next to siblings with percentages reads
+  // broken. "new" is the honest word for it.
+  if (prev === 0 && cur > 0) return ' <span class="trend-up">new</span>';
+  const pct = pctDeltaLabel(cur, prev);
+  const mag = pct ? pct.slice(1) : '';
+  if (cur > prev) return ` <span class="trend-up">↑${mag ? ' ' + mag : ''}</span>`;
+  if (cur < prev) return ` <span class="trend-down">↓${mag ? ' ' + mag : ''}</span>`;
   return '';
 }
 
@@ -725,7 +772,7 @@ function detectReportType(file) {
 }
 
 // ═══════════════ Community Pulse (LeadConnector comms workbook) ═══════════════
-// Parses the Comms_Report workbook the Northwind Nonprofit team maintains:
+// Parses the Comms_Report workbook the Example Collective team maintains:
 //  - a per-send stats sheet (name starts "NewslettersAll…"): one row per
 //    newsletter/dispatch/survey send with delivered/opened/clicked/unsub counts
 //  - "Newsletter subscriptions": the subscriber list (region/country/created)
@@ -741,7 +788,16 @@ function excelSerialToIso(value) {
   }
   const s = String(value).trim();
   if (/^\d{4,5}(\.\d+)?$/.test(s)) return excelSerialToIso(parseFloat(s));
-  const direct = new Date(s.length > 10 ? s : s + 'T00:00:00');
+  // A datetime with no zone is parsed as LOCAL time, and toISOString() below
+  // then converts to UTC — which moves the date back a day everywhere east of
+  // UTC. Meta's per-metric CSVs hand us "2026-04-01T00:00:00", so in IST every
+  // daily figure was being filed one day early (found 10 Sep 2026 against a
+  // real export). Pin these to UTC: a calendar date carries no timezone, and
+  // the reporting day is whatever the file says it is.
+  const zoneless = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(s);
+  const direct = new Date(
+    s.length > 10 ? (zoneless ? s.replace(' ', 'T') + 'Z' : s) : s + 'T00:00:00Z'
+  );
   if (isNaN(direct)) return '';
   // V8 date parsing is lenient (e.g. "Total clicks: 1219" parses as year
   // 1219) — reject anything outside a plausible reporting window.
@@ -860,6 +916,25 @@ function parseCommunityPulseRows(sheets) {
 // One metric per file: row 0 = title ("Instagram follows"), then a
 // Date/Primary header row, then daily rows (dates arrive as Excel serials
 // after SheetJS parses the ISO datetimes). Pure core is Node-testable.
+// Meta exports Instagram and Facebook per-metric CSVs in the SAME shape, from
+// the same screen. Some titles name the platform ("Facebook follows",
+// "Instagram follows"); the shared ones do not ("Viewers", "Content
+// interactions", "Reach", "Views"). Verified against Example Collective's real
+// Facebook export on 10 Sep 2026: all five files were being read as Instagram,
+// and the two untitled ones landed on the exact metric keys Instagram already
+// uses — so the client's Facebook figures would have merged into their Instagram
+// numbers with nothing on screen to show it.
+//
+// null means genuinely undecidable from the file. There is no other signal in
+// it, so the caller must ASK rather than guess: a wrong guess silently corrupts
+// a client's reporting, which is worse than one extra click.
+function metricsPlatformFromTitle(title) {
+  const t = String(title || '').trim().toLowerCase();
+  if (/^instagram\b/.test(t)) return 'instagram';
+  if (/^facebook\b/.test(t)) return 'facebook';
+  return null;
+}
+
 function parseInstagramMetricsRows(rows) {
   const all = rows || [];
   const title = cleanCommunityValue((all[0] || [])[0]);
@@ -867,7 +942,7 @@ function parseInstagramMetricsRows(rows) {
   // also just "Reach", "Views", "Content interactions". The "Instagram"
   // prefix is optional branding; strip it for the metric key.
   if (!title || title.length > 60) return null;
-  const metricLabel = title.replace(/^instagram\s+/i, '').trim();
+  const metricLabel = title.replace(/^(instagram|facebook)\s+/i, '').trim();
   const metric = metricLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
   const headerIdx = all.findIndex(r =>
     String((r || [])[0] || '').trim().toLowerCase() === 'date' &&
@@ -881,7 +956,9 @@ function parseInstagramMetricsRows(rows) {
     daily.push({ date, value: isFinite(v) ? v : 0 });
   }
   daily.sort((a, b) => a.date.localeCompare(b.date));
-  return daily.length ? { metric, metricLabel, daily } : null;
+  return daily.length
+    ? { metric, metricLabel, daily, platform: metricsPlatformFromTitle(title), title }
+    : null;
 }
 
 function parseInstagramMetricsCsv(file, existingWb) {
@@ -929,8 +1006,14 @@ function mergeByKey(existing, incoming, keyFn) {
 // Overview KPI math (pure — extracted from renderAnalyticsOverview, slice 8).
 // Impressions/engagement compare last week vs previous week; followers and
 // visitors compare last 7 days vs the previous 7 (needing >=7/>=14 data days).
-function computeOverviewKpis(contentReport, followersReport, visitorsReport) {
-  const weekly = contentReport?.metrics_data || [];
+function computeOverviewKpis(contentReport, followersReport, visitorsReport, todayIso) {
+  const today = todayIso || new Date().toISOString().slice(0, 10);
+  const allWeekly = contentReport?.metrics_data || [];
+  // Complete weeks only: the last bucket usually spans past today (the export
+  // runs mid-week), and a 5-day "week" vs a 7-day one manufactures a collapse
+  // — the "↓65%" impressions tile was exactly this.
+  const weekly = trimInProgressWeek(allWeekly, today);
+  const weekInProgress = allWeekly.length > weekly.length ? allWeekly[allWeekly.length - 1].week : null;
   const followerDaily = followersReport?.metrics_data || [];
   const visitorDaily = visitorsReport?.visitor_metrics || [];
 
@@ -950,7 +1033,9 @@ function computeOverviewKpis(contentReport, followersReport, visitorsReport) {
 
   const kpis = [
     { label: 'Impressions', value: fmtAnalytics(lastWeekImpressions), arrow: prevWeek ? trendArrow(lastWeekImpressions, prevWeek['Impressions (organic)'] || 0) : '' },
-    { label: 'Engagement Rate', value: pctAnalytics(lastWeekEngRate), arrow: prevWeek ? trendArrow(lastWeekEngRate, prevWeek['Engagement rate (total)'] || 0) : '' },
+    // Rate metric → delta in percentage POINTS (trendArrowPoints), matching how
+    // the AI brief talks about the same move. Relative % on a rate reads wrong.
+    { label: 'Engagement Rate', value: pctAnalytics(lastWeekEngRate), arrow: prevWeek ? trendArrowPoints(lastWeekEngRate, prevWeek['Engagement rate (total)'] || 0) : '' },
     { label: 'New Followers', value: fRecent > 0 ? `+${fmtAnalytics(fRecent)}` : '–', arrow: fLen >= 14 ? trendArrow(fRecent, fPrev) : '' },
     { label: 'Page Visits', value: vRecent > 0 ? fmtAnalytics(vRecent) : '–', arrow: vLen >= 14 ? trendArrow(vRecent, vPrev) : '' },
   ];
@@ -958,13 +1043,14 @@ function computeOverviewKpis(contentReport, followersReport, visitorsReport) {
   return {
     kpis,
     kpiPeriod: latestWeek?.week ? `Week of ${weekLabelAnalytics(latestWeek.week)}` : 'Last week',
-    hasPrevWeek: Boolean(prevWeek)
+    hasPrevWeek: Boolean(prevWeek),
+    weekInProgress
   };
 }
 
 // The last date a report's CONTENTS cover — staleness must come from this,
 // never from uploaded_at: a frozen upload timestamp under fresh data cried
-// wolf (Helix Labs, Jul 2026), and a fresh upload click on an OLD file is not
+// wolf (Example Materials, Jul 2026), and a fresh upload click on an OLD file is not
 // fresh data. Mirrors the SQL backfill in migration 202607140001.
 function computeDataThrough(reportType, data) {
   const iso = (v) => {
@@ -985,11 +1071,375 @@ function computeDataThrough(reportType, data) {
   }
   if (reportType === 'followers') return maxOf(data.metricsData, r => r.date) || null;
   if (reportType === 'visitors') return maxOf(data.visitorMetrics, r => r.date) || null;
-  if (reportType === 'instagram') {
+  // Facebook rides the same shape: daily metric rows, and posts if a post
+  // export ever lands. Without this a Facebook report has no data_through and
+  // reads as permanently stale.
+  if (reportType === 'instagram' || reportType === 'facebook') {
     const posts = maxOf(data.postsData, p => p.date || p.publish_time);
     const daily = maxOf(data.metricsData, r => r.date);
     return (posts > daily ? posts : daily) || null;
   }
   if (reportType === 'community_pulse') return iso(data.summary && data.summary.date_to) || null;
   return null;
+}
+
+// ── Comparison windows for daily-metric reports (Instagram) ──
+// Data is put in perspective, never shown raw (23 Jul 2026): every
+// number answers "compared to WHAT?". Windows are MONDAY-WEEK ALIGNED — the
+// agency's operating rhythm (weekly uploads, Monday weeks per Business Rules)
+// — even though Meta's export carries daily rows; the daily rows only give the
+// charts their shape inside those weeks.
+//
+// All helpers are PURE (tested in tests/analytics.test.mjs). Dates are ISO
+// strings throughout, compared lexically — no Date-object timezone traps.
+
+function isoAddDays(iso, n) {
+  const d = new Date(String(iso).slice(0, 10) + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Monday of the ISO week containing `iso` (Sunday belongs to the PREVIOUS
+// week, matching mondayWeekStartDate in js/alloc.js).
+function isoMondayOf(iso) {
+  const d = new Date(String(iso).slice(0, 10) + 'T00:00:00Z');
+  const day = d.getUTCDay();
+  return isoAddDays(iso, day === 0 ? -6 : 1 - day);
+}
+
+// Sum every numeric metric across rows → { metricKey: total }. Missing values
+// are missing, not zero — a metric absent from every row stays absent.
+function sumMetricRows(rows) {
+  const totals = {};
+  (rows || []).forEach((r) => {
+    Object.keys(r || {}).forEach((k) => {
+      if (k === 'date') return;
+      const v = Number(r[k]);
+      if (!isNaN(v)) totals[k] = (totals[k] || 0) + v;
+    });
+  });
+  return totals;
+}
+
+// Build the A-vs-B windows for a comparison mode over daily rows.
+// Returns { a, b, note } where a/b = { startIso, endIso, label, rows, totals },
+// or null when the data can't support the mode. b.rows is null for average
+// baselines (there's no single week to draw); b.totals is always present.
+//
+// The partial-week rule: "this week vs last week" on a Wednesday compares 3
+// days against 7 and reports a collapse. So A is the last FULL Monday–Sunday
+// week the data covers, and in-progress days are EXCLUDED, with `note` saying
+// so. Honest beats current.
+function igComparisonWindows(daily, mode) {
+  const rows = (daily || []).filter((r) => r && r.date).slice()
+    .sort((x, y) => String(x.date).localeCompare(String(y.date)));
+  if (!rows.length) return null;
+  const maxIso = rows[rows.length - 1].date;
+  const inRange = (s, e) => rows.filter((r) => r.date >= s && r.date <= e);
+  const fmt = (iso) => {
+    const d = new Date(iso + 'T00:00:00Z');
+    return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  };
+  const weekWin = (monIso, label) => {
+    const endIso = isoAddDays(monIso, 6);
+    const r = inRange(monIso, endIso);
+    return { startIso: monIso, endIso, label: `${label} (${fmt(monIso)} – ${fmt(endIso)})`, rows: r, totals: sumMetricRows(r) };
+  };
+
+  // Last COMPLETE week: its Sunday must be within the data.
+  const thisMon = isoMondayOf(maxIso);
+  const lastFullMon = isoAddDays(thisMon, 6) <= maxIso ? thisMon : isoAddDays(thisMon, -7);
+  const partialNote = maxIso >= isoAddDays(lastFullMon, 7)
+    ? `Week in progress (from ${fmt(isoAddDays(lastFullMon, 7))}) excluded — it would compare a part-week against a full one.`
+    : '';
+
+  if (mode === 'wow') {
+    const a = weekWin(lastFullMon, 'Last week');
+    const b = weekWin(isoAddDays(lastFullMon, -7), 'Week before');
+    if (!a.rows.length || !b.rows.length) return null;
+    return { a, b, note: partialNote };
+  }
+
+  if (mode === 'wo4') {
+    const a = weekWin(lastFullMon, 'Last week');
+    if (!a.rows.length) return null;
+    const avgTotals = {};
+    let weeksCounted = 0;
+    for (let i = 1; i <= 4; i++) {
+      const w = inRange(isoAddDays(lastFullMon, -7 * i), isoAddDays(lastFullMon, -7 * i + 6));
+      if (!w.length) continue;
+      weeksCounted += 1;
+      const t = sumMetricRows(w);
+      Object.keys(t).forEach((k) => { avgTotals[k] = (avgTotals[k] || 0) + t[k]; });
+    }
+    if (!weeksCounted) return null;
+    Object.keys(avgTotals).forEach((k) => { avgTotals[k] = avgTotals[k] / weeksCounted; });
+    return {
+      a,
+      b: { startIso: null, endIso: null, label: `${weeksCounted}-week average`, rows: null, totals: avgTotals },
+      note: partialNote + (weeksCounted < 4 ? ` Average uses the ${weeksCounted} prior week${weeksCounted > 1 ? 's' : ''} on record.` : '')
+    };
+  }
+
+  if (mode === 'mom') {
+    // Last FULL calendar month vs the one before it.
+    const monthStart = (iso) => iso.slice(0, 7) + '-01';
+    const monthEnd = (iso) => {
+      const d = new Date(iso.slice(0, 7) + '-01T00:00:00Z');
+      d.setUTCMonth(d.getUTCMonth() + 1); d.setUTCDate(0);
+      return d.toISOString().slice(0, 10);
+    };
+    const prevMonthStart = (iso) => {
+      const d = new Date(iso.slice(0, 7) + '-01T00:00:00Z');
+      d.setUTCMonth(d.getUTCMonth() - 1);
+      return d.toISOString().slice(0, 10);
+    };
+    const monthLabel = (iso) => new Date(iso + 'T00:00:00Z')
+      .toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    let aStart = monthStart(maxIso);
+    if (monthEnd(maxIso) > maxIso) aStart = prevMonthStart(aStart); // current month incomplete
+    const bStart = prevMonthStart(aStart);
+    const aRows = inRange(aStart, monthEnd(aStart));
+    const bRows = inRange(bStart, monthEnd(bStart));
+    if (!aRows.length || !bRows.length) return null;
+    const inProgress = monthEnd(maxIso) > maxIso
+      ? `${monthLabel(monthStart(maxIso))} is in progress and excluded.` : '';
+    return {
+      a: { startIso: aStart, endIso: monthEnd(aStart), label: monthLabel(aStart), rows: aRows, totals: sumMetricRows(aRows) },
+      b: { startIso: bStart, endIso: monthEnd(bStart), label: monthLabel(bStart), rows: bRows, totals: sumMetricRows(bRows) },
+      note: inProgress
+    };
+  }
+
+  if (mode === 'custom') return null; // caller builds windows from picked weeks
+  return null; // 'all' and unknown modes: no comparison framing
+}
+
+// Custom comparison: any two weeks, each picked by any date inside it. Snapped
+// to Monday weeks — matching the presets and the upload rhythm.
+function igCustomWeekWindows(daily, aDateIso, bDateIso) {
+  const rows = (daily || []).filter((r) => r && r.date).slice()
+    .sort((x, y) => String(x.date).localeCompare(String(y.date)));
+  if (!rows.length || !aDateIso || !bDateIso) return null;
+  const fmt = (iso) => new Date(iso + 'T00:00:00Z')
+    .toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  const win = (dateIso, name) => {
+    const mon = isoMondayOf(dateIso);
+    const end = isoAddDays(mon, 6);
+    const r = rows.filter((x) => x.date >= mon && x.date <= end);
+    return { startIso: mon, endIso: end, label: `${name} (${fmt(mon)} – ${fmt(end)})`, rows: r, totals: sumMetricRows(r) };
+  };
+  const a = win(aDateIso, 'Week A');
+  const b = win(bDateIso, 'Week B');
+  if (!a.rows.length || !b.rows.length) return null;
+  return { a, b, note: '' };
+}
+
+// Precomputed latest-vs-previous deltas for a pair of metric rows — the AI
+// QUOTES these, it never does division (it picked wrong denominators and
+// invented baselines when asked to). Rate-ish keys get points; counts get
+// absolute + relative % from pctDeltaLabel. Pure; tested.
+function precomputeRowDeltas(prevRow, curRow) {
+  const out = {};
+  Object.keys(curRow || {}).forEach((k) => {
+    const cur = Number(curRow[k]); const prev = Number((prevRow || {})[k]);
+    if (isNaN(cur) || isNaN(prev)) return;
+    if (/rate/i.test(k)) {
+      const pts = (cur - prev) * 100;
+      if (Math.abs(pts) >= 0.005) out[k] = `${pts > 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} percentage points`;
+    } else {
+      const pct = pctDeltaLabel(cur, prev);
+      if (pct) out[k] = `${cur - prev > 0 ? '+' : ''}${(cur - prev).toLocaleString()} (${pct})`;
+    }
+  });
+  return out;
+}
+
+
+// "2026-07-12" bucket → "12–18 Jul" (or "28 Jun – 4 Jul" across months).
+// Weekly buckets are database keys; humans read date ranges.
+function weekRangeLabel(weekStartIso) {
+  const start = new Date(String(weekStartIso).slice(0, 10) + 'T00:00:00Z');
+  if (isNaN(start)) return String(weekStartIso);
+  const end = new Date(start); end.setUTCDate(end.getUTCDate() + 6);
+  const d = (x) => x.getUTCDate();
+  const m = (x) => x.toLocaleDateString('en-IN', { month: 'short', timeZone: 'UTC' });
+  return start.getUTCMonth() === end.getUTCMonth()
+    ? `${d(start)}–${d(end)} ${m(end)}`
+    : `${d(start)} ${m(start)} – ${d(end)} ${m(end)}`;
+}
+
+// ── Comparison windows for WEEKLY-bucketed reports (LinkedIn) ──
+// Buckets are 7-day spans keyed by start date. The last bucket is usually IN
+// PROGRESS (the export runs to mid-week), and comparing it to a full week
+// manufactures a collapse — found live: "↓65%" was 5 days vs 7. Completeness
+// rule: a bucket is complete only when today is PAST its end date.
+
+function liWeekIsComplete(weekStartIso, todayIso) {
+  return isoAddDays(String(weekStartIso).slice(0, 10), 6) < todayIso;
+}
+
+// Trailing in-progress bucket removed — for KPI tiles AND AI payloads, so
+// every consumer reasons over complete weeks only.
+function trimInProgressWeek(weekly, todayIso) {
+  const rows = Array.isArray(weekly) ? weekly.slice() : [];
+  while (rows.length && !liWeekIsComplete(rows[rows.length - 1].week, todayIso)) rows.pop();
+  return rows;
+}
+
+// A-vs-B windows over weekly rows. Modes: wow, wo4, mom, custom (aKey/bKey =
+// week keys). Returns { a, b, note } with totals per metric, or null.
+function liComparisonWindows(weekly, mode, todayIso, aKey, bKey) {
+  const all = Array.isArray(weekly) ? weekly.slice().sort((x, y) => String(x.week).localeCompare(String(y.week))) : [];
+  if (!all.length) return null;
+  const rows = trimInProgressWeek(all, todayIso);
+  if (!rows.length) return null;
+  const trimmedNote = rows.length < all.length
+    ? `Current week (${weekRangeLabel(all[all.length - 1].week)}) is in progress and excluded.` : '';
+  const win = (row, name) => row ? ({ startIso: row.week, label: `${name} (${weekRangeLabel(row.week)})`, totals: row }) : null;
+
+  if (mode === 'wow') {
+    if (rows.length < 2) return null;
+    return { a: win(rows[rows.length - 1], 'Last full week'), b: win(rows[rows.length - 2], 'Week before'), note: trimmedNote };
+  }
+  if (mode === 'wo4') {
+    if (rows.length < 2) return null;
+    const a = rows[rows.length - 1];
+    const base = rows.slice(-5, -1);
+    const avg = {};
+    base.forEach(r => Object.keys(r).forEach(k => {
+      const v = Number(r[k]);
+      if (!isNaN(v) && k !== 'week') avg[k] = (avg[k] || 0) + v / base.length;
+    }));
+    return { a: win(a, 'Last full week'),
+      b: { startIso: null, label: `${base.length}-week average`, totals: avg },
+      note: trimmedNote + (base.length < 4 ? ` Average uses ${base.length} prior week${base.length > 1 ? 's' : ''}.` : '') };
+  }
+  if (mode === 'mom') {
+    const months = aggregateWeeklyToMonthly(rows);
+    // Exclude the current calendar month — it is in progress by definition.
+    const complete = months.filter(m => m.month < String(todayIso).slice(0, 7));
+    if (complete.length < 2) return null;
+    const a = complete[complete.length - 1], b = complete[complete.length - 2];
+    return { a: { startIso: a.month, label: a.month, totals: a },
+             b: { startIso: b.month, label: b.month, totals: b },
+             note: months.length > complete.length ? `${String(todayIso).slice(0, 7)} is in progress and excluded.` : '' };
+  }
+  if (mode === 'custom') {
+    const a = all.find(r => r.week === aKey), b = all.find(r => r.week === bKey);
+    if (!a || !b) return null;
+    const partial = [a, b].filter(r => !liWeekIsComplete(r.week, todayIso));
+    return { a: win(a, 'Week A'), b: win(b, 'Week B'),
+      note: partial.length ? `Week of ${partial.map(r => weekRangeLabel(r.week)).join(' & ')} is in progress — partial data.` : '' };
+  }
+  return null;
+}
+
+// ── Comms DOCX ingest (Rhea's report format, 28 Jul 2026) ──
+// The "report" is a Word file where every send's stats are pasted DASHBOARD
+// SCREENSHOTS under a date heading ("May 5 2026 Dispatch") — zero tables,
+// zero text numbers. So ingestion is: unzip the .docx, pair each image with
+// its send section in document order, have Claude read the screenshots into
+// structured rows, then a human review step before anything is saved.
+
+// Minimal ZIP reader — enough for .docx (which is just a zip). Uses the
+// browser-native DecompressionStream, so no vendored zip library. Parses the
+// central directory; supports stored (0) and deflate (8) entries.
+async function extractZipEntries(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  const bytes = new Uint8Array(arrayBuffer);
+  // End-of-central-directory: scan back for PK\x05\x06
+  let eocd = -1;
+  for (let i = arrayBuffer.byteLength - 22; i >= 0 && i > arrayBuffer.byteLength - 65558; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('Not a zip file (no central directory).');
+  const count = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
+  const entries = {};
+  for (let n = 0; n < count; n++) {
+    if (view.getUint32(offset, true) !== 0x02014b50) break;
+    const method = view.getUint16(offset + 10, true);
+    const compSize = view.getUint32(offset + 20, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const name = new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLen));
+    // Local header repeats name/extra lengths — data starts after them.
+    const lhNameLen = view.getUint16(localOffset + 26, true);
+    const lhExtraLen = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + lhNameLen + lhExtraLen;
+    const raw = bytes.subarray(dataStart, dataStart + compSize);
+    entries[name] = { method, raw };
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  const out = {};
+  for (const [name, e] of Object.entries(entries)) {
+    if (e.method === 0) { out[name] = e.raw; continue; }
+    const ds = new DecompressionStream('deflate-raw');
+    const stream = new Blob([e.raw]).stream().pipeThrough(ds);
+    out[name] = new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  return out;
+}
+
+// "May 5 2026 Dispatch" / "7 July 2026 Newsletter" → { dateIso, sendType }.
+// Both date orders appear in the real file. Null when the line isn't a send
+// heading (Link:/Time:/section labels).
+function parseCommsHeading(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^(.*?)\s*(Dispatch|Newsletter)\s*$/i);
+  if (!m) return null;
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  const d = m[1].trim();
+  let day, mon, year;
+  let dm = d.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/);      // May 5 2026
+  if (dm) { mon = MONTHS[dm[1].slice(0, 3).toLowerCase()]; day = +dm[2]; year = +dm[3]; }
+  else {
+    dm = d.match(/^(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})$/);        // 7 July 2026
+    if (dm) { day = +dm[1]; mon = MONTHS[dm[2].slice(0, 3).toLowerCase()]; year = +dm[3]; }
+  }
+  if (!day || !mon || !year) return null;
+  return {
+    dateIso: `${year}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+    sendType: m[2][0].toUpperCase() + m[2].slice(1).toLowerCase(),
+    heading: t
+  };
+}
+
+// Walk document.xml in order: send headings partition the doc; every image
+// reference (r:embed id) after a heading belongs to that send. Rels map the
+// embed ids to media file paths. Regex-based (no DOMParser) so it's testable.
+function parseCommsDocxStructure(documentXml, relsXml) {
+  const rels = {};
+  String(relsXml || '').replace(/<Relationship\s[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"[^>]*\/?>/g,
+    (_, id, target) => { rels[id] = target.replace(/^\.?\//, ''); return ''; });
+  const sends = [];
+  let current = null;
+  const paras = String(documentXml || '').match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];
+  paras.forEach((p) => {
+    const text = (p.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [])
+      .map((t) => t.replace(/<[^>]+>/g, '')).join('');
+    const heading = parseCommsHeading(text);
+    if (heading) { current = { ...heading, imagePaths: [] }; sends.push(current); return; }
+    (p.match(/r:embed="([^"]+)"/g) || []).forEach((e) => {
+      const id = e.slice(9, -1);
+      if (current && rels[id]) current.imagePaths.push('word/' + rels[id]);
+    });
+  });
+  return sends.filter((s) => s.imagePaths.length);
+}
+
+// Storage object name → display parts. Uploads are stored as
+// `${Date.now()}_${original name}` (see the upload handlers), so the date the
+// file landed is IN the name — the bucket API's own timestamps reflect
+// list-time metadata, not what we want shown.
+function parseStoredUploadName(objectName) {
+  const m = String(objectName || '').match(/^(\d{13})_(.+)$/);
+  if (!m) return { displayName: String(objectName || ''), dateIso: null };
+  return {
+    displayName: m[2],
+    dateIso: new Date(Number(m[1])).toISOString().slice(0, 10)
+  };
 }

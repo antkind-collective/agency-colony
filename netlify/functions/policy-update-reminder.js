@@ -49,8 +49,8 @@ const run = async (event) => {
 
     const updatedDate = updatedAt.toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
     const subject = `Reminder: Review "${policy.title}"`;
-    const html = `<p>The <strong>${policy.title}</strong> was last updated on ${updatedDate}.</p><p>Please review and update it for the coming year.</p><p><a href="https://colony.youragency.com/#admin-settings">Open Admin Settings</a></p>`;
-    const text = `The ${policy.title} was last updated on ${updatedDate}. Please review and update it. https://colony.youragency.com/#admin-settings`;
+    const html = `<p>The <strong>${policy.title}</strong> was last updated on ${updatedDate}.</p><p>Please review and update it for the coming year.</p><p><a href="https://app.youragency.com/#admin-settings">Open Admin Settings</a></p>`;
+    const text = `The ${policy.title} was last updated on ${updatedDate}. Please review and update it. https://app.youragency.com/#admin-settings`;
 
     try {
       const emailResult = await sendEmail({ to: recipients, subject, html, text });

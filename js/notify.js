@@ -1,4 +1,4 @@
-/* ── Colony notifications: pure action-item builder ──
+/* ── Your Agency notifications: pure action-item builder ──
    Classic script — loads after utils.js, before app.js. PURE ONLY.
    v1 philosophy: notifications are COMPUTED from live data, not stored —
    an item exists exactly while the underlying action is needed (approving a
@@ -108,6 +108,80 @@ function buildActionItems({ myEmail, myEmployeeId, isSuperadmin, leaveRows, toda
       detail: 'tap to read and acknowledge',
       screen: 'policy',
       sortKey: 'zz2'
+    });
+  }
+  // 7. new joiners awaiting setup (approvers only — the loader supplies rows
+  //    only to Alex/Nadia). Sorts FIRST: a project-based person is locked out
+  //    of every client until this is actioned, so it must not sit below a
+  //    fortnight-old board reply. Vanishes the moment they're activated —
+  //    computed, never stored, so it can't rot into a stale to-do.
+  for (const p of s.pendingSetups || []) {
+    const who = String(p.fullName || 'A new joiner').split(' ')[0];
+    const blocked = employmentIsScoped(p.employmentType);
+    items.push({
+      key: `setup-pending-${p.id}`,
+      icon: blocked ? '🔒' : '🧑‍💼',
+      text: `Set up ${who} — ${employmentTypeLabel(p.employmentType).toLowerCase()}, awaiting approval`,
+      detail: blocked
+        ? `no client access until activated${p.requestedTeam ? ` · asked for ${p.requestedTeam}` : ''}`
+        : `confirm their team${p.requestedTeam ? ` (asked for ${p.requestedTeam})` : ''}`,
+      screen: 'admin-settings',
+      anchor: 'pendingSetupPanel',
+      sortKey: `!${p.createdAt || ''}`
+    });
+  }
+  // 8. brief pipeline (the client Brief Tracking). Counts in keys so a changed count
+  //    re-alerts; zero counts emit nothing (computed, never stored).
+  if (s.briefsAwaitingReview) {
+    items.push({
+      key: `briefs-review-${s.briefsAwaitingReview}`,
+      icon: '📝',
+      text: `${s.briefsAwaitingReview} the client brief${s.briefsAwaitingReview > 1 ? 's' : ''} ready for review`,
+      detail: 'tap to open the briefs board',
+      screen: 'briefs-pipeline',
+      sortKey: 'zz3'
+    });
+  }
+  if (s.briefQuickOpen) {
+    items.push({
+      key: `briefs-quick-${s.briefQuickOpen}`,
+      icon: '📣',
+      text: `${s.briefQuickOpen} quick request${s.briefQuickOpen > 1 ? 's' : ''} from the client to acknowledge`,
+      detail: 'tap to open the briefs board',
+      screen: 'briefs-pipeline',
+      sortKey: 'zz3'
+    });
+  }
+  if (s.briefOverdue) {
+    items.push({
+      key: `briefs-overdue-${s.briefOverdue}`,
+      icon: '⏰',
+      text: `${s.briefOverdue} brief deliverable${s.briefOverdue > 1 ? 's are' : ' is'} past SLA`,
+      detail: 'tap to open the briefs board',
+      screen: 'briefs-pipeline',
+      sortKey: 'zz3'
+    });
+  }
+  if (s.briefAssignedToMe) {
+    items.push({
+      key: `briefs-mine-${s.briefAssignedToMe}`,
+      icon: '🎨',
+      text: `${s.briefAssignedToMe} brief deliverable${s.briefAssignedToMe > 1 ? 's' : ''} assigned to you`,
+      detail: 'tap to open the briefs board',
+      screen: 'briefs-pipeline',
+      sortKey: 'zz3'
+    });
+  }
+  // 9. hiring pipeline — hires at a stage that's waiting on ME.
+  if (s.hiresMyTurn) {
+    items.push({
+      key: `hires-turn-${s.hiresMyTurn}`,
+      icon: '🧑‍💼',
+      text: `${s.hiresMyTurn} hire${s.hiresMyTurn > 1 ? 's' : ''} waiting on you`,
+      detail: 'tap to open Hiring in Team Directory',
+      screen: 'people-directory',
+      anchor: 'hiringPanel',
+      sortKey: '!hiring'
     });
   }
   // 6. replies to MY board requests (loader supplies last-14-days, not-mine)

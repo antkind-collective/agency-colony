@@ -156,7 +156,11 @@ button {
   padding: 0 var(--space-7);
   background: var(--bg);
   border-bottom: 1px solid var(--line);
-  z-index: 10;
+  /* Above .screen-head (z:10): the bell dropdown lives inside this header's
+     stacking context, so the panel's own z-index only counts in here — with
+     header and screen-head both at 10, the later-in-DOM screen head painted
+     its Upload button over the open dropdown. */
+  z-index: 30;
 }
 
 .header-logo {
@@ -337,8 +341,16 @@ button {
   display: block;
 }
 
-.sidebar-brand-colony {
+.sidebar-brand-wordmark {
   width: 120px;
+  height: auto;
+  display: block;
+}
+
+/* Circle uses the ant mark in place of the COLONY wordmark. Sized to sit in
+   the same optical space; colour comes from currentColor like the splash. */
+.sidebar-brand-mark {
+  width: 42px;
   height: auto;
   display: block;
 }
@@ -384,6 +396,23 @@ button {
   text-align: center;
 }
 
+.login-brand {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.login-brand-mark {
+  width: 54px;
+  height: auto;
+  opacity: 0.9;
+}
+.login-brand-name {
+  margin: 0;
+  font-weight: 640;
+  font-size: 15px;
+}
+
 .auth-actions {
   width: 100%;
 }
@@ -416,6 +445,37 @@ button {
 
 .google-btn:active {
   transform: translateY(0);
+}
+
+.login-partner-entrance {
+  width: 100%;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(var(--text-rgb), 0.1);
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.google-btn-secondary {
+  min-height: 40px;
+  font-size: 13px;
+  font-weight: 560;
+  box-shadow: none;
+}
+
+/* On Circle the invited entrance is the only way in, so it drops the divider
+   and the quieter button treatment that marked it as the second option under
+   the staff sign-in (7 Sep 2026). */
+.login-partner-entrance.is-only-entrance {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.login-partner-entrance.is-only-entrance .google-btn-secondary {
+  min-height: 46px;
+  font-size: 14px;
+  font-weight: 620;
 }
 
 .google-icon {
@@ -934,13 +994,45 @@ textarea:focus {
 #allocationTable tfoot td {
   border-top: 1px solid rgba(var(--text-rgb), 0.08);
   padding-top: 8px;
+  /* `tbody td` is padded 10px/11px, but nothing styles tfoot cells, so these
+     fell back to the browser default of 1px — which is why the total sat 10px
+     right of the column it totals. Matching the body cells is what makes the
+     figures stack; the offsets below are measured from this same edge. */
+  padding-left: 11px;
+  padding-right: 11px;
 }
 #allocationTable tfoot .alloc-total {
   margin: 0;
   font-size: 13px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  text-align: center;
+  /* Sits directly beneath a column of right-aligned inputs. Centring it left
+     the total lined up with neither the figures it adds up nor the header
+     above them. The 27px clears the same suffix the rows clear, plus the
+     input's 1px border, so the digits stack exactly. */
+  position: relative;
+  display: block;
+  text-align: right;
+  padding-right: 27px;
+}
+#allocationTable tfoot .alloc-total-unit {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  font-weight: 600;
+  /* Opacity, not a fixed colour, so the unit follows the total into its
+     warn/error state instead of staying grey. Same 10px offset as the row's
+     suffix, from the same right edge. */
+  right: 10px;
+  opacity: 0.5;
+}
+#allocationTable tfoot .alloc-total-unit:empty { display: none; }
+/* A failure is a sentence, not a figure: it needs the whole cell. */
+#allocationTable tfoot .alloc-total.is-message {
+  text-align: left;
+  padding-right: 0;
+  font-weight: 600;
 }
 .alloc-footer-actions {
   display: flex;
@@ -1233,6 +1325,114 @@ tbody tr:hover {
 
 .inline-filter select {
   width: auto;
+}
+
+/* Hiring list: people, each with the one step they are waiting on. */
+#hiringList {
+  margin-top: var(--space-5);
+}
+/* Both headings share one treatment — a tinted bar — so "Hiring" and
+   "ACTIVE HIRES" read as the same kind of thing (24 Aug 2026). */
+.hire-section-heading,
+.hire-list-heading {
+  font-family: 'Roboto Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(var(--text-rgb), 0.82);
+  background: rgba(var(--text-rgb), 0.06);
+  padding: 7px 12px;
+  margin: 0 0 14px;
+}
+/* Bold, so both headings carry as headings (24 Aug 2026). */
+.hire-section-heading,
+.hire-list-heading {
+  font-weight: 700;
+}
+.hire-list-heading {
+  margin-top: 0;
+}
+/* A row that looks like a row: its own surface, everything on one line. */
+.hire-row {
+  background: rgba(var(--text-rgb), 0.035);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+}
+.hire-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+/* Same size and weight as the status chip beside it, so the name and its stage
+   read as one unit rather than a title with a tag under it. */
+.hire-row-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  flex: 1;
+  min-width: 120px;
+}
+/* Offer terms sit inside the hire's Details drawer, visibly a form and not
+   part of the read-only summary above it. */
+.offer-terms {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 4px;
+}
+/* Save lives with the heading so it is reachable without scrolling past the
+   whole form. */
+.offer-terms-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+.offer-terms-head .hire-list-heading {
+  flex: 1;
+}
+/* Two columns wherever there is room — six stacked full-width fields made the
+   form taller than the screen. */
+.offer-terms-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 16px;
+}
+
+/* Cancel rides on the same line, last in the row. */
+.hire-row-head .danger-text {
+  margin-left: 2px;
+}
+
+/* Hiring create row: four controls side by side, so the label sits ABOVE its
+   field rather than beside it. A date input cannot carry a placeholder, so
+   without this the picker read as a bare dd/mm/yyyy with nothing saying what
+   it was for (24 Aug 2026). */
+#hiringCreateBar {
+  align-items: flex-end;
+  /* A clear blank line under the "One checklist per hire…" description, which
+     otherwise sat right on top of the fields (24 Aug 2026). */
+  margin-top: var(--space-5);
+}
+#hiringCreateBar .inline-filter {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  flex: 1 1 160px;
+  white-space: nowrap;
+}
+/* `.action-row input` is `flex: 1 1 190px`, which inside these column labels
+   applied to the VERTICAL axis and stretched every field to 190px tall.
+   Height comes from the control itself here; flex only sizes the label. */
+#hiringCreateBar .inline-filter input,
+#hiringCreateBar .inline-filter select {
+  flex: 0 0 auto;
+  width: 100%;
+}
+/* Flex items get blockified, so "(optional)" only stays beside "Start date"
+   because it sits inside a wrapper span that is itself the single flex item. */
+#hiringCreateBar .inline-filter .mini-meta {
+  display: inline;
 }
 
 .archive-layout {
@@ -3662,7 +3862,7 @@ textarea:focus-visible {
 /* Sustainability Calendar — inline pill strip */
 .sus-cal-panel { padding: 0; margin-bottom: 12px; background: none; box-shadow: none; }
 .sus-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
-.sus-pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 20px; cursor: pointer; transition: background 0.15s, border-color 0.15s; white-space: nowrap; }
+.sus-pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; cursor: pointer; transition: background 0.15s, border-color 0.15s; white-space: nowrap; }
 .sus-pill:hover { background: var(--bg-muted); border-color: var(--text-tertiary); }
 .sus-pill.today { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .sus-pill-date { font-size: 11px; color: var(--text-tertiary); font-weight: 400; }
@@ -3677,7 +3877,7 @@ textarea:focus-visible {
 .birthday-panel { padding: 0; margin-bottom: 8px; background: none; box-shadow: none; }
 .bday-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .bday-strip-label { font-size: 11px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
-.bday-pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 20px; white-space: nowrap; }
+.bday-pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; white-space: nowrap; }
 .bday-pill.bday-today { border-color: #e8a04c; background: color-mix(in srgb, #e8a04c 10%, transparent); animation: bday-glow 2s ease-in-out infinite alternate; }
 .bday-pill-date { font-size: 11px; color: var(--text-tertiary); font-weight: 400; }
 @keyframes bday-glow { from { box-shadow: 0 0 4px rgba(232, 160, 76, 0.2); } to { box-shadow: 0 0 12px rgba(232, 160, 76, 0.4); } }
@@ -4151,8 +4351,8 @@ textarea:focus-visible {
 .analytics-kpi-value { font-size: 1.4rem; font-weight: 700; }
 
 /* Trend arrows */
-.trend-up { color: var(--good); font-size: 0.75em; font-weight: 600; }
-.trend-down { color: #e03131; font-size: 0.75em; font-weight: 600; }
+.trend-up { color: var(--good); font-size: 0.75em; font-weight: 600; white-space: nowrap; }
+.trend-down { color: #e03131; font-size: 0.75em; font-weight: 600; white-space: nowrap; }
 
 /* Filter row */
 .analytics-filter-row {
@@ -4275,6 +4475,9 @@ textarea:focus-visible {
 }
 .insights-line {
   margin-bottom: var(--space-2);
+  /* same indent as bullets — paragraph sections sat flush-left while bullet
+     sections were indented, giving the brief two left edges */
+  padding-left: var(--space-3);
 }
 .insights-loading {
   display: flex;
@@ -4903,32 +5106,11 @@ select.deal-company-select,
   font-size: 0.875rem;
   line-height: 1.3;
 }
-.deal-card-next {
-  font-size: 0.78rem;
-  color: var(--text-2);
-  line-height: 1.3;
-  margin-bottom: var(--space-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .deal-card-bottom {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-}
-.deal-card-poc {
-  font-size: 0.7rem;
-  font-weight: 600;
-  background: var(--surface-2);
-  border-radius: 999px;
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-2);
 }
 .deal-card-deadline {
   font-size: 0.75rem;
@@ -5404,6 +5586,7 @@ select.deal-company-select,
   margin-bottom: var(--space-4);
   gap: var(--space-3);
 }
+.policy-page-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .policy-page-header h1 {
   font-size: 1.4rem;
   font-weight: 700;
@@ -5605,6 +5788,19 @@ select.deal-company-select,
 }
 
 /* --- Sidebar onboarding badge --- */
+/* Per-person twin of the sidebar dot: marks the row of anyone with an active
+   onboarding checklist, so the sidebar signal is attributable. */
+.onboarding-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--yellow, #f0ad4e);
+  margin-right: 6px;
+  vertical-align: middle;
+  flex: 0 0 auto;
+}
+
 .sidebar-onboarding-badge {
   display: inline-block;
   width: 8px;
@@ -6012,7 +6208,7 @@ select.deal-company-select,
 .sc-alloc-dept-list { display:flex; flex-wrap:wrap; gap:6px; }
 
 /* ── Colony modals (js/modal.js) — in-page replacements for native dialogs ── */
-.colony-modal {
+.app-modal {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
   background: var(--bg);
@@ -6022,29 +6218,29 @@ select.deal-company-select,
   width: calc(100vw - 48px);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
 }
-.colony-modal::backdrop {
+.app-modal::backdrop {
   background: rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(2px);
 }
-.colony-modal-form {
+.app-modal-form {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-5);
 }
-.colony-modal-title {
+.app-modal-title {
   font-size: 1.1rem;
   font-weight: 700;
   margin: 0;
 }
-.colony-modal-message {
+.app-modal-message {
   margin: 0;
   color: var(--text);
   font-size: 0.95rem;
   line-height: 1.5;
 }
-.colony-modal-body:empty { display: none; }
-.colony-modal-input {
+.app-modal-body:empty { display: none; }
+.app-modal-input {
   width: 100%;
   padding: var(--space-3);
   border: 1px solid var(--line-strong);
@@ -6053,30 +6249,30 @@ select.deal-company-select,
   color: var(--text);
   font: inherit;
 }
-.colony-modal-input:focus {
+.app-modal-input:focus {
   outline: 2px solid var(--primary);
   outline-offset: 1px;
 }
-.colony-modal-choices {
+.app-modal-choices {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   max-height: 320px;
   overflow-y: auto;
 }
-.colony-modal-choice {
+.app-modal-choice {
   width: 100%;
   text-align: left;
 }
-.colony-modal-actions .danger {
+.app-modal-actions .danger {
   background: var(--bad);
   color: #fff;
   border-color: var(--bad);
 }
-.colony-modal-actions .danger:hover:not(:disabled) {
+.app-modal-actions .danger:hover:not(:disabled) {
   filter: brightness(0.94);
 }
-.colony-modal-actions {
+.app-modal-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -6084,7 +6280,7 @@ select.deal-company-select,
 }
 /* The global `.primary { margin-top: 20px }` (meant for forms) leaks in and,
    with the flex row, made the ghost button stretch 20px taller. Neutralize it. */
-.colony-modal-actions .primary { margin-top: 0; }
+.app-modal-actions .primary { margin-top: 0; }
 
 /* Notification bell (top bar) */
 .notify-badge {
@@ -6110,7 +6306,11 @@ select.deal-company-select,
   z-index: 300;
   width: 320px;
   max-width: calc(100vw - 32px);
-  background: var(--surface);
+  /* var(--bg), NOT var(--surface): light-mode --surface is a 6%-opacity tint
+     for subtle fills, so the dropdown was 94% transparent and page content
+     (the Upload button) showed through it. Dark mode's --surface is opaque,
+     which is why this hid for so long. */
+  background: var(--bg);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
@@ -6159,6 +6359,18 @@ select.deal-company-select,
 /* Recurring task marker */
 .recur-mark { color: var(--good, #5cb88a); font-weight: 600; }
 
+/* Daily copy of a Weekly Planner task (Ruby's board ask, 5 Aug 2026) */
+.weekly-chip {
+  background: rgba(90, 140, 220, 0.14);
+  color: #3763ad;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 12px;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
 /* Completed board items: click to expand the reply thread */
 .fr-completed-expandable { cursor: pointer; }
 .fr-completed-reply-count { color: var(--accent, #bca4b6); }
@@ -6182,3 +6394,355 @@ select.deal-company-select,
 .snap-kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
 .snap-kpi-value { font-size: 20px; font-weight: 600; }
 .snap-card > button { align-self: flex-start; margin-top: auto; }
+
+/* Awaiting Setup — client scope picker.
+   The checkbox needs an explicit width:auto because the global `input,select,
+   textarea { width:100% }` rule above applies to checkboxes too: inside a flex
+   or grid item that made each box 161px wide, swallowing the whole column and
+   leaving the client name at zero width (26 nameless checkboxes). `flex:none`
+   does NOT fix it — flex-basis:auto still resolves to that 100% width. */
+.setup-client-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px 14px;
+  margin-top: 8px;
+}
+.setup-client-grid label { display: flex; align-items: flex-start; gap: 6px; min-width: 0; margin: 0; }
+.setup-client-grid input[type="checkbox"] { flex: none; width: auto; min-width: 0; margin: 2px 0 0 0; }
+.setup-client-grid span { min-width: 0; overflow-wrap: break-word; }
+
+/* Snapshot tiles are the narrowest surface a trend delta renders in (~130px):
+   a three-digit magnitude ("↑ 162%") next to a five-char value overflows at
+   the default 0.75em and wraps. 0.65em fits with headroom for four digits —
+   measured live at the real tile width before choosing (0.7em was the largest
+   that fit). Scoped: everywhere else 0.75em is fine. */
+.snap-kpi-value .trend-up,
+.snap-kpi-value .trend-down { font-size: 0.65em; }
+
+/* Comparison tiles: equal grid columns already exist; these keep the big
+   numbers on one shared baseline (captions used to wrap on some tiles and
+   push their neighbours' values around). */
+/* justify-content:center — the flex row made values hug the left edge while
+   the card's labels stayed centered (Community/IG summary KPI rows). */
+.analytics-kpi-card .analytics-kpi-value { min-height: 34px; display: flex; align-items: baseline; gap: 6px; justify-content: center; }
+.analytics-kpi-card .mini-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Breathing room between the comparison KPI tiles and the insight banner —
+   the banner sat flush against the tile row. */
+#liCmpBody .insights-banner,
+#cpCmpBody .insights-banner,
+#analyticsTabInstagram .insights-banner { margin-top: var(--space-4); }
+
+/* ── Brief pipeline (the client Brief Tracking) ── */
+
+.form-grid { display: grid; gap: 12px; }
+.form-field { display: grid; gap: 4px; text-align: left; }
+.form-field > span { font-size: 12px; font-weight: 640; color: var(--muted); }
+.form-field .req { color: #c0574f; font-style: normal; }
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 4px 12px;
+}
+.check-grid label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; cursor: pointer;
+}
+.check-grid input[type="checkbox"] { width: auto; }
+.form-field.field-missing > span { color: #c0574f; }
+.form-field.field-missing input,
+.form-field.field-missing textarea,
+.form-field.field-missing .check-grid { outline: 1px solid rgba(192, 87, 79, 0.55); border-radius: 8px; }
+
+.brief-status-chip {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
+  background: rgba(var(--text-rgb), 0.08);
+}
+.brief-status-chip.st-pending_info { background: rgba(224, 168, 66, 0.18); color: #a06b10; }
+.brief-status-chip.st-ready_for_review { background: rgba(90, 140, 220, 0.16); color: #3763ad; }
+.brief-status-chip.st-locked { background: rgba(var(--text-rgb), 0.12); }
+.brief-status-chip.st-in_creative { background: rgba(150, 100, 220, 0.16); color: #6b3fb0; }
+.brief-status-chip.st-delivered { background: rgba(80, 170, 110, 0.18); color: #2c7d4f; }
+.brief-status-chip.st-completed { background: rgba(80, 170, 110, 0.28); color: #205f3b; }
+.brief-status-chip.st-acknowledged { background: rgba(90, 140, 220, 0.16); color: #3763ad; }
+.brief-status-chip.st-closed { background: rgba(var(--text-rgb), 0.12); }
+/* On pause: parked, not finished. Closed and locked are flat grey, so this
+   carries a dashed edge to read as "held" rather than "done" at a glance.
+   Uses --text-rgb, which is defined — unlike --border, whose absence has
+   silently voided whole declarations here before. */
+.brief-status-chip.st-on_pause {
+  background: rgba(var(--text-rgb), 0.06);
+  color: rgba(var(--text-rgb), 0.72);
+  border: 1px dashed rgba(var(--text-rgb), 0.35);
+}
+
+.brief-summary-grid { display: grid; grid-template-columns: 160px 1fr; gap: 6px 14px; font-size: 13px; }
+.brief-summary-grid dt { color: var(--muted); font-weight: 620; }
+.brief-summary-grid dd { margin: 0; white-space: pre-wrap; }
+
+.brief-timeline { display: grid; gap: 4px; margin-bottom: 10px; }
+.brief-timeline-row { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+.brief-timeline-row .when { color: var(--muted); min-width: 130px; }
+
+.brief-comment { display: table; max-width: 100%; padding: 8px 12px; border-radius: 10px; background: rgba(var(--text-rgb), 0.05); margin-bottom: 6px; }
+.brief-comment.internal { background: rgba(224, 168, 66, 0.12); }
+.brief-comment .who { font-size: 11.5px; font-weight: 680; color: var(--muted); margin-bottom: 2px; }
+/* display:block on purpose: the page-layout class is also called .body (a
+   252px sidebar grid), and it was squeezing every comment into that column
+   (found 17 Sep 2026 — "comments truncated at seven, eight words"). */
+.brief-comment .body { display: block; font-size: 13px; white-space: pre-wrap; }
+
+.brief-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 96vw);
+  background: var(--bg); border-left: 1px solid rgba(var(--text-rgb), 0.12);
+  box-shadow: -18px 0 40px rgba(0,0,0,0.25); z-index: 320;
+  overflow-y: auto; padding: 20px 22px;
+}
+.brief-drawer-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 310;
+}
+.brief-drawer h3 { margin: 18px 0 8px; }
+.brief-drawer .drawer-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+
+.brief-quick-lane { margin-bottom: 14px; }
+.brief-quick-card {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 10px; background: rgba(224, 168, 66, 0.1);
+  margin-bottom: 6px; cursor: pointer; font-size: 13px;
+}
+
+.brief-deliv-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 6px 0; border-bottom: 1px dashed rgba(var(--text-rgb), 0.1);
+  font-size: 13px;
+}
+.brief-deliv-row .overdue { color: #c0574f; font-weight: 700; }
+
+/* Bell-item deep link: flash the section the notification points at */
+.notify-anchor-flash {
+  animation: notifyAnchorFlash 2.4s ease;
+}
+@keyframes notifyAnchorFlash {
+  0%, 40% { box-shadow: 0 0 0 3px rgba(184, 160, 74, 0.55); }
+  100% { box-shadow: 0 0 0 3px rgba(184, 160, 74, 0); }
+}
+
+/* Partner brief form: breathing room between the fields/notice and Submit */
+#partner-brief-form #briefFormNotice { margin: 14px 0 0; }
+#partner-brief-form .action-row { margin-top: 14px; }
+#partner-brief-detail .action-row { margin-top: 12px; }
+
+/* Partner timeline steps */
+.pt-steps { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+.pt-step { display: flex; align-items: center; gap: 6px; }
+.pt-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: rgba(var(--text-rgb), 0.15); flex: 0 0 auto;
+}
+.pt-step.done .pt-dot { background: #5cb88a; }
+.pt-step.current .pt-dot { background: #3763ad; box-shadow: 0 0 0 3px rgba(90, 140, 220, 0.25); }
+.pt-label { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.pt-step.current .pt-label { color: var(--text); font-weight: 640; }
+.pt-bar { flex: 1; min-width: 18px; height: 2px; background: rgba(var(--text-rgb), 0.12); margin: 0 6px; }
+
+/* Client Timeline as a grouped list (7 Sep 2026). The .pt-step rules
+   above are kept: the stepper still draws inside a single brief's detail view.
+   Only defined variables here — --line and --text-rgb both exist; --border does
+   not, and one undefined var voids the whole declaration silently. */
+.pt-table { display: flex; flex-direction: column; }
+.pt-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 4px; cursor: pointer;
+  border-top: 1px solid rgba(var(--text-rgb), 0.09);
+}
+.pt-row:first-child { border-top: 0; }
+.pt-row:hover { background: rgba(var(--text-rgb), 0.04); }
+.pt-row-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pt-row-due { white-space: nowrap; }
+.brief-status-chip.st-under_revision { background: rgba(224, 168, 66, 0.18); color: #a06b10; }
+
+
+/* ── Task streaks (All Hands, 24 Aug 2026) ──────────────────────────────────
+   A full-width strip under the stat cards, matching the birthday and
+   sustainability strips. A stat card could not hold your streak, your progress
+   and a leaderboard without cramping all three. */
+.streak-strip {
+  display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+  padding: 16px 20px; margin-bottom: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--bg);
+}
+.streak-mine { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+.streak-flame { font-size: 30px; line-height: 1; }
+.streak-count { font-size: 30px; font-weight: 700; line-height: 1; color: var(--text); }
+.streak-count small {
+  display: block; margin-top: 3px;
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.streak-progress { flex: 1 1 240px; min-width: 200px; }
+.streak-bar { height: 6px; border-radius: 999px; background: rgba(var(--text-rgb), 0.10); overflow: hidden; }
+.streak-bar > i { display: block; height: 100%; border-radius: 999px; background: #e8a04c; transition: width 400ms ease; }
+.streak-next { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.streak-rank { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
+.streak-lead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.streak-lead-label {
+  font-size: 11px; font-weight: 500; color: var(--text-tertiary);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.streak-pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+  font-size: 12px; font-weight: 500; white-space: nowrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
+}
+.streak-pill b { font-weight: 700; }
+.streak-pill.is-me,
+.streak-pill.is-milestone { border-color: #e8a04c; background: color-mix(in srgb, #e8a04c 12%, transparent); }
+.streak-milestone { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+
+.streak-help { position: relative; }
+.streak-help-btn { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px; }
+/* Same rules as .notify-panel, which works. --bg-panel and --border are NOT
+   defined anywhere in this stylesheet, so `background: var(--bg-panel)` was an
+   invalid declaration and the tooltip rendered with no background at all —
+   page content read straight through it (26 Aug 2026). Use var(--bg),
+   never var(--surface): in light mode surface is a 6% tint. */
+.streak-tip {
+  position: absolute; right: 0; top: 26px; width: 330px; z-index: 300;
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius-md);
+  padding: 14px 16px; box-shadow: var(--shadow-md);
+}
+.streak-tip h4 { margin: 0 0 8px; font-size: 13px; }
+.streak-tip ul { margin: 0; padding-left: 16px; }
+.streak-tip li { font-size: 12.5px; color: var(--muted); margin-bottom: 5px; line-height: 1.45; }
+.streak-tip .rungs { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.streak-tip .rungs b { color: var(--text); }
+
+@media (max-width: 720px) {
+  .streak-lead { margin-left: 0; }
+  .streak-tip { right: auto; left: 0; width: min(330px, 84vw); }
+}
+
+
+/* Hire row status (8 Sep 2026) — sits in the row with the buttons, not
+   in #hiringNotice above the whole list, so a message lands next to the hire
+   it is about. .is-busy adds an animated ellipsis: a file upload otherwise
+   gives no sign that anything started. */
+.hire-row-status {
+  margin-left: 8px;
+  align-self: center;
+}
+.hire-row-status.warn { color: #a0341a; }
+.hire-row-status.is-busy::after {
+  content: '';
+  animation: hire-dots 1.2s steps(4, end) infinite;
+}
+@keyframes hire-dots {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
+.hire-next-step {
+  margin: 2px 0 0;
+  color: #a06b10;
+}
+.hire-skipped-note {
+  margin: 2px 0 0;
+  opacity: 0.75;
+  font-style: italic;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Still say it is working, just without the movement. */
+  .hire-row-status.is-busy::after { animation: none; content: '…'; }
+}
+
+/* Briefs stuck behind the client approval gate. Deliberately loud: the old
+   version was a mini-meta line and got skipped over for 36 hours while a
+   deadline ran down (10 Sep 2026). --line / --line-strong / --text-rgb are the
+   tokens that actually exist here; --border, --bg-panel and --accent do not. */
+.brief-waiting-banner {
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 14px 16px;
+  margin: 0 0 16px;
+}
+.brief-waiting-banner-urgent { border-left-color: var(--bad); }
+.brief-waiting-title {
+  margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.brief-waiting-flag {
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: #fff; background: var(--bad); padding: 2px 8px; border-radius: 999px;
+}
+.brief-waiting-row {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer;
+}
+.brief-waiting-row:hover .brief-waiting-name { text-decoration: underline; }
+.brief-waiting-name { font-size: 13px; color: var(--text); font-weight: 500; }
+.brief-waiting-detail { font-size: 12px; color: rgba(var(--text-rgb), .62); }
+.brief-waiting-row.is-urgent .brief-waiting-detail { color: var(--bad); font-weight: 600; }
+.brief-waiting-foot {
+  margin: 10px 0 0; font-size: 12px; line-height: 1.5; color: rgba(var(--text-rgb), .55);
+}
+
+/* Role picker inside the partners table. Sized down so a row of them reads as
+   a table, not a form. */
+.partner-role-select {
+  font-size: 12px;
+  padding: 4px 6px;
+  width: auto;
+  min-width: 120px;
+}
+
+
+/* Hiring checklist on each hire card — one owner per row (11 Sep 2026). */
+.hire-checklist { list-style: none; margin: 10px 0 12px; padding: 0; display: grid; gap: 0; border-top: 1px solid var(--line); }
+.hire-checklist li { display: grid; grid-template-columns: 18px 110px 1fr; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.hire-checklist .hc-mark { font-family: var(--font-ui); font-size: 12px; text-align: center; color: var(--muted); }
+.hire-checklist li.done .hc-mark { color: var(--good); }
+.hire-checklist li.current .hc-mark { color: var(--warn); }
+.hire-checklist li.current .hc-label { font-weight: 700; }
+.hire-checklist li.todo { color: var(--muted-soft); }
+.hire-checklist li.cancelled { color: var(--muted-soft); text-decoration: line-through; }
+.hire-checklist .hc-owner { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.hire-checklist .hc-detail { color: var(--muted); font-size: 12px; margin-left: 6px; }
+
+.hire-row-now { font-size: 12px; color: var(--muted); margin-left: 4px; }
+.hire-row-now b { color: var(--warn); font-weight: 600; }
+
+/* ── Dark-mode chips (16 Sep 2026): the light-mode ink colours sat on
+   translucent tints and vanished on the dark ground — "In creative" and
+   "Completed" were unreadable. Lighter tints, lighter ink. ── */
+[data-theme="dark"] .brief-status-chip { background: rgba(var(--text-rgb), 0.12); color: rgba(var(--text-rgb), 0.85); }
+[data-theme="dark"] .brief-status-chip.st-pending_info,
+[data-theme="dark"] .brief-status-chip.st-under_revision { background: rgba(224, 168, 66, 0.28); color: #f3cf7e; }
+[data-theme="dark"] .brief-status-chip.st-ready_for_review,
+[data-theme="dark"] .brief-status-chip.st-acknowledged { background: rgba(90, 140, 220, 0.3); color: #b7cdf6; }
+[data-theme="dark"] .brief-status-chip.st-in_creative { background: rgba(150, 100, 220, 0.32); color: #d8c6f7; }
+[data-theme="dark"] .brief-status-chip.st-delivered { background: rgba(80, 170, 110, 0.3); color: #b4e8c8; }
+[data-theme="dark"] .brief-status-chip.st-completed { background: rgba(80, 170, 110, 0.38); color: #c4f0d4; }
+[data-theme="dark"] .brief-status-chip.st-on_pause { color: rgba(var(--text-rgb), 0.85); border-color: rgba(var(--text-rgb), 0.45); }
+[data-theme="dark"] .fr-type-feature { background: rgba(188, 164, 182, 0.28); color: #e2d2dc; }
+[data-theme="dark"] .fr-type-bug { background: rgba(224, 108, 117, 0.3); color: #f3b7bc; }
+[data-theme="dark"] .fr-status.requested { background: rgba(188, 164, 182, 0.22); color: rgba(var(--text-rgb), 0.8); }
+[data-theme="dark"] .fr-status.in-progress { background: rgba(212, 162, 74, 0.3); color: #f3cf7e; }
+[data-theme="dark"] .fr-status.done { background: rgba(80, 170, 110, 0.34); color: #c4f0d4; }
+[data-theme="dark"] .chip.info { color: #e2d2dc; background: rgba(188, 164, 182, 0.24); }
+
+/* Circle sidebar identity: name with the client underneath. */
+.sidebar-identity-sub { display: block; font-size: 11.5px; font-weight: 500; color: var(--muted); margin-top: 1px; }
+
+/* Circle feedback cards: replies and the reply row inside the card. */
+.pf-replies { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.pf-reply-row { margin-top: 8px; }
+.pf-reply-row input { flex: 1; min-width: 160px; }
+.circle-identity { cursor: default; }
+.circle-identity:hover { background: transparent; }
+.pf-card-done { opacity: 0.72; }
+.pf-card-done:hover { opacity: 1; }

@@ -203,7 +203,7 @@ BEGIN
   -- Pre-Joining items (leadership tasks)
   INSERT INTO app.onboarding_checklist_items (checklist_id, phase, sort_order, title, description) VALUES
     (v_checklist_id, 'pre_joining', 10, 'Consultant agreement signed', 'Ensure signed agreement is filed in Google Drive.'),
-    (v_checklist_id, 'pre_joining', 20, 'NDA signed', 'File in Drive > Signed NDAs. NDAs go through Sunil (user@youragency.com).'),
+    (v_checklist_id, 'pre_joining', 20, 'NDA signed', 'File in Drive > Signed NDAs. NDAs go through Leo (user@youragency.com).'),
     (v_checklist_id, 'pre_joining', 30, 'Google Workspace account created', 'Create @youragency.com email via Google Admin.'),
     (v_checklist_id, 'pre_joining', 40, 'Slack workspace invite sent', 'Add to #general, #random, and relevant client channels.'),
     (v_checklist_id, 'pre_joining', 50, 'Add to All Hands recurring invite', 'Thursday All Hands on Google Calendar.'),

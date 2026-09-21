@@ -1,8 +1,8 @@
-/* ── Colony allocation week math: pure helpers ──
+/* ── Your Agency allocation week math: pure helpers ──
    Classic script — loads after utils.js, before app.js. PURE ONLY: no DOM,
    no `state`, no Supabase. Allocations are week-based and weeks start on
    MONDAY; month-boundary queries must align to the Monday of the overlapping
-   week. Tested in tests/alloc.test.mjs. */
+   week (CLAUDE.md → Business Rules). Tested in tests/alloc.test.mjs. */
 
 // Monday of the week containing dateValue (Sunday belongs to the PREVIOUS week).
 function mondayWeekStartDate(dateValue = new Date()) {
@@ -61,15 +61,23 @@ function shortWeekLabel(weekStartIso) {
   return `W${week}`;
 }
 
-// Utilization status: <60 under, 60-100 balanced, >100 over.
-function utilizationStatusMeta(value) {
-  const numeric = Number(value) || 0;
+// Utilization status: <60 under, 60-100 balanced, >100 over — measured against
+// the PERSON'S capacity, not a full week. Someone at 40% capacity allocated 40%
+// is fully committed; the old capacity-blind version compared 40 to a fixed
+// 60/100 scale and labelled them "Under", inviting more work onto a part-timer
+// who had none left. Omit capacityPercent (or pass 100) for the full-time case,
+// where allocated% and allocated-of-capacity% coincide.
+function utilizationStatusMeta(value, capacityPercent = 100) {
+  const allocated = Number(value) || 0;
+  const capacity = Number(capacityPercent);
+  const ceiling = Number.isFinite(capacity) && capacity > 0 ? capacity : 100;
+  const numeric = (allocated / ceiling) * 100;
   if (numeric > 100) return { key: 'over', label: 'Over', chipClass: 'rejected' };
   if (numeric < 60) return { key: 'under', label: 'Under', chipClass: 'warn' };
   return { key: 'balanced', label: 'Balanced', chipClass: 'approved' };
 }
 
-// Suggest weekly allocation percentages from the task planner (the strategy lead's board
+// Suggest weekly allocation percentages from the task planner (Sam's board
 // request, Mar 2026): tasks are already tagged to clients, so pre-fill the
 // allocation editor from their distribution instead of starting blank.
 // Counts this week's dated tasks (any status except archived — done work

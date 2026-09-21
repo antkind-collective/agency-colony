@@ -2,6 +2,7 @@ const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
 const { logNotification } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
+const { callerCanSee, callerDisplayName } = require('./lib/caller');
 
 function escapeHtml(value) {
   return String(value || '')
@@ -29,7 +30,7 @@ function extractBearerToken(headers = {}) {
 
 const RECIPIENTS = {
   deal_contracted: ['admin@youragency.com'],
-  client_archived: ['am2@youragency.com', 'admin@youragency.com']
+  client_archived: ['rhea@youragency.com', 'admin@youragency.com']
 };
 
 exports.handler = async (event) => {
@@ -49,7 +50,7 @@ exports.handler = async (event) => {
     return jsonResponse(400, { error: 'Invalid JSON payload.' });
   }
 
-  const { type, dealId, clientId, actorName } = payload;
+  const { type, dealId, clientId } = payload;
   if (!type || !RECIPIENTS[type]) {
     return jsonResponse(400, { error: 'Invalid or missing type.' });
   }
@@ -61,6 +62,15 @@ exports.handler = async (event) => {
   if (userResponse.error || !userResponse.data?.user) {
     return jsonResponse(401, { error: 'Invalid auth token.' });
   }
+
+  // Audit 16 Sep 2026: the caller's own RLS must see the deal (Deal Flow
+  // viewers) or the client — a partner token used to pass on "signed in" alone.
+  // The actor is whoever holds the token, not a name in the payload.
+  const target = type === 'deal_contracted' ? ['deals', dealId] : ['clients', clientId];
+  if (typeof target[1] !== 'string' || !await callerCanSee(token, target[0], target[1])) {
+    return jsonResponse(404, { error: 'Not found.' });
+  }
+  const actorName = (await callerDisplayName(supabase, userResponse.data.user.id)).name;
 
   const recipients = RECIPIENTS[type];
   const safeActor = escapeHtml(actorName || 'Someone');
@@ -90,7 +100,7 @@ exports.handler = async (event) => {
           <li><strong>Engagement:</strong> ${escapeHtml(deal.engagement_type || '—')}</li>
         </ul>
         <p><strong>Action:</strong> Please add the financials to the Revenue Pipeline.</p>
-        <p>Open Colony: <a href="${appBaseUrl}">${appBaseUrl}</a></p>
+        <p>Open the deal: <a href="${appBaseUrl}?open=deal:${deal.id}#bd-pipeline">${appBaseUrl}?open=deal:${deal.id}#bd-pipeline</a></p>
       </div>
     `;
     text = `${actorName || 'Someone'} moved deal "${dealName}" to Contract. Amount: ${amount}. Please add the financials to the Revenue Pipeline. ${appBaseUrl}`;
@@ -111,7 +121,7 @@ exports.handler = async (event) => {
         <p>${safeActor} just archived the client <strong>${escapeHtml(clientName)}</strong> in Colony.</p>
         <p><strong>Question:</strong> Was any work done for this client that we can push to press / portfolio / case studies?</p>
         <p>If yes, please flag it before the project gets buried.</p>
-        <p>Open Colony: <a href="${appBaseUrl}">${appBaseUrl}</a></p>
+        <p>Open the client: <a href="${appBaseUrl}?open=client:${clientId}#client-projects">${appBaseUrl}?open=client:${clientId}#client-projects</a></p>
       </div>
     `;
     text = `${actorName || 'Someone'} archived client "${clientName}". Was any work done that we can push to press? ${appBaseUrl}`;
@@ -141,5 +151,5 @@ exports.handler = async (event) => {
     console.error('Notification logging failed:', error.message);
   }
 
-  return jsonResponse(200, { ok: true, recipients, emailResult });
+  return jsonResponse(200, { ok: true, skipped: Boolean(emailResult.skipped) });
 };

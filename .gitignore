@@ -17,5 +17,13 @@ deno.lock
 supabase/.temp/
 
 # Generated at build time
+version.js
 .DS_Store
 scripts/sql.sh
+
+# Other Claude sessions keep working files in this folder — never commit them.
+THREAD_REGISTRY.json
+COLONY_PIPELINE_AUDIT_*.md
+
+# Generated per deploy by _build/build-circle.mjs — never committed.
+circle/

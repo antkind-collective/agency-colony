@@ -157,7 +157,7 @@ exports.handler = async (event) => {
         <li><strong>Submitted:</strong> ${escapeHtml(formatDateInIST(leaveRequest.created_at))}</li>
       </ul>
       ${reasonText}
-      <p>Open leave center: <a href="${appBaseUrl}">${appBaseUrl}</a></p>
+      <p>Open leave center: <a href="${appBaseUrl}?open=leave:${leaveRequest.id}#leave-center">${appBaseUrl}?open=leave:${leaveRequest.id}#leave-center</a></p>
     </div>
   `;
 
@@ -167,7 +167,7 @@ exports.handler = async (event) => {
     `Type: ${leaveRequest.leave_type}`,
     `Dates: ${leaveDateRange}`,
     leaveRequest.reason ? `Reason: ${leaveRequest.reason}` : null,
-    `Open leave center: ${appBaseUrl}`
+    `Open leave center: ${appBaseUrl}?open=leave:${leaveRequest.id}#leave-center`
   ]
     .filter(Boolean)
     .join('\n');

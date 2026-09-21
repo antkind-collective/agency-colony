@@ -1,7 +1,8 @@
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
+const { isHolidayInIst } = require('./lib/holidays');
 const { sendEmail } = require('./lib/email');
 const { logNotification, withCronHeartbeat } = require('./lib/notifications');
-const { formatDateInIST, formatDateTimeInIST, getConfig } = require('./lib/config');
+const { formatDateInIST, formatDateTimeInIST, getConfig, zonedParts, IST_TIME_ZONE } = require('./lib/config');
 
 function escapeHtml(value) {
   return String(value || '')
@@ -38,7 +39,14 @@ const run = async (event) => {
   const { appBaseUrl } = getConfig();
   const supabase = getSupabaseAdmin();
 
-  const todayIso = runAt.toISOString().slice(0, 10);
+  // Agency clock, deliberately: leave cycles and task rollover are data
+  // operations on the agency's day, not any individual's (per-person clocks
+  // would make "which day did this roll over on" unanswerable).
+  // This was runAt.toISOString() — UTC — while every neighbouring line was IST.
+  // The two agree only because the cron runs at 04:30 UTC (10:00 IST); any
+  // schedule between 18:30 and 23:59 UTC would have silently rolled the wrong
+  // day. Same value today, no longer a trap.
+  const todayIso = zonedParts(runAt, IST_TIME_ZONE).iso;
 
   const summary = {
     runAtIst: runLabel,
@@ -81,15 +89,21 @@ const run = async (event) => {
   }
 
   // Skip email notifications on weekends (IST = UTC+5:30) — data operations above still run
-  // Spawn recurring monthly tasks BEFORE the weekend skip — a rule's day can
-  // land on a Saturday/Sunday and must still fire. Title-key dedupe vs any
-  // non-archived task already on today.
+  // Spawn recurring tasks BEFORE the weekend skip — a rule's day can land on a
+  // Saturday/Sunday and must still fire, and for a weekly rule the owner picked
+  // that weekday deliberately. Title-key dedupe vs any non-archived task
+  // already on today.
   try {
-    const istNow = new Date(runAt.getTime() + 5.5 * 60 * 60 * 1000);
-    const todayIso = istNow.toISOString().slice(0, 10);
-    const lastDay = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth() + 1, 0)).getUTCDate();
+    const ist = zonedParts(runAt, IST_TIME_ZONE);
+    const todayIso = ist.iso;
+    const [istYear, istMonth, istDayOfMonth] = ist.iso.split('-').map(Number);
+    const lastDay = new Date(Date.UTC(istYear, istMonth, 0)).getUTCDate();
     const rulesRes = await supabase.from('recurring_tasks').select('*').eq('is_active', true);
-    const due = (rulesRes.data || []).filter((r) => istNow.getUTCDate() === Math.min(r.day_of_month, lastDay));
+    // Weekly matches the IST weekday (0=Sunday, the same numbering zonedParts
+    // returns and the DB stores); monthly clamps to the month's last day.
+    const due = (rulesRes.data || []).filter((r) => (r.frequency === 'weekly'
+      ? ist.day === r.day_of_week
+      : istDayOfMonth === Math.min(r.day_of_month, lastDay)));
     if (due.length) {
       const existingRes = await supabase.from('daily_tasks').select('employee_id, task_title')
         .eq('task_date', todayIso).neq('status', 'archived').limit(3000);
@@ -107,9 +121,23 @@ const run = async (event) => {
     summary.errors.push(`Recurring spawn failed: ${error.message}`);
   }
 
-  const istDay = new Date(runAt.getTime() + 5.5 * 60 * 60 * 1000).getDay();
+  // Was `new Date(runAt + 5.5h).getDay()` — the LOCAL weekday of a UTC-shifted
+  // instant, which only equals the IST weekday because Netlify's runtime is
+  // itself UTC. zonedParts asks the tz database instead of the host clock.
+  const istDay = zonedParts(runAt, IST_TIME_ZONE).day;
   if (istDay === 0 || istDay === 6) {
     summary.skippedWeekend = true;
+    return {
+      statusCode: 200,
+      body: JSON.stringify(summary)
+    };
+  }
+
+  // Nobody wants a task nudge on Diwali. Data operations above have already run;
+  // only the emails are held (24 Aug 2026).
+  const holiday = await isHolidayInIst(supabase, runAt);
+  if (holiday) {
+    summary.skippedHoliday = holiday.name;
     return {
       statusCode: 200,
       body: JSON.stringify(summary)
@@ -283,7 +311,7 @@ const run = async (event) => {
           <p>Hello,</p>
           <p>You have ${items.length} pending leave request(s) awaiting action in Agency Colony.</p>
           <ul>${listHtml}</ul>
-          <p>Open app: <a href="${appBaseUrl}">${appBaseUrl}</a></p>
+          <p>Open leave center: <a href="${appBaseUrl}#leave-center">${appBaseUrl}#leave-center</a></p>
         </div>
       `;
       const text = [

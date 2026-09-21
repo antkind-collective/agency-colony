@@ -54,18 +54,18 @@ test('suggestAllocationsFromTasks: distribution, filters, steps of 5, sums 100',
   const f = u('suggestAllocationsFromTasks');
   const week = '2026-06-29'; // Mon
   const rows = f([
-    { task_date: '2026-06-30', status: 'in_progress', notes: 'Acme Media' },
-    { task_date: '2026-07-01', status: 'done', notes: 'Acme Media' },        // done-but-dated counts
-    { task_date: '2026-07-02', status: 'in_progress', notes: 'acme media' }, // case-insensitive grouping
-    { task_date: null, status: 'in_progress', notes: 'Northwind' },              // weekly active counts
-    { task_date: null, status: 'done', notes: 'Northwind' },                     // weekly done does NOT
-    { task_date: '2026-06-25', status: 'in_progress', notes: 'Helix' },       // outside week: dropped
-    { task_date: '2026-07-01', status: 'archived', notes: 'Helix' },          // archived: dropped
+    { task_date: '2026-06-30', status: 'in_progress', notes: 'Example Records' },
+    { task_date: '2026-07-01', status: 'done', notes: 'Example Records' },        // done-but-dated counts
+    { task_date: '2026-07-02', status: 'in_progress', notes: 'example records' }, // case-insensitive grouping
+    { task_date: null, status: 'in_progress', notes: 'Example Climate' },              // weekly active counts
+    { task_date: null, status: 'done', notes: 'Example Climate' },                     // weekly done does NOT
+    { task_date: '2026-06-25', status: 'in_progress', notes: 'Example Materials' },       // outside week: dropped
+    { task_date: '2026-07-01', status: 'archived', notes: 'Example Materials' },          // archived: dropped
     { task_date: '2026-07-01', status: 'in_progress', notes: '' },           // no client: dropped
-    { task_date: '2026-07-03', status: 'in_progress', notes: 'Terra Verde' }
+    { task_date: '2026-07-03', status: 'in_progress', notes: 'Example Fashion' }
   ], week);
   assert.equal(rows.length, 3);
-  assert.equal(rows[0].client, 'Acme Media');                    // 3 tasks → biggest
+  assert.equal(rows[0].client, 'Example Records');                    // 3 tasks → biggest
   assert.equal(rows.reduce((s, r) => s + r.percent, 0), 100);    // trues up to 100
   assert.ok(rows.every(r => r.percent % 5 === 0 && r.percent >= 5));
   assert.equal(rows[0].percent, 60);                             // 3/5 = 60%
@@ -75,7 +75,29 @@ test('suggestAllocationsFromTasks: empty and single-client cases', () => {
   const f = u('suggestAllocationsFromTasks');
   assert.equal(f([], '2026-06-29').length, 0);
   assert.equal(f([{ task_date: null, status: 'done', notes: 'X' }], '2026-06-29').length, 0);
-  const solo = f([{ task_date: '2026-06-30', status: 'in_progress', notes: 'Northwind' }], '2026-06-29');
+  const solo = f([{ task_date: '2026-06-30', status: 'in_progress', notes: 'Example Climate' }], '2026-06-29');
   assert.equal(solo.length, 1);
   assert.equal(solo[0].percent, 100);
+});
+
+test('utilizationStatusMeta: thresholds are relative to the person\'s capacity', () => {
+  const f = u('utilizationStatusMeta');
+  // Full-timers unchanged (capacity defaults to 100) — the pre-existing contract
+  assert.equal(f(50).key, 'under');
+  assert.equal(f(80).key, 'balanced');
+  assert.equal(f(120).key, 'over');
+
+  // A 40%-capacity person allocated 40% is FULLY committed, not "Under".
+  // This is the bug: capacity-blind, 40 < 60 read as under-utilized and
+  // invited more work onto someone with nothing left.
+  assert.equal(f(40, 40).key, 'balanced');
+  assert.equal(f(50, 40).key, 'over');      // 125% of her capacity
+  assert.equal(f(20, 40).key, 'under');     // 50% of her capacity
+  assert.equal(f(40, 100).key, 'under');    // same 40% for a full-timer IS under
+
+  // Guards: capacity 0/blank/garbage must not divide-by-zero or NaN out
+  assert.equal(f(80, 0).key, 'balanced');   // falls back to a 100 ceiling
+  assert.equal(f(80, null).key, 'balanced');
+  assert.equal(f(80, undefined).key, 'balanced');
+  assert.equal(f(0, 40).key, 'under');
 });

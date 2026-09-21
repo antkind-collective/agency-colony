@@ -21,6 +21,14 @@ async function logNotification({ kind, recipientEmail, subject, payload = {}, st
 // heartbeat row to notification_log — a dead scheduler must be visible in
 // Admin Settings within a day, not discovered months later by accident.
 // 403s (direct URL hits rejected by the scheduler guard) are not logged.
+//
+// A function that polls far more often than it acts may return `quiet: true` to
+// suppress the heartbeat on a run that did nothing: task-nudge fires every 30
+// minutes to catch each timezone's local 11 AM, but only 2-3 of those 48 daily
+// runs are anybody's 11, and 48 heartbeats a day would bury months of real
+// notification_log signal within a fortnight. A quiet function must NOT return
+// quiet on a run that did real work, or the daily liveness signal is lost.
+// Errors and 5xx always heartbeat, quiet or not.
 function withCronHeartbeat(functionName, run) {
   return async (event) => {
     const startedAt = new Date().toISOString();
@@ -31,6 +39,7 @@ function withCronHeartbeat(functionName, run) {
       try { body = JSON.parse(result.body || '{}'); } catch (parseError) { body = {}; }
       const errors = Array.isArray(body.errors) ? body.errors : [];
       const failed = errors.length > 0 || (result.statusCode >= 500);
+      if (body.quiet === true && !failed) return result;
       await logNotification({
         kind: 'cron_heartbeat',
         recipientEmail: 'system',

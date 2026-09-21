@@ -1,9 +1,9 @@
-/* ── Colony task logic: pure planning/selection helpers ──
+/* ── Your Agency task logic: pure planning/selection helpers ──
    Classic script — loads after utils.js (uses taskTitleKey), before app.js.
    PURE ONLY: no DOM, no `state`, no Supabase. Functions take task arrays and
    return decisions; app.js executes the I/O and mutates local state. This is
    the most bug-prone area of the app (carry-forward zombies, done-cascade —
-   see the project docs → Task System), which is why the decisions live here where
+   see CLAUDE.md → Task System), which is why the decisions live here where
    tests/tasks.test.mjs can pin them down.
 
    Task shape: { id, employee_id, task_date (ISO date | null = weekly),
@@ -105,11 +105,29 @@ function hasDailyCopyToday(task, allTasks, todayIso) {
   );
 }
 
-// Recurring monthly rule: due on todayIso? day_of_month clamps to the month's
-// last day (a "31st" rule fires on Feb 28/29, Apr 30, ...).
-function recurringRuleDueOn(dayOfMonth, todayIso) {
+// Weekdays as the DB stores them: 0=Sunday..6=Saturday, matching JS getDay()
+// and the cron's zonedParts().day, so no side has to translate.
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// Is a recurring rule due on todayIso? Monthly clamps day_of_month to the
+// month's last day (a "31st" rule fires on Feb 28/29, Apr 30, ...); weekly
+// matches the weekday. Takes the rule row so a caller can never pair the wrong
+// cadence with the wrong day.
+function recurringRuleDueOn(rule, todayIso) {
   const d = parseIsoDateLocal(todayIso);
-  if (!d || !dayOfMonth) return false;
+  if (!d || !rule) return false;
+  if (rule.frequency === 'weekly') {
+    return Number.isInteger(rule.day_of_week) && d.getDay() === rule.day_of_week;
+  }
+  if (!rule.day_of_month) return false;
   const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-  return d.getDate() === Math.min(dayOfMonth, lastDay);
+  return d.getDate() === Math.min(rule.day_of_month, lastDay);
+}
+
+// How the rule reads in the manage list and the save confirmation.
+function recurringRuleLabel(rule) {
+  if (!rule) return '';
+  return rule.frequency === 'weekly'
+    ? `weekly on ${WEEKDAY_NAMES[rule.day_of_week] || '?'}`
+    : `monthly on the ${rule.day_of_month}`;
 }

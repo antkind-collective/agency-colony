@@ -1,10 +1,18 @@
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
 const { logNotification, withCronHeartbeat } = require('./lib/notifications');
-const { formatDateInIST, formatDateTimeInIST, getConfig } = require('./lib/config');
+const { formatDateInIST, formatDateTimeInIST, getConfig, zonedParts, IST_TIME_ZONE } = require('./lib/config');
 
-// Employees excluded from invoice uploads
-const INVOICE_EXCLUDED_EMAILS = ['admin@youragency.com'];
+// Fallback only — the live list lives in app_config.invoice_excluded_emails so
+// Admin Settings can change it. The cron used to hardcode its own copy, which
+// meant an exclusion added in the app was ignored here (28 Aug 2026).
+const INVOICE_EXCLUDED_EMAILS = ['admin@youragency.com', 'studio@youragency.com'];
+
+async function configList(supabase, key, fallback) {
+  const { data, error } = await supabase.from('app_config').select('value').eq('key', key).maybeSingle();
+  const value = !error && Array.isArray(data?.value) ? data.value : fallback;
+  return value.map((e) => String(e).toLowerCase().trim());
+}
 
 // Employees who still upload invoices but don't receive reminder emails
 const INVOICE_REMINDER_SKIP_EMAILS = ['ops-lead@youragency.com', 'finance@youragency.com', 'am-lead@youragency.com'];
@@ -37,10 +45,10 @@ const run = async (event) => {
   const { appBaseUrl } = getConfig();
   const supabase = getSupabaseAdmin();
 
-  // Get current day-of-month in IST
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const istNow = new Date(runAt.getTime() + istOffset);
-  const dayOfMonth = istNow.getUTCDate();
+  // Current day-of-month on the agency clock. Invoicing is an agency deadline
+  // ("the 25th") — the same date for everyone regardless of where they are.
+  const istNow = zonedParts(runAt, IST_TIME_ZONE);
+  const [istYear, istMonth, dayOfMonth] = istNow.iso.split('-').map(Number);
 
   const summary = {
     runAtIst: runLabel,
@@ -62,14 +70,20 @@ const run = async (event) => {
   }
 
   // Determine invoice month: current month in YYYY-MM format (IST)
-  const invoiceMonth = istNow.getUTCFullYear() + '-' + String(istNow.getUTCMonth() + 1).padStart(2, '0');
+  const invoiceMonth = `${istYear}-${String(istMonth).padStart(2, '0')}`;
 
-  // Get active employees who have leave tracking enabled (excludes Finance)
+  // Only people who actually raise an invoice: fractional and consultant
+  // (28 and 31 Aug 2026). A consultant is an employee in every other
+  // respect — leave, nudges, client access — but is paid against an invoice.
+  // The old rule keyed
+  // off the DEPARTMENT leave flag, which only excludes Finance — so eleven
+  // salaried staff and the studio@ service account were being chased monthly
+  // for invoices they never submit.
   const employeesResponse = await supabase
     .from('employees')
-    .select('id, full_name, email, is_active, leave_tracking_enabled')
+    .select('id, full_name, email, is_active, employment_type, department:departments!employees_department_id_fkey(leave_tracking_enabled)')
     .eq('is_active', true)
-    .eq('leave_tracking_enabled', true)
+    .in('employment_type', ['fractional', 'consultant'])
     .order('full_name', { ascending: true });
 
   if (employeesResponse.error) {
@@ -77,9 +91,11 @@ const run = async (event) => {
     return { statusCode: 500, body: JSON.stringify(summary) };
   }
 
-  // Filter out excluded employees
+  // Finance still never invoices, and the exclusion list is honoured on top.
+  const excluded = await configList(supabase, 'invoice_excluded_emails', INVOICE_EXCLUDED_EMAILS);
   const employees = (employeesResponse.data || []).filter(
-    e => !INVOICE_EXCLUDED_EMAILS.includes((e.email || '').toLowerCase().trim())
+    e => e.department?.leave_tracking_enabled !== false &&
+      !excluded.includes((e.email || '').toLowerCase().trim())
   );
 
   // Get all invoice uploads for this month
@@ -104,7 +120,7 @@ const run = async (event) => {
   // Find employees who still need to upload
   const pendingEmployees = employees.filter(e => !uploadedEmployeeIds.has(e.id));
 
-  // If all invoices received, notify finance (only once — check notification log)
+  // If all invoices received, notify Blake (only once — check notification log)
   if (pendingEmployees.length === 0) {
     summary.allInvoicesReceived = true;
 
@@ -122,14 +138,14 @@ const run = async (event) => {
       const subject = `All invoices received — ${monthLabel}`;
       const html = `
         <div style="font-family:Arial,sans-serif;line-height:1.5">
-          <p>Hi finance,</p>
+          <p>Hi Blake,</p>
           <p>All team invoices for <strong>${escapeHtml(monthLabel)}</strong> have been uploaded.</p>
           <p>${employees.length} employee${employees.length !== 1 ? 's' : ''} submitted their invoices.</p>
           <p><a href="${appBaseUrl}#invoice-center">View in Invoice Center</a></p>
         </div>
       `;
       const text = [
-        'Hi finance,',
+        'Hi Blake,',
         `All team invoices for ${monthLabel} have been uploaded.`,
         `${employees.length} employees submitted their invoices.`,
         `View: ${appBaseUrl}#invoice-center`

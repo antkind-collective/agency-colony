@@ -1,6 +1,7 @@
 {
-  "name": "agency-colony",
-  "version": "2.0.0",
+  "name": "ant-colony-ui",
+  "version": "1.0.0",
+  "private": true,
   "scripts": {
     "postinstall": "mkdir -p vendor && cp node_modules/@supabase/supabase-js/dist/umd/supabase.js vendor/supabase.js",
     "dev": "netlify dev",
@@ -11,10 +12,7 @@
     "@anthropic-ai/sdk": "^0.78.0",
     "@supabase/supabase-js": "2.98.0"
   },
-  "description": "Open-source resource management platform for digital agencies \u2014 vanilla JS + Supabase + Netlify",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/mojaswi/agency-colony.git"
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

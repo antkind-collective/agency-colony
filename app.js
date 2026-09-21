@@ -9,7 +9,7 @@ function dismissSplash() {
 // Constants live in js/config.js (loaded before this file).
 const employeeStore = {};
 
-let COLONY_UPDATES = [];
+let APP_UPDATES = [];
 
 const state = {
   role: 'employee',
@@ -37,6 +37,9 @@ const state = {
   _realRole: null,
   leaveCycleSummary: null,
   homeAllocations: [],
+  // An Your Agency reviewer signed in on Circle to answer client feedback. Never
+  // true on Colony, and cleared on sign-out with the rest of the session.
+  staffOnCircle: false,
   deals: [],
   dealSection: 'hot',
   dealFilter: 'open',
@@ -48,6 +51,11 @@ const state = {
   publicHolidays: null, // loaded from app.public_holidays; null = use PUBLIC_HOLIDAYS fallback
   accessOverrides: null, // loaded from app.access_overrides; null/empty = use ENFORCED_ACCESS_BY_EMAIL fallback
   appConfig: null, // loaded from app.app_config (key→value); per-key fallback to the config.js constants
+  clientScopeByEmployee: null, // employee_id → Set(client_id) from app.employee_client_scope.
+  // Scoped people are dedicated to specific clients: non-leadership among them
+  // see only those clients (enforced in RLS), and ALL of them are excluded from
+  // agency-level capacity maths — they're not reassignable bandwidth. Their
+  // capacity still counts at client level. null = not loaded yet.
   homePulse: null, // home feed live signals: whosOut (RPC), doneTasks, dealMoves, myTasksDueToday
   loadedAt: {} // loader freshness stamps (screen-switch cache; mutations call raw loaders which re-stamp)
 };
@@ -100,6 +108,25 @@ async function loadAppConfig() {
   const map = {};
   (data || []).forEach(r => { map[r.key] = r.value; });
   state.appConfig = map;
+}
+
+// Which people are dedicated to specific clients (app.employee_client_scope).
+// Readable by everyone by design: the home "Hours Allocated" stat isn't
+// leadership-gated, so every viewer must compute the same capacity exclusion.
+// Rows carry client_id only — a scoped user can't resolve ids for clients the
+// clients RLS hides from them. Awaited in applyAuthState alongside loadAppConfig.
+async function loadClientScope() {
+  if (!state.supabase) return;
+  const { data, error } = await state.supabase
+    .from('employee_client_scope')
+    .select('employee_id, client_id');
+  if (error) { console.error('Client scope load failed:', error); return; }
+  const map = new Map();
+  (data || []).forEach(r => {
+    if (!map.has(r.employee_id)) map.set(r.employee_id, new Set());
+    map.get(r.employee_id).add(r.client_id);
+  });
+  state.clientScopeByEmployee = map;
 }
 
 // Config accessors (getConfigList/getConfigMap + the per-key getters) live in
@@ -234,8 +261,8 @@ function currentUserDepartmentName() {
 }
 
 // ─── Display name normalization ─────────────────────────────────────
-// Strip middle names colony-wide. "Fame Middle Last" → "Fame Last".
-// Single-token names ("Cher") and two-token names ("a BD viewer") are kept as-is.
+// Strip middle names colony-wide. "Jo Middle Last" → "Jo Last".
+// Single-token names ("Cher") and two-token names ("Tara Bell") are kept as-is.
 function shortDisplayName(fullName) {
   if (!fullName || typeof fullName !== 'string') return fullName || '';
   const parts = fullName.trim().split(/\s+/).filter(Boolean);
@@ -329,6 +356,9 @@ window.lookupActiveEmployeeByFullName = lookupActiveEmployeeByFullName;
 window.isEmployeeOffboarded = isEmployeeOffboarded;
 
 function defaultHomeScreen() {
+  if (state.partnerProfile || state.staffOnCircle) return 'partner-home';
+  if (state.hireProfile) return 'hire-checklist';
+  if (state.hiringOnlyMode) return 'hiring-only';
   return 'home-feed';
 }
 
@@ -554,7 +584,8 @@ async function loadHomeStatsFromSupabase() {
         employee_id,
         allocation_percent,
         project:projects!allocations_project_id_fkey (
-          name
+          name,
+          client:clients!projects_client_id_fkey ( id, name, is_active )
         )
       `)
       .eq('period_type', 'week')
@@ -586,40 +617,68 @@ function renderHomeStatCards() {
   const todayIso = toISODateLocal();
 
   // 1. Hours allocated this week (cumulative)
+  // Client-scoped people (dedicated to one client) don't roll into AGENCY
+  // totals — they're not reassignable bandwidth. Their hours still count on
+  // their client's own page. Excluded from BOTH the hours numerator and the
+  // capacity denominator below; counting them on one side only inflated
+  // "free capacity".
   const empCapacityMap = new Map();
+  const capacityExcludedIds = new Set(
+    state.employeeDirectory.filter(isCapacityExcluded).map(e => e.id)
+  );
   state.employeeDirectory.forEach(e => empCapacityMap.set(e.id, (e.capacity_percent || 100) / 100));
 
   let totalWeeklyHours = 0;
   const employeeAllocTotals = new Map();
   state.homeAllocations.forEach(a => {
+    if (capacityExcludedIds.has(a.employee_id)) return;
     const current = employeeAllocTotals.get(a.employee_id) || 0;
     employeeAllocTotals.set(a.employee_id, current + (a.allocation_percent || 0));
   });
-  employeeAllocTotals.forEach((totalPct, empId) => {
-    const capacity = empCapacityMap.get(empId) || 1;
-    totalWeeklyHours += (totalPct / 100) * capacity * WORK_HOURS_PER_WEEK;
+  // allocation_percent is already a % of a FULL week (the planner does
+  // free = capacity - allocated, same unit space) — multiplying by capacity
+  // here double-counted it, so a 40%-capacity person allocated 40% showed
+  // 7.2h instead of 18h. Invisible while everyone sat at capacity 100.
+  employeeAllocTotals.forEach((totalPct) => {
+    totalWeeklyHours += (totalPct / 100) * WORK_HOURS_PER_WEEK;
   });
 
-  // 2. Top + Chill client by allocation share
-  const projectAlloc = new Map();
+  // 2. Top + Chill client by allocation share.
+  //
+  // By CLIENT, not project name (10 Sep 2026). This grouped on the
+  // project's name, which meant the card said "client" while showing a project,
+  // never consulted the client table, and so could not tell a live account from
+  // an archived one — that is how Example Analytics, archived months earlier, came to be
+  // the agency's "chill client". Grouping on client id also stops two projects
+  // that share a name from being silently added together.
+  const clientAlloc = new Map();   // clientId -> { name, pct }
   let totalAllocPct = 0;
   state.homeAllocations.forEach(a => {
-    const projectName = a.project?.name || 'Unassigned';
-    if (isGarbageProjectName(projectName)) return;
-    const current = projectAlloc.get(projectName) || 0;
-    projectAlloc.set(projectName, current + (a.allocation_percent || 0));
+    const client = a.project?.client;
+    // An archived client is finished work; it belongs in neither headline.
+    // Its hours still count in Hours Allocated, which measures what people are
+    // booked on regardless of who it is for.
+    if (!client || client.is_active === false) return;
+    const name = client.name || a.project?.name || 'Unassigned';
+    if (isGarbageProjectName(name)) return;
+    const entry = clientAlloc.get(client.id) || { name, pct: 0 };
+    entry.pct += (a.allocation_percent || 0);
+    clientAlloc.set(client.id, entry);
     totalAllocPct += (a.allocation_percent || 0);
   });
   let topClient = '--';
   let topClientPct = 0;
   let chillClient = '--';
   let chillClientPct = Infinity;
-  projectAlloc.forEach((pct, name) => {
+  clientAlloc.forEach(({ name, pct }) => {
     if (pct > topClientPct) {
       topClientPct = pct;
       topClient = name;
     }
-    if (pct < chillClientPct) {
+    // Ties are broken alphabetically rather than by whichever row the query
+    // happened to return first — two clients sat at exactly 15% and the card
+    // could show either one on any given load.
+    if (pct < chillClientPct || (pct === chillClientPct && name < chillClient)) {
       chillClientPct = pct;
       chillClient = name;
     }
@@ -666,7 +725,12 @@ function renderHomeStatCards() {
   });
   const hoursForWeek = (m) => {
     let h = 0;
-    if (m) m.forEach((pct, empId) => { h += (pct / 100) * (empCapacityMap.get(empId) || 1) * WORK_HOURS_PER_WEEK; });
+    // Same rule as the current-week total: allocation % is already % of a full
+    // week, and client-scoped people are out of agency figures.
+    if (m) m.forEach((pct, empId) => {
+      if (capacityExcludedIds.has(empId)) return;
+      h += (pct / 100) * WORK_HOURS_PER_WEEK;
+    });
     return h;
   };
   const isoMinusDays = (iso, n) => { const t = new Date(iso + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() - n); return t.toISOString().slice(0, 10); };
@@ -683,6 +747,10 @@ function renderHomeStatCards() {
   // Capacity baseline counts ONLY people who actually allocated >=1h this week.
   // Including non-updaters' capacity would inflate "free capacity" unfairly.
   let capacityHours = 0;
+  // employeeAllocTotals already excludes client-scoped people, so the
+  // denominator and the allocatedNow numerator cover the same set. (capacity ×
+  // 45 is correct here — this is the person's own ceiling in hours, with no
+  // allocation % involved, so there's nothing to double-count.)
   employeeAllocTotals.forEach((pct, empId) => {
     if (pct > 0) capacityHours += (empCapacityMap.get(empId) || 1) * WORK_HOURS_PER_WEEK;
   });
@@ -693,7 +761,7 @@ function renderHomeStatCards() {
 
   const hoursExpand = allocatedNow > 0 ? `
       <div class="home-stat-expand">
-        <div class="hse-row"><span>vs last week</span><span class="hse-delta ${deltaHours >= 0 ? 'up' : 'down'}">${deltaHours >= 0 ? '+' : ''}${deltaHours}h <em>(${lastWeekHours}h)</em></span></div>
+        <div class="hse-row"><span>vs last week</span><span class="hse-delta ${deltaHours >= 0 ? 'up' : 'down'}">${deltaHours >= 0 ? '+' : ''}${deltaHours}h${pctDeltaLabel(allocatedNow, lastWeekHours) ? ` (${pctDeltaLabel(allocatedNow, lastWeekHours)})` : ''} <em>(${lastWeekHours}h)</em></span></div>
         <div class="hse-row"><span>4-week average</span><span class="hse-strong">${monthlyAvg}h</span></div>
         <div class="hse-row"><span>Free capacity</span><span class="hse-strong">${freeHours}h <em>of ${capacityHours}h</em></span></div>
         <div class="hse-bar"><div style="width:${usedPct}%"></div></div>
@@ -708,7 +776,13 @@ function renderHomeStatCards() {
     const deptPct = new Map();
     const empPctOnClient = new Map();
     state.homeAllocations.forEach(a => {
-      if ((a.project?.name || 'Unassigned') !== clientName) return;
+      // Match the CLIENT, not the project name. These happened to be equal
+      // while every project was named after its client, but a client with two
+      // differently-named projects — the whole reason the hierarchy exists —
+      // would have shown a breakdown that did not add up to its own headline.
+      const client = a.project?.client;
+      if (!client || client.is_active === false) return;
+      if ((client.name || a.project?.name || 'Unassigned') !== clientName) return;
       const d = empDept.get(a.employee_id) || 'Unassigned';
       deptPct.set(d, (deptPct.get(d) || 0) + (a.allocation_percent || 0));
       empPctOnClient.set(a.employee_id, (empPctOnClient.get(a.employee_id) || 0) + (a.allocation_percent || 0));
@@ -719,7 +793,8 @@ function renderHomeStatCards() {
     }).join('');
     let topEmpId = null, topEmpPct = 0;
     empPctOnClient.forEach((pct, id) => { if (pct > topEmpPct) { topEmpPct = pct; topEmpId = id; } });
-    const contribHours = topEmpId ? Math.round((topEmpPct / 100) * (empCapacityMap.get(topEmpId) || 1) * WORK_HOURS_PER_WEEK) : 0;
+    // allocation % is already % of a full week — no capacity multiplier
+    const contribHours = topEmpId ? Math.round((topEmpPct / 100) * WORK_HOURS_PER_WEEK) : 0;
     const contribName = topEmpId ? displayPersonName(empNameById.get(topEmpId), 'Someone') : '--';
     return `
       <div class="home-stat-expand">
@@ -851,7 +926,7 @@ async function renderSustainabilityCalendar() {
       const d = parseIsoDateLocal(next.start_date);
       const dateStr = d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
       panel.classList.remove('hidden');
-      panel.innerHTML = `<div class="sus-strip"><span class="sus-pill">${next.emoji || '📅'} ${escapeHtml(next.name)} <span class="sus-pill-date">${dateStr}</span></span></div>`;
+      panel.innerHTML = `<div class="sus-strip"><span class="sus-strip-label">Upcoming events</span><span class="sus-pill">${next.emoji || '📅'} ${escapeHtml(next.name)} <span class="sus-pill-date">${dateStr}</span></span></div>`;
     } else {
       panel.classList.add('hidden');
     }
@@ -860,10 +935,14 @@ async function renderSustainabilityCalendar() {
 
   panel.classList.remove('hidden');
   const todayPills = activeToday.map(e => renderSusCalPill(e, todayIso, weekEndIso)).join('');
-  const weekLabel = !activeToday.length && comingThisWeek.length ? '<span class="sus-strip-label">Upcoming</span>' : '';
+  // Always lead with a label: the streak strip sits directly above, and without
+  // a header the events run straight on from it (26 Aug 2026).
+  const leadLabel = `<span class="sus-strip-label">${activeToday.length ? 'Events today' : 'Upcoming events'}</span>`;
+  // Only separate the two groups when both are present.
+  const weekLabel = activeToday.length && comingThisWeek.length ? '<span class="sus-strip-label">Upcoming</span>' : '';
   const weekPills = comingThisWeek.map(e => renderSusCalPill(e, todayIso, weekEndIso)).join('');
   const details = allEvents.map(e => renderSusCalDetail(e)).join('');
-  panel.innerHTML = `<div class="sus-strip">${todayPills}${weekLabel}${weekPills}</div>${details}`;
+  panel.innerHTML = `<div class="sus-strip">${leadLabel}${todayPills}${weekLabel}${weekPills}</div>${details}`;
 
   panel.onclick = (e) => {
     const pill = e.target.closest('.sus-pill');
@@ -1020,7 +1099,7 @@ function buildTimelineEvents() {
   const daysAgo30 = new Date(today);
   daysAgo30.setDate(today.getDate() - 30);
   const daysAgo30Iso = toISODateLocal(daysAgo30);
-  COLONY_UPDATES.forEach(u => {
+  APP_UPDATES.forEach(u => {
     if (u.date >= daysAgo30Iso && u.date <= todayIso) {
       events.push({
         type: 'platform',
@@ -1331,7 +1410,7 @@ function refreshScreenData(screenId) {
       // My Work: refetch tasks on screen entry so edits made elsewhere (or by
       // a manager) show without a hard refresh. Carry-forward is session-gated
       // inside the loader, so this won't re-run cleanup.
-      loadDailyTasksFromSupabase().catch(console.error);
+      if (!taskEditInProgress()) loadDailyTasksFromSupabase().catch(console.error);
       break;
     case 'leave-center':
       // My Leave: refresh both the request list and the balance summary.
@@ -1352,6 +1431,13 @@ function refreshScreenData(screenId) {
     case 'people-directory':
       maybeLoad('homeStats', loadHomeStatsFromSupabase).then(() => renderPeopleDirectory()).catch(console.error);
       if (isLeadershipRole()) loadOnboardingBadge().catch(console.error);
+      loadHiringPanel().catch(console.error);
+      break;
+    case 'hire-checklist':
+      if (state.hireProfile) renderHireChecklist().catch(console.error);
+      break;
+    case 'hiring-only':
+      if (state.hiringOnlyMode) loadHiringPanel().catch(console.error);
       break;
     case 'admin-settings':
       if (isSuperadminUser()) loadPolicyDocuments().catch(console.error);
@@ -1359,9 +1445,32 @@ function refreshScreenData(screenId) {
       if (isSuperadminUser()) loadAccessOverrides().then(renderAccessOverridesAdmin).catch(console.error);
       if (isSuperadminUser()) loadAppConfig().then(renderAppConfigAdmin).catch(console.error);
       loadCronHealth().then(renderCronHealthAdmin).catch(console.error);
+      renderPendingSetupAdmin().catch(console.error);
       break;
     case 'policy':
       loadPolicyPage().catch(console.error);
+      break;
+    case 'hiring':
+      // The panel is born inside the directory markup; bring it here on the
+      // way in, whichever screen loaded first.
+      if (!state.hiringOnlyMode) placeHiringPanel('hiring');
+      loadHiringPanel().catch(console.error);
+      break;
+    case 'partner-home':
+      if (isPartnerRole() || state.staffOnCircle) loadPartnerData().catch(console.error);
+      break;
+    case 'partner-feedback':
+      // Clients and the reviewers answering them read the same wall.
+      if (isPartnerRole() || state.staffOnCircle) loadPartnerFeedback().catch(console.error);
+      break;
+    case 'partner-timeline':
+      if (isPartnerRole() || state.staffOnCircle) loadPartnerTimeline().catch(console.error);
+      break;
+    case 'partner-team':
+      if (isPartnerRole() || state.staffOnCircle) { placeOrgContactsPanel('partner'); loadOrgContacts().catch(console.error); }
+      break;
+    case 'briefs-pipeline':
+      if (!isPartnerRole()) loadBriefsBoard().catch(console.error);
       break;
     case 'client-projects':
       hideClientDetail();
@@ -1461,7 +1570,15 @@ function writeScreenToHistory(screenId, { replace = false } = {}) {
 
 function navigateToScreen(screenId, { replace = false } = {}) {
   const changed = activateScreen(screenId);
-  if (!changed) return;
+  if (!changed) {
+    // Already on it (updateSidebarIdentityLabels can activate home first): the
+    // URL must still say so, or it keeps the boot #login and a reload or a
+    // copied link lands on the sign-in screen's hash.
+    if (getActiveScreenId() === screenId && readScreenFromHash() !== screenId) {
+      writeScreenToHistory(screenId, { replace: true });
+    }
+    return;
+  }
   writeScreenToHistory(screenId, { replace });
 }
 
@@ -1471,7 +1588,199 @@ function hashContainsAuthTokens() {
   return hash.includes('access_token=') || hash.includes('error_description=') || hash.includes('code=') || hash.includes('refresh_token=') || hash.includes('type=recovery') || query.includes('code=');
 }
 
+// An emailed deep link (#people-directory, ?open=hiring) is an INTENT that has
+// to survive the Google round trip: signing in returns to the origin with
+// ?code= and no hash, so routeAfterSignIn used to drop everyone on the home
+// screen — which is why hire emails "just went to the homepage" (Alex,
+// 24 Aug 2026). Stash it on arrival, spend it once auth completes.
+const INTENT_KEY = 'colony_link_intent';
+
+function rememberLinkIntent() {
+  if (hashContainsAuthTokens()) return;
+  const screen = readScreenFromHash();
+  const open = new URLSearchParams(window.location.search).get('open');
+  if (!screen && !open) return;
+  try { sessionStorage.setItem(INTENT_KEY, JSON.stringify({ screen, open })); } catch (e) { /* private mode */ }
+}
+
+function takeLinkIntent() {
+  try {
+    const raw = sessionStorage.getItem(INTENT_KEY);
+    if (!raw) return null;
+    sessionStorage.removeItem(INTENT_KEY);
+    return JSON.parse(raw);
+  } catch (e) { return null; }
+}
+
+// Panels inside a screen (Hiring lives in Team Directory) get scrolled to and
+// flashed, reusing the notification-anchor treatment.
+// Only ids that actually exist — a made-up anchor would retry ten times and
+// then silently do nothing.
+const LINK_OPEN_ANCHORS = {
+  hiring: 'hiringPanel',
+  partners: 'partnersAdminPanel',
+  // Awaiting Setup sits well down a long Admin Settings page, so the approval
+  // email used to land people at the top of it with nothing to tell them what
+  // they had come for (7 Sep 2026 — first real hire through it).
+  setup: 'pendingSetupPanel'
+};
+
+// ?open=<kind>:<id> — the specific thing an email is about, not just the
+// screen it lives on (15 Sep 2026: "when I click the email link it
+// should take me down to the section"). Each opener returns true once it has
+// done its job; until the data it needs has loaded it returns false and is
+// retried, like the panel anchors above.
+const LINK_OPEN_ITEMS = {
+  hire: (id) => revealBySelector(`[data-hire-row="${cssEscape(id)}"]`, (el) => {
+    const toggle = el.querySelector('[data-hire-checklist-toggle]');
+    const list = el.querySelector('[data-hire-checklist]');
+    if (toggle && list && list.classList.contains('hidden')) toggle.click();
+  }),
+  brief: (id) => {
+    if (!briefById(id)) return false;
+    if (isPartnerRole() || state.staffOnCircle) openPartnerBriefDetail(id);
+    else renderBriefDrawer(id).catch(console.error);
+    return true;
+  },
+  request: (id) => revealBySelector(`.fr-card[data-fr-id="${cssEscape(id)}"], [data-pf-id="${cssEscape(id)}"]`),
+  deal: (id) => {
+    if (!(state.deals || []).some((d) => d.id === id)) return false;
+    openDealDetail(id);
+    return true;
+  },
+  leave: (id) => revealBySelector(`tr[data-request-id="${cssEscape(id)}"]`),
+  client: (id) => {
+    if (!(state.clients || []).some((c) => String(c.id) === String(id))) return false;
+    showClientDetail(id).catch(console.error);
+    return true;
+  }
+};
+function cssEscape(v) { return (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v).replace(/["\\]/g, '\\$&'); }
+function revealBySelector(selector, then) {
+  const el = document.querySelector(selector);
+  if (!el || el.offsetHeight === 0) return false;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('notify-anchor-flash');
+  setTimeout(() => el.classList.remove('notify-anchor-flash'), 2400);
+  if (then) then(el);
+  return true;
+}
+function applyLinkIntentAnchor(open, attempt = 0) {
+  const raw = String(open || '');
+  const m = raw.match(/^([a-z]+):(.+)$/i);
+  if (m && LINK_OPEN_ITEMS[m[1].toLowerCase()]) {
+    let done = false;
+    try { done = LINK_OPEN_ITEMS[m[1].toLowerCase()](m[2]); } catch (e) { done = false; }
+    if (!done && attempt < 50) setTimeout(() => applyLinkIntentAnchor(open, attempt + 1), 300);
+    return;
+  }
+  const anchorId = LINK_OPEN_ANCHORS[raw.toLowerCase()];
+  if (anchorId) scrollToNotifyAnchor(anchorId);
+}
+
+// ── Circle branding (7 Sep 2026) ──────────────────────────────────
+// Runs as early as app.js does, before any auth: on clients.youragency.com the tab,
+// the splash and the footer say Circle, and the Colony wordmark is removed.
+// There is deliberately no Circle wordmark yet — Kira's asset replaces this
+// empty space; a text stand-in would look like the real thing and quietly
+// become permanent.
+function applyProductBranding(hostname = location.hostname) {
+  if (!isCircleHost(hostname)) return;
+  const name = productName(hostname);
+  document.title = name;
+  const splashTitle = document.querySelector('.splash-title');
+  if (splashTitle) splashTitle.textContent = name;
+  // The ant is Your Agency's mark, not Colony's, so Circle keeps it — only the
+  // COLONY wordmark goes (8 Sep 2026: "we don't need a new logo mark").
+  // Cloned from the splash rather than added as a new asset so there is one
+  // copy of the artwork; it uses fill="currentColor", so it inherits colour and
+  // the sidebar's own opacity exactly as the wordmark did.
+  // No mark at the bottom of the sidebar on Circle (16 Sep 2026: the
+  // faint ant there "looks really shitty in dark mode"). The header ant stays.
+  const brandLink = document.getElementById('sidebarBrand');
+  if (brandLink) {
+    document.querySelectorAll('[data-product-mark]').forEach((el) => el.remove());
+    brandLink.classList.add('hidden');
+  }
+  // Both marks link home, and home is a different place now. The ant itself
+  // stays — it is Your Agency's, not Colony's — but a client clicking it must not
+  // land in the employee app, and it must not announce itself as "Agency Colony".
+  [brandLink, document.getElementById('headerLogo')].forEach((el) => {
+    if (!el) return;
+    el.setAttribute('href', `https://${CIRCLE_HOST}`);
+    el.setAttribute('aria-label', name);
+  });
+  document.querySelectorAll('[aria-label="Agency Colony"]').forEach((el) => el.setAttribute('aria-label', name));
+  // Staff have no door here. The invited entrance is the ONLY way into Circle,
+  // so it stops being the secondary option and speaks to clients directly.
+  //
+  // The mirror of this on Colony is deliberately NOT done: that same invited
+  // door is how candidates reach their joining paperwork, which is Your Agency's
+  // own process and stays on Colony. Removing it there would lock out every
+  // new hire.
+  document.getElementById('staffAuthActions')?.remove();
+  document.getElementById('staffAuthHelp')?.remove();
+  // No "Sign in to Circle" line: the mark and name sit directly above it, so it
+  // only repeated what the screen already said (8 Sep 2026).
+  document.getElementById('invitedEntranceTitle')?.remove();
+  // "Partner sign in" rather than "Sign in with Google" — it names who the door
+  // is for. Google is still the mechanism, and the hint below says which
+  // account to use.
+  const partnerBtnLabel = document.querySelector('#partnerSignInBtn span');
+  if (partnerBtnLabel) partnerBtnLabel.textContent = 'Partner sign in';
+  const entranceHint = document.getElementById('invitedEntranceHint');
+  // One button, two kinds of people: clients with an invited Google account,
+  // and the Your Agency account team who answer them here. Saying so beats a
+  // reviewer assuming the door is not for them.
+  if (entranceHint) {
+    entranceHint.textContent = 'Use the Google account your invite was sent to. Your Agency team: your @youragency.com account.';
+  }
+  document.getElementById('invitedEntrance')?.classList.add('is-only-entrance');
+
+  document.documentElement.setAttribute('data-product', 'circle');
+}
+applyProductBranding();
+
+// The sign-in screen carried no mark at all, on either host — just buttons on
+// an empty page (8 Sep 2026). The sidebar and header are both hidden
+// while signed out, so nothing identified where you were.
+//
+// Cloned from the splash rather than a third copy of the artwork, and it has
+// to run NOW: dismissSplash() removes that element from the DOM once it fades.
+// The name is taken from the splash's own title so the sign-in screen always
+// says exactly what the loading screen just said.
+function decorateLoginScreen(hostname = location.hostname) {
+  const content = document.querySelector('.login-content');
+  const ant = document.querySelector('.splash-logo');
+  if (!content || !ant || document.getElementById('loginBrand')) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'loginBrand';
+  wrap.className = 'login-brand';
+  const mark = ant.cloneNode(true);
+  mark.setAttribute('class', 'login-brand-mark');
+  mark.setAttribute('aria-hidden', 'true');
+  const name = document.createElement('p');
+  name.className = 'login-brand-name';
+  name.textContent = (document.querySelector('.splash-title')?.textContent || '').trim()
+    || productName(hostname);
+  wrap.append(mark, name);
+  content.prepend(wrap);
+}
+decorateLoginScreen();
+
+// Send a session to its own door. Partners belong on Circle, everyone else on
+// Colony. Deliberately AFTER we know who they are — the two hosts are separate
+// origins, so this costs a fresh sign-in; it is a one-time move, not a loop,
+// because the destination is the place where homeHostFor() returns null.
+function routeToHomeHost(sessionKind) {
+  const target = homeHostFor(sessionKind, location.hostname);
+  if (!target) return false;
+  window.location.replace(`https://${target}${location.hash || ''}`);
+  return true;
+}
+
 function initializeScreenHistory() {
+  rememberLinkIntent();
   if (!hashContainsAuthTokens()) {
     const hashScreen = readScreenFromHash();
     if (hashScreen) {
@@ -1503,12 +1812,90 @@ function initializeScreenHistory() {
   });
 }
 
+// Footer links are plain markup, not screens, so they are NOT covered by the
+// default-deny screen routing and need their own gate. Rule, by session:
+//   employee            → both (Bugs & Features, Remote Work Policy)
+//   partner             → Bugs & Features only (routes to partner-feedback)
+//   hire / hiring-only  → neither (both targets are blocked for them)
+//   signed out          → neither
+// The separator only earns its place when both links are showing, otherwise
+// it is a dangling "|". Signed out was the case the first pass missed: the
+// links sat on the login screen for anyone who opened the URL (Alex,
+// 24 Aug 2026). No data was reachable through them — anon has no access to
+// the app schema — but they should not have been there.
+function applyFooterLinkAccess() {
+  const signedIn = Boolean(state.isAuthenticated);
+  const employee = signedIn && Boolean(state.currentEmployeeId);
+  const partner = signedIn && isPartnerRole();
+  const show = (id, on) => document.getElementById(id)?.classList.toggle('hidden', !on);
+  show('featureRequestsFooterLink', employee || partner);
+  // Same footer link on both products, different wall behind it.
+  const frLink = document.getElementById('featureRequestsFooterLink');
+  if (frLink) frLink.setAttribute('href', (partner || state.staffOnCircle) ? '#partner-feedback' : '#feature-requests');
+  show('footerPolicyRemoteWork', employee);
+  show('footerPolicySep', employee);
+}
+
 function applyRoleAccess() {
+  // Outsider sessions (partner / new-hire candidate / hiring-only): default-
+  // deny. Only their surface's sections (and partner nav, for partners) are
+  // visible; activateScreen refuses hidden sections, so hiding here is a real
+  // route block. Early return — everything below assumes an employee profile.
+  // Staff on Circle are treated as an outsider session on purpose: the same
+  // default-deny path, so they get exactly what is listed and nothing that is
+  // added to Colony later. #partner-feedback carries the extra class.
+  // A reviewer on Circle sees exactly what the client sees — that is the point
+  // of them being here (10 Sep 2026). Same screens, same nav; the
+  // difference is that they read rather than write. RLS is the real stop: an
+  // employee has no partner id, so every partner INSERT/UPDATE policy fails
+  // for them. Hiding the controls below is so nobody is invited to try.
+  const outsiderScreenClass = state.staffOnCircle ? 'partner-screen'
+    : (isPartnerRole() ? 'partner-screen'
+    : (state.hireProfile ? 'hire-screen'
+    : (state.hiringOnlyMode ? 'hiring-crew-screen' : null)));
+  if (outsiderScreenClass) {
+    // The Remote Work Policy footer link points at the employee-only #policy
+    // screen, which is route-blocked below — an outsider (partner, hire
+    // candidate, hiring-only) would see an internal HR link that goes nowhere.
+    applyFooterLinkAccess();
+    navButtons.forEach((btn) => {
+      const forPartner = outsiderScreenClass === 'partner-screen' && btn.dataset.role === 'partner';
+      btn.classList.toggle('hidden', !forPartner);
+    });
+    document.querySelectorAll('section.screen').forEach((section) => {
+      if (section.id === 'login') return;
+      if (section.classList.contains(outsiderScreenClass)) {
+        section.classList.remove('hidden');
+      } else if (!section.classList.contains('hidden')) {
+        // Mark what WE hid so an employee session on the same page load can
+        // restore it (sections like invoice-center manage their own .hidden).
+        section.classList.add('hidden', 'partner-hidden');
+      }
+    });
+    if (state.staffOnCircle) applyStaffOnCircleReadOnly();
+    const activeOutsiderScreen = getActiveScreenId();
+    const activeEl = document.getElementById(activeOutsiderScreen);
+    if (activeEl && activeEl.classList.contains('hidden')) {
+      activateScreen(defaultHomeScreen());
+    }
+    return;
+  }
+  // Employees never see partner nav/screens; partner sections stay hidden by
+  // their default .hidden class, partner nav hidden via the data-role loop below.
+  // Restore anything a partner session on this page load hid.
+  document.querySelectorAll('section.screen.partner-hidden').forEach((section) => {
+    section.classList.remove('hidden', 'partner-hidden');
+  });
+  applyFooterLinkAccess();
+
   const leadershipAccess = isLeadershipRole();
   const teamDashboardAccess = canAccessTeamDashboard();
   const peopleDirectoryAccess = state.isAuthenticated;
   const adminSettingsAccess = isSuperadminUser();
 
+  // Hiring lives under Team for the people who work it: leadership and the
+  // hiring crew. Everyone else never sees the entry (RLS is the real gate).
+  document.getElementById('hiringNavButton')?.classList.toggle('hidden', !isHiringCrew());
   document.querySelectorAll('.leadership-only').forEach((node) => {
     node.classList.toggle('hidden', !leadershipAccess);
   });
@@ -1524,7 +1911,11 @@ function applyRoleAccess() {
     let hide = false;
     if (requiredRole === 'leadership') hide = !leadershipAccess;
     if (requiredRole === 'admin') hide = !adminSettingsAccess;
+    if (requiredRole === 'partner') hide = true;  // employees never see partner nav
     btn.classList.toggle('hidden', hide);
+  });
+  document.querySelectorAll('section.screen.partner-screen').forEach((section) => {
+    section.classList.add('hidden');
   });
 
   const teamDashboardNav = navButtons.find((btn) => btn.dataset.screen === 'leadership-planner');
@@ -1794,6 +2185,9 @@ let _carryForwardDoneThisSession = false;
 document.addEventListener('visibilitychange', async () => {
   if (document.hidden || _taskLoadInFlight) return;
   if (!state.isAuthenticated) return;
+  // Copying a link means leaving the tab and coming back — exactly when this
+  // fires, and exactly when an edit row is open.
+  if (taskEditInProgress()) return;
   const today = toISODateLocal();
   if (localStorage.getItem('colony_task_cleanup_date') === today) return;
   _taskLoadInFlight = true;
@@ -1837,6 +2231,7 @@ syncMobileNav();
 
 const signInBtn = document.getElementById('signInBtn');
 const registerBtn = document.getElementById('registerBtn');
+const partnerSignInBtn = document.getElementById('partnerSignInBtn');
 const loginMessage = document.getElementById('loginMessage');
 const authSessionLine = document.getElementById('authSessionLine');
 const logoutBtn = document.getElementById('logoutBtn');
@@ -1869,6 +2264,19 @@ function updateSidebarIdentityLabels() {
     }
     loginNavButton.classList.remove('disabled');
   }
+  // Circle: who is signed in and for which client. The blank block above the
+  // nav read as broken (16 Sep 2026). Colony keeps this hidden.
+  const identity = document.getElementById('circleIdentity');
+  if (identity) {
+    let html = '';
+    if (state.isAuthenticated && state.partnerProfile) {
+      html = `${escapeHtml(displayPersonName(state.partnerProfile.full_name, 'You'))}<span class="sidebar-identity-sub">${escapeHtml(state.partnerProfile.org || '')}</span>`;
+    } else if (state.isAuthenticated && state.staffOnCircle) {
+      html = `${escapeHtml(displayPersonName(state.employeeProfile?.full_name, 'Your Agency'))}<span class="sidebar-identity-sub">Your Agency team</span>`;
+    }
+    identity.innerHTML = html;
+    identity.classList.toggle('hidden', !html);
+  }
   if (state.isAuthenticated && getActiveScreenId() === 'login') {
     activateScreen(defaultHomeScreen());
   }
@@ -1896,36 +2304,43 @@ function upsertEmployeeInStore(employee) {
 }
 
 async function fetchRuntimeConfig() {
-  // Localhost fallback: Netlify functions aren't available under a plain
-  // static server. Paste your own project's values here for local dev — the
-  // anon key is safe in a browser (RLS enforces access), but keep it out of
-  // version control: use `netlify dev` instead, which serves /api/runtime-config
-  // from your .env. See SETUP.md.
-  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-    return {
-      supabaseUrl: 'https://your-project-ref.supabase.co',
-      supabaseAnonKey: 'your_supabase_anon_key',
-      appBaseUrl: location.origin,
-      allowedDomain: 'youragency.com'
-    };
-  }
+  // ALWAYS go through /api/runtime-config — `netlify dev` serves it locally
+  // from .env. The old localhost branch returned before this fetch with a
+  // hardcoded project URL + anon key, which meant:
+  //   1. .env was silently ignored on localhost, so the documented
+  //      SUPABASE_URL=https://your-project.supabase.co swap (needed for the Google OAuth
+  //      callback to work locally) never actually took effect; and
+  //   2. a rotated anon key would break local dev with no obvious cause,
+  //      while a plain static server pointed straight at production data.
   const response = await fetch('/api/runtime-config', { headers: { Accept: 'application/json' } });
   if (!response.ok) {
-    throw new Error('Unable to load runtime configuration from Netlify.');
+    const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    throw new Error(isLocal
+      ? 'Runtime config unavailable — run `netlify dev` (it serves /api/runtime-config from .env). See CLAUDE.md → Testing.'
+      : 'Unable to load runtime configuration from Netlify.');
   }
   return response.json();
 }
 
-async function fetchCurrentEmployeeProfile() {
+// ensure_employee_profile is split out so the caller can await it FIRST: it
+// creates a new joiner's row, and app_config / access_overrides /
+// employee_client_scope are all RLS-gated on is_employee(), so they read
+// nothing until that row exists.
+async function ensureEmployeeProfileRow() {
   const ensureResult = await state.supabase.rpc('ensure_employee_profile');
   if (ensureResult.error) throw ensureResult.error;
+  return ensureResult;
+}
 
+async function fetchCurrentEmployeeProfile(ensureResult) {
   const profileId = ensureResult.data?.id;
   if (!profileId) {
     throw new Error('Account bootstrap succeeded but profile id is missing.');
   }
 
-  const employeeResult = await state.supabase
+  // Address and emergency contact are column-revoked from authenticated
+  // (202609210001) and come from employee_private_details, own row only.
+  const [employeeResult, privateDetails] = await Promise.all([state.supabase
     .from('employees')
     .select(`
       id,
@@ -1938,9 +2353,9 @@ async function fetchCurrentEmployeeProfile() {
       leave_tracking_enabled,
       approver_emails,
       onboarding_completed,
-      emergency_contact_name,
-      emergency_contact_phone,
+      job_title,
       current_city,
+      timezone,
       date_of_birth,
       direct_manager_email,
       department:departments!employees_department_id_fkey (
@@ -1950,10 +2365,23 @@ async function fetchCurrentEmployeeProfile() {
       )
     `)
     .eq('id', profileId)
-    .single();
+    .single(), loadEmployeePrivateDetails(profileId)]);
 
   if (employeeResult.error) throw employeeResult.error;
-  return employeeResult.data;
+  return { ...employeeResult.data, ...(privateDetails || {}) };
+}
+
+// A person's home address and emergency contact: their own, or anyone's for
+// leadership/admin. Null when the caller may not see them or the read fails —
+// callers must then leave those fields out of any save, never write blanks.
+async function loadEmployeePrivateDetails(employeeId) {
+  if (!state.supabase || !employeeId) return null;
+  const { data, error } = await state.supabase.rpc('employee_private_details', { p_employee_id: employeeId });
+  if (error) {
+    console.warn('Private profile details unavailable:', error.message);
+    return null;
+  }
+  return (Array.isArray(data) ? data[0] : data) || null;
 }
 
 // applyAuthState is split into focused phases (slice 7) — the orchestrator at
@@ -1962,6 +2390,11 @@ async function fetchCurrentEmployeeProfile() {
 // Phase: full reset to the signed-out state (also runs on sign-out).
 function resetToSignedOutState() {
     state.employeeProfile = null;
+    state.partnerProfile = null;
+    state.hireProfile = null;
+    state.hiringOnlyMode = false;
+    state.staffOnCircle = false;
+    placeHiringPanel('directory');
     state.currentEmployeeId = null;
     state.employeeDirectory = [];
     state.inactiveEmployees = [];
@@ -1979,6 +2412,7 @@ function resetToSignedOutState() {
     setAuthenticatedNavigation(false);
     if (signInBtn) signInBtn.classList.remove('hidden');
     if (registerBtn) registerBtn.classList.remove('hidden');
+    if (partnerSignInBtn) partnerSignInBtn.classList.remove('hidden');
     if (logoutBtn) {
       logoutBtn.classList.add('hidden');
       logoutBtn.disabled = true;
@@ -2008,6 +2442,8 @@ function resetToSignedOutState() {
     setLeaveBalanceNotice('Sign in to load leave balances.');
     if (orgChartPanel) orgChartPanel.classList.add('hidden');
     if (toggleOrgChartBtn) toggleOrgChartBtn.textContent = 'Org Chart';
+    // Runs after every field above is cleared, so applyFooterLinkAccess()
+    // inside it sees a genuinely signed-out state.
     applyRoleAccess();
     activateScreen('login');
     dismissSplash();
@@ -2016,11 +2452,19 @@ function resetToSignedOutState() {
 // Phase: profile + role. Loads access overrides and app_config BEFORE the role
 // is computed; self-heals DB access_level drift against the enforced pin.
 async function establishIdentityAndRole(authEmail, wasAuthenticated) {
-    const employeeProfile = stripMiddleNameOnEmployee(await fetchCurrentEmployeeProfile());
-    // Load editable access overrides before computing role (falls back to the
-    // hardcoded ENFORCED_ACCESS_BY_EMAIL if the table is empty/unreachable).
-    await loadAccessOverrides().catch(err => console.warn('Access overrides load failed, using fallback:', err));
-    await loadAppConfig().catch(err => console.warn('App config load failed, using fallback:', err));
+    // Access overrides and app_config must be in hand BEFORE the role is
+    // computed below (falls back to the hardcoded ENFORCED_ACCESS_BY_EMAIL if
+    // the table is empty/unreachable). Once the row exists none of the four
+    // reads depends on another, so they run together: one after another they
+    // were ~3s of every sign-in and page load (17 Sep 2026).
+    const ensureResult = await ensureEmployeeProfileRow();
+    const [rawProfile] = await Promise.all([
+      fetchCurrentEmployeeProfile(ensureResult),
+      loadAccessOverrides().catch(err => console.warn('Access overrides load failed, using fallback:', err)),
+      loadAppConfig().catch(err => console.warn('App config load failed, using fallback:', err)),
+      loadClientScope().catch(err => console.warn('Client scope load failed:', err))
+    ]);
+    const employeeProfile = stripMiddleNameOnEmployee(rawProfile);
     const enforcedAccess = getEnforcedAccessLevel(authEmail);
     state.employeeProfile = employeeProfile;
     state.currentEmployeeId = employeeProfile.id;
@@ -2069,10 +2513,54 @@ function applySignedInChrome(employeeProfile, authEmail, wasAuthenticated) {
     applyRoleAccess();
     applyInvoiceVisibility();
     applyDealFlowVisibility();
+    applyBriefsVisibility();
     applyFractionalVisibility();
 }
 
 // Phase: initial data fan-out (each load fails independently).
+// Dead-session recovery. Deliberately narrow: only the signatures that mean
+// "this request had no usable identity" — an ordinary RLS refusal ("new row
+// violates row-level security policy") must NOT land here, it is a real
+// answer to a real request.
+let authLossInFlight = false;
+function isDeadSessionBody(body) {
+  return /permission denied for schema|JWT expired|invalid claim|bad_jwt|token is expired/i.test(body || '');
+}
+
+async function handlePossibleAuthLoss(response) {
+  if (authLossInFlight || !state.supabase) return;
+  // ONLY for a session we already had. Without this guard the handler also ran
+  // during the sign-in round trip — PKCE exchanges the code on page load, and
+  // any query firing before the session settled hit 401/403, failed to
+  // refresh, and called signOut(), which wiped the session just created AND
+  // its PKCE verifier. Result: signed out, and every sign-in killed itself
+  // (Alex, locked out 24 Aug 2026). A signed-out client has no session to
+  // rescue, so there is nothing here for it to do.
+  if (!state.isAuthenticated || !state.session) return;
+  let body = '';
+  try { body = await response.text(); } catch (e) { return; }
+  if (!isDeadSessionBody(body)) return;
+  authLossInFlight = true;
+  try {
+    // One honest attempt to refresh before giving up on the session.
+    const { data, error } = await state.supabase.auth.refreshSession();
+    if (!error && data?.session) {
+      await loadInitialAppData().catch((e) => console.error('Reload after session refresh failed:', e));
+      return;
+    }
+    // Never sign out blind: if the client no longer holds a session, calling
+    // signOut() can only destroy state a concurrent sign-in is building.
+    const current = await state.supabase.auth.getSession().catch(() => null);
+    if (!current?.data?.session) return;
+    const msg = 'Your session expired — please sign in again.';
+    state.pendingAuthStatus = { message: msg, className: 'status error' };
+    await state.supabase.auth.signOut().catch(() => {});
+    setLoginStatus(msg, 'status error');
+  } finally {
+    authLossInFlight = false;
+  }
+}
+
 async function loadInitialAppData() {
     await Promise.all([
       loadEmployeeDirectoryFromSupabase().catch((error) => {
@@ -2096,6 +2584,14 @@ async function loadInitialAppData() {
       loadPublicHolidaysFromSupabase().catch((error) => {
         console.error('Public holidays load failed:', error);
       }),
+      loadDepartmentOptions().catch((error) => {
+        console.error('Department options load failed:', error);
+      }),
+      // Deal Flow, briefs and anything else that judges a date needs these —
+      // without them "due soon" silently falls back to weekends-only.
+      loadSlaAndHolidays().catch((error) => {
+        console.error('SLA/holiday load failed:', error);
+      }),
       loadNotifySignals().catch((error) => {
         console.error('Notify signals load failed:', error);
       }),
@@ -2103,13 +2599,39 @@ async function loadInitialAppData() {
         console.error('Recurring tasks load failed:', error);
       })
     ]);
+
+    // AFTER the parallel block, not inside it: streaks need the holiday list
+    // and the employee directory to already be in hand.
+    loadStreakData().catch((error) => console.error('Streak load failed:', error));
 }
 
 // Phase: post-sign-in routing (hash screen vs default dashboard vs refresh).
 function routeAfterSignIn(wasAuthenticated, activeScreenBeforeAuthUpdate) {
-    const hashScreen = readScreenFromHash();
+    // initializeScreenHistory() writes the boot screen into the URL, which is
+    // #login before auth resolves. That is not somewhere a signed-in person
+    // asked to go, so it counts as no hash. Without this they stayed on the
+    // sign-in screen whenever nothing else happened to move them — staff on
+    // Circle, once they stopped loading the employee app (17 Sep 2026).
+    const rawHashScreen = readScreenFromHash();
+    const hashScreen = rawHashScreen === 'login' ? '' : rawHashScreen;
     const hashIsAuthCallback = hashContainsAuthTokens();
     const shouldOpenDashboard = !wasAuthenticated && (!hashScreen || hashIsAuthCallback) && activeScreenBeforeAuthUpdate === 'login';
+
+    // Where they were actually trying to go, before Google intervened.
+    const intent = takeLinkIntent();
+    if (intent && (intent.screen || intent.open)) {
+      const target = intent.screen || getActiveScreenId();
+      // activateScreen refuses screens this role cannot open, so a stale or
+      // off-limits link falls back to home rather than showing a blank shell.
+      const landed = target ? activateScreen(target) || getActiveScreenId() === target : false;
+      if (landed) {
+        writeScreenToHistory(target, { replace: true });
+        refreshScreenData(target);
+        if (intent.open) applyLinkIntentAnchor(intent.open);
+        return;
+      }
+    }
+
     if (shouldOpenDashboard) {
       navigateToScreen(defaultHomeScreen(), { replace: true });
     } else if (hashIsAuthCallback) {
@@ -2134,20 +2656,78 @@ async function applyAuthState(session) {
   }
 
   const authEmail = normalizeEmail(session.user?.email);
+  // Reset splash copy in case an outsider attempt on this page load changed it.
+  const splashTextEl = document.getElementById('splashText');
+  if (splashTextEl) splashTextEl.textContent = 'Setting up your workspace...';
+  // An Your Agency address on Circle used to be someone in the wrong place. Since
+  // 10 Sep 2026 the people who service clients answer client feedback there,
+  // so staff are let through and sorted out once we know who they are — a
+  // brief reviewer stays on Circle with the feedback wall and nothing else;
+  // anyone else is still sent to Colony. The check has to happen after the
+  // profile loads, because reviewer status is not knowable from the address.
+  //
+  // Candidates are unaffected: they were never reviewers and still go home.
+  const onCircle = isCircleHost(location.hostname);
+  if (authEmail.endsWith(ANT_DOMAIN) && !onCircle && routeToHomeHost('employee')) return;
   if (!authEmail.endsWith(ANT_DOMAIN)) {
-    const domainError =
-      state.authIntent === 'register'
-        ? 'Registration failed. Use your @youragency.com Google Workspace account.'
-        : 'Sign-in failed. Use your @youragency.com Google Workspace account.';
-    state.pendingAuthStatus = { message: domainError, className: 'status error' };
-    await state.supabase.auth.signOut();
-    setLoginStatus(domainError, 'status error');
+    // Non-youragency session: invited-outsider path (partner, else new hire).
+    // Invite-only — no invite anywhere means sign-out.
+    await applyOutsiderAuthState(authEmail, wasAuthenticated);
+    return;
+  }
+  if (HIRING_ONLY_EMAILS.includes(authEmail)) {
+    // Hiring-only accounts (Leo/legal): youragency email, but never an
+    // employee profile — they get the hiring section and nothing else.
+    await applyHiringOnlyAuthState(authEmail, wasAuthenticated);
     return;
   }
 
   try {
     const employeeProfile = await establishIdentityAndRole(authEmail, wasAuthenticated);
+
+    // Now we know. Staff on Circle: only the people who service clients stay,
+    // and they get the client feedback wall — briefs and everything else they
+    // already have in Colony, and the Circle bundle does not even contain
+    // those screens.
+    if (onCircle) {
+      if (!isBriefReviewer()) {
+        state.staffOnCircle = false;
+        // This runs on Circle only, so the staff product is named through
+        // productName(STAFF_HOST) — the Circle build rewrites that one literal,
+        // keeping the internal product's name out of what clients download.
+        const staffProduct = productName(STAFF_HOST);
+        const msg = `This is the client workspace. Your workspace is ${staffProduct}.`;
+        state.pendingAuthStatus = { message: msg, className: 'status error' };
+        await state.supabase.auth.signOut();
+        setLoginStatus(msg, 'status error');
+        appConfirm(
+          `${msg}\n\nCircle is where clients work. Only the account team signs in here.`,
+          { title: 'Wrong door', confirmLabel: `Go to ${staffProduct}`, cancelLabel: 'Close' }
+        ).then((go) => { if (go) window.location.href = `https://${STAFF_HOST}`; }).catch(() => {});
+        return;
+      }
+      state.staffOnCircle = true;
+    }
+
     applySignedInChrome(employeeProfile, authEmail, wasAuthenticated);
+
+    // Came in via the "Partner sign in" button with an youragency account?
+    // Routing is by email, so they got the employee view — say so, or this
+    // reads as "the partner button is broken" (3 Aug 2026).
+    let partnerIntent = false;
+    try {
+      partnerIntent = sessionStorage.getItem('colony_partner_intent') === '1';
+      sessionStorage.removeItem('colony_partner_intent');
+    } catch (e) { /* private mode */ }
+    // On Circle that button is the only door, so a reviewer using it is doing
+    // the right thing — the warning below is for someone on COLONY who wanted
+    // the partner view and got the employee one.
+    if (partnerIntent && !wasAuthenticated && !state.staffOnCircle) {
+      appConfirm(
+        'You signed in with your @youragency.com account, so you got the normal employee view — youragency accounts can never be partners. To try the partner side, add a personal (non-youragency) Google account under Briefs → Partners and sign in with that, ideally in an incognito window.',
+        { title: 'That was the invited sign-in', confirmLabel: 'Got it', cancelLabel: 'Close' }
+      ).catch(() => {});
+    }
 
     // Skip full data reload on token refresh — preserves unsaved form inputs
     if (wasAuthenticated) {
@@ -2155,19 +2735,29 @@ async function applyAuthState(session) {
       return;
     }
 
-    await loadInitialAppData();
+    // Staff on Circle see only the client screens, which load their own data
+    // (loadPartnerData and friends, via routeAfterSignIn). Loading the whole
+    // employee app first — tasks, allocations, leave, clients, ~35 requests —
+    // kept the splash up for ~8s on clients.youragency.com and faded it onto a
+    // half-built page, where a click landed on the sign-in button and started
+    // a second Google sign-in (17 Sep 2026; auth logs show /authorize
+    // with no logout in between). The onboarding overlay and the leadership
+    // badge are employee-app chrome the Circle bundle does not contain.
+    if (!state.staffOnCircle) {
+      await loadInitialAppData();
 
-    // --- Onboarding: check if this is a new hire needing the welcome overlay ---
-    const needsOnboarding = state.employeeProfile?.onboarding_completed === false;
-    if (needsOnboarding) {
-      await initOnboardingOverlay();
-      dismissSplash();
-      return;
-    }
+      // --- Onboarding: check if this is a new hire needing the welcome overlay ---
+      const needsOnboarding = state.employeeProfile?.onboarding_completed === false;
+      if (needsOnboarding) {
+        await initOnboardingOverlay();
+        dismissSplash();
+        return;
+      }
 
-    // Load onboarding data for sidebar badge (leadership only)
-    if (isLeadershipRole()) {
-      loadOnboardingBadge().catch(console.error);
+      // Load onboarding data for sidebar badge (leadership only)
+      if (isLeadershipRole()) {
+        loadOnboardingBadge().catch(console.error);
+      }
     }
 
     routeAfterSignIn(wasAuthenticated, activeScreenBeforeAuthUpdate);
@@ -2182,6 +2772,165 @@ async function applyAuthState(session) {
   }
 }
 
+// Phase: invited-outsider session (non-youragency email). Invite-only; the email
+// decides which surface: partner (briefs) else new hire (joining checklist).
+async function applyOutsiderAuthState(authEmail, wasAuthenticated) {
+  try { sessionStorage.removeItem('colony_partner_intent'); } catch (e) { /* private mode */ }
+  // The default splash copy ("Setting up your workspace") is employee language
+  // and reads as a broken half-login when an invite check fails (3 Aug).
+  const splashText = document.getElementById('splashText');
+  if (splashText) splashText.textContent = 'Verifying your access…';
+  try {
+    const { data: partner, error } = await state.supabase.rpc('ensure_partner_profile');
+    if (error) throw error;
+    if (!partner || !partner.id) {
+      // Not a partner — maybe an invited new hire.
+      const { data: hire, error: hireError } = await state.supabase.rpc('ensure_hire_profile');
+      if (hireError) throw hireError;
+      if (hire && hire.id) {
+        await applyHireAuthState(hire, authEmail, wasAuthenticated);
+        return;
+      }
+      // The first thing a mistyped or uninvited client ever sees, so it must
+      // name THEIR product. Said "No Colony invite" until 10 Sep 2026 — a
+      // platform they have never heard of and cannot reach.
+      const msg = `No ${productName(location.hostname)} invite for this email. Ask your Your Agency contact for an invite.`;
+      state.pendingAuthStatus = { message: msg, className: 'status error' };
+      await state.supabase.auth.signOut();
+      setLoginStatus(msg, 'status error');
+      // The status line under the sign-in buttons is easy to miss — say it
+      // plainly, then the user is back on the sign-in screen.
+      appConfirm(
+        `${authEmail} isn't on ${productName(location.hostname)}'s invite list, so we've signed you out. If you're expecting access, ask your Your Agency contact to invite this exact email address.`,
+        { title: 'Invited sign-in failed', confirmLabel: 'OK', cancelLabel: 'Close' }
+      ).catch(() => {});
+      return;
+    }
+
+    state.partnerProfile = partner;
+    state.role = 'partner';
+    state._realRole = null;
+
+    // Clients sign in on Circle, and ONLY on Circle (8 Sep 2026).
+    // A redirect would still have created a Colony session first and then asked
+    // them to sign in again on the other origin, which is both a login they
+    // should not have had and a worse experience. This refuses instead, and
+    // says where to go — the same shape as the no-invite refusal below.
+    if (homeHostFor('partner', location.hostname)) {
+      const msg = `Clients sign in at ${CIRCLE_HOST}, not here.`;
+      state.pendingAuthStatus = { message: msg, className: 'status error' };
+      await state.supabase.auth.signOut();
+      setLoginStatus(msg, 'status error');
+      appConfirm(
+        `This is Colony, the team's workspace. Your client workspace is Circle — sign in at ${CIRCLE_HOST} with this same Google account.`,
+        { title: 'Wrong door', confirmLabel: `Go to ${productName(CIRCLE_HOST)}`, cancelLabel: 'Close' }
+      ).then((go) => { if (go) window.location.href = `https://${CIRCLE_HOST}`; }).catch(() => {});
+      return;
+    }
+
+    if (signInBtn) signInBtn.classList.add('hidden');
+    if (registerBtn) registerBtn.classList.add('hidden');
+    if (partnerSignInBtn) partnerSignInBtn.classList.add('hidden');
+    if (logoutBtn) {
+      logoutBtn.classList.remove('hidden');
+      logoutBtn.disabled = false;
+    }
+    setAuthenticatedNavigation(true);
+    // Notify bell is employee-signal-driven; partners get their own in Phase 1b.
+    document.getElementById('notifyBellBtn')?.classList.add('hidden');
+    setAuthSessionLine(`Signed in as ${displayPersonName(partner.full_name, 'Partner')} (${authEmail}) — ${partner.org}`);
+    if (!wasAuthenticated) {
+      setLoginStatus('Sign-in successful.', 'status');
+    }
+    state.authIntent = 'signin';
+    applyRoleAccess();
+
+    if (wasAuthenticated) {
+      dismissSplash();
+      return;
+    }
+    await loadPartnerData();
+    navigateToScreen('partner-home', { replace: true });
+    dismissSplash();
+  } catch (error) {
+    console.error(error);
+    const msg = `Partner sign-in failed: ${error.message}`;
+    state.pendingAuthStatus = { message: msg, className: 'status error' };
+    setLoginStatus(msg, 'status error');
+    await state.supabase.auth.signOut();
+    dismissSplash();
+  }
+}
+
+function isPartnerRole() {
+  return Boolean(state.partnerProfile);
+}
+
+// Candidate session: personal Gmail bound to an active hire. One screen only.
+async function applyHireAuthState(hire, authEmail, wasAuthenticated) {
+  state.hireProfile = hire;
+  state.role = 'hire';
+  state._realRole = null;
+  // Joining paperwork is Your Agency's own process, not a client one, so a
+  // candidate belongs on Colony. They sign in with a personal Gmail, so the
+  // @youragency.com check upstream never sees them — without this they would be
+  // stranded on Circle.
+  if (routeToHomeHost('hire')) return;
+  if (signInBtn) signInBtn.classList.add('hidden');
+  if (registerBtn) registerBtn.classList.add('hidden');
+  if (partnerSignInBtn) partnerSignInBtn.classList.add('hidden');
+  if (logoutBtn) { logoutBtn.classList.remove('hidden'); logoutBtn.disabled = false; }
+  setAuthenticatedNavigation(true);
+  document.getElementById('notifyBellBtn')?.classList.add('hidden');
+  setAuthSessionLine(`Signed in as ${displayPersonName(hire.full_name, 'Candidate')} (${authEmail})`);
+  state.authIntent = 'signin';
+  applyRoleAccess();
+  if (wasAuthenticated) { dismissSplash(); return; }
+  renderHireChecklist();
+  navigateToScreen('hire-checklist', { replace: true });
+  dismissSplash();
+}
+
+// Hiring-only session (Leo/legal): youragency account, hiring section only.
+async function applyHiringOnlyAuthState(authEmail, wasAuthenticated) {
+  state.hiringOnlyMode = true;
+  state.role = 'hiring-only';
+  state._realRole = null;
+  if (signInBtn) signInBtn.classList.add('hidden');
+  if (registerBtn) registerBtn.classList.add('hidden');
+  if (partnerSignInBtn) partnerSignInBtn.classList.add('hidden');
+  if (logoutBtn) { logoutBtn.classList.remove('hidden'); logoutBtn.disabled = false; }
+  setAuthenticatedNavigation(true);
+  document.getElementById('notifyBellBtn')?.classList.add('hidden');
+  setAuthSessionLine(`Signed in as ${authEmail} — New hire`);
+  state.authIntent = 'signin';
+  applyRoleAccess();
+  placeHiringPanel('hiring-only');
+  if (wasAuthenticated) { dismissSplash(); return; }
+  await loadHiringPanel().catch(console.error);
+  navigateToScreen('hiring-only', { replace: true });
+  dismissSplash();
+}
+
+// The hiring panel lives in Team Directory for the crew, but is relocated
+// into the standalone #hiring-only screen for hiring-only logins.
+let hiringPanelHome = null;
+function placeHiringPanel(mode) {
+  const panel = document.getElementById('hiringPanel');
+  if (!panel) return;
+  if (!hiringPanelHome) hiringPanelHome = { parent: panel.parentElement, next: panel.nextElementSibling };
+  if (mode === 'hiring-only') {
+    document.getElementById('hiringOnlyPanelSlot')?.appendChild(panel);
+  } else {
+    // The panel's home is the Hiring screen (11 Sep 2026), not the directory
+    // it was born in. Leo's hiring-only view still borrows the same node.
+    const slot = document.getElementById('hiringScreenSlot');
+    if (slot && panel.parentElement !== slot) slot.appendChild(panel);
+  }
+}
+
+// loadPartnerData / renderPartnerHome live in the Brief pipeline block below.
+
 async function startGoogleSignIn(intent = 'signin') {
   if (!state.supabase) {
     setLoginStatus('Supabase auth is not initialized yet.', 'status error');
@@ -2190,15 +2939,28 @@ async function startGoogleSignIn(intent = 'signin') {
   state.authIntent = intent;
 
   const isRegisterIntent = intent === 'register';
+  const isPartnerIntent = intent === 'partner';
+
+  // Which button was clicked doesn't survive the OAuth redirect — stash it so
+  // we can explain if a @youragency.com account comes back via the partner button
+  // (routing is by email, and youragency accounts always get the employee view).
+  try { sessionStorage.setItem('colony_partner_intent', isPartnerIntent ? '1' : ''); } catch (e) { /* private mode */ }
+
+  // Partners sign in with non-youragency Google accounts, so no hd hint for them.
+  // Which path a session takes is decided by email after the redirect, not by
+  // this intent (the page reloads and intent state is lost).
+  const queryParams = isPartnerIntent
+    ? { prompt: 'select_account' }
+    : {
+        hd: 'youragency.com',
+        prompt: isRegisterIntent ? 'consent select_account' : 'select_account'
+      };
 
   const { error } = await state.supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
       redirectTo: `${window.location.origin}${window.location.pathname}`,
-      queryParams: {
-        hd: 'youragency.com',
-        prompt: isRegisterIntent ? 'consent select_account' : 'select_account'
-      }
+      queryParams
     }
   });
 
@@ -2235,6 +2997,7 @@ async function initializeSupabaseAuth() {
   }
 
   const { createClient } = window.supabase;
+
   state.supabase = createClient(state.runtimeConfig.supabaseUrl, state.runtimeConfig.supabaseAnonKey, {
     auth: {
       persistSession: true,
@@ -2248,6 +3011,21 @@ async function initializeSupabaseAuth() {
     },
     db: {
       schema: 'app'
+    },
+    global: {
+      // One place to notice a session that has died. With no valid token,
+      // supabase-js falls back to the anon key, and anon has no USAGE on the
+      // app schema — so every query returns "permission denied for schema
+      // app", which reached users as a raw Postgres error in whichever panel
+      // happened to load first (24 Aug 2026). Now a dead session is
+      // recognised once, here, and turned into a normal re-sign-in.
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        if (response.status === 401 || response.status === 403) {
+          handlePossibleAuthLoss(response.clone()).catch(() => {});
+        }
+        return response;
+      }
     }
   });
 
@@ -2263,7 +3041,15 @@ async function initializeSupabaseAuth() {
 
   await applyAuthState(sessionResult.data?.session || null);
 
-  state.supabase.auth.onAuthStateChange((_event, nextSession) => {
+  state.supabase.auth.onAuthStateChange((event, nextSession) => {
+    // supabase-js replays INITIAL_SESSION to every new subscriber. It carries
+    // the session applyAuthState() just finished with, so handling it again
+    // re-ran the whole identity chain (5 sequential queries) on every page
+    // load. Token refreshes and real sign-in/out still go through.
+    if (event === 'INITIAL_SESSION'
+        && (nextSession?.access_token || null) === (state.session?.access_token || null)) {
+      return;
+    }
     window.setTimeout(() => {
       applyAuthState(nextSession).catch((error) => {
         console.error(error);
@@ -2291,6 +3077,15 @@ if (registerBtn) {
   });
 }
 
+if (partnerSignInBtn) {
+  partnerSignInBtn.addEventListener('click', () => {
+    startGoogleSignIn('partner').catch((error) => {
+      console.error(error);
+      setLoginStatus(`Partner sign-in failed: ${error.message}`, 'status error');
+    });
+  });
+}
+
 if (logoutBtn) {
   logoutBtn.addEventListener('click', () => {
     signOutCurrentSession().catch((error) => {
@@ -2307,6 +3102,7 @@ const taskActionHeader = document.getElementById('taskActionHeader');
 const dailyTaskTableBody = document.getElementById('dailyTaskTableBody');
 const newTaskTitleInput = document.getElementById('newTaskTitleInput');
 const newTaskDescriptionInput = document.getElementById('newTaskDescriptionInput');
+if (newTaskDescriptionInput) newTaskDescriptionInput.maxLength = TASK_DESCRIPTION_MAX;
 const newTaskDeadlineInput = document.getElementById('newTaskDeadlineInput');
 const newTaskClientSelect = document.getElementById('newTaskClientSelect');
 const weeklyPlannerTableBody = document.getElementById('weeklyPlannerTableBody');
@@ -2336,6 +3132,14 @@ const orgChartScope = document.getElementById('orgChartScope');
 const fullAccessTableBody = document.getElementById('fullAccessTableBody');
 const saveAccessRolesBtn = document.getElementById('saveAccessRolesBtn');
 const fullAccessNotice = document.getElementById('fullAccessNotice');
+
+// True while a task row is open for editing. A background reload re-renders
+// the table and throws the half-typed row away — which is the "it refreshed
+// and I lost the update" half of Dev's report (20 Sep 2026). Explicit
+// user actions still render; only the background paths defer.
+function taskEditInProgress() {
+  return Boolean(document.querySelector('[data-task-action="save-edit"]'));
+}
 
 function setDailyTaskNotice(message = '') {
   if (!dailyTaskNotice) return;
@@ -2454,11 +3258,11 @@ function renderPeopleDirectory() {
       : '<span class="mini-meta">View only</span>';
     const row = document.createElement('tr');
     row.innerHTML = `
-      <td data-label="Name"><button class="name-link employee-link" data-employee="${escapeHtml(employee.full_name)}">${escapeHtml(displayName)}</button>${employee.current_city ? `<span class="directory-city">📍 ${escapeHtml(employee.current_city)}</span>` : ''}</td>
+      <td data-label="Name">${state.onboardingEmployeeIds?.has(employee.id) ? '<span class="onboarding-dot" title="Onboarding in progress"></span>' : ''}<button class="name-link employee-link" data-employee="${escapeHtml(employee.full_name)}">${escapeHtml(displayName)}</button>${employee.current_city ? `<span class="directory-city">📍 ${escapeHtml(employee.current_city)}</span>` : ''}</td>
       <td data-label="Email">${escapeHtml(employee.email || '')}</td>
       <td data-label="Department">${escapeHtml(normalizeTeamName(employee.department?.name, TEAM_AM))}</td>
       <td data-label="Reports To">${escapeHtml(reportsTo)}</td>
-      <td data-label="Type">${employee.employment_type === 'fractional' ? 'Fractional' : 'Full-time'}</td>
+      <td data-label="Type">${escapeHtml(employmentTypeLabel(employee.employment_type))}</td>
       ${showAccessRole ? `<td data-label="Access">${accessLabel}</td>` : ''}
       ${showUtilization ? `<td data-label="Utilization">${util}%</td>` : ''}
       <td data-label="">${actionCell}</td>
@@ -2500,10 +3304,10 @@ document.getElementById('deactivatedEmployeesPanel')?.addEventListener('click', 
   if (!btn) return;
   const id = btn.dataset.reactivateId;
   const name = btn.dataset.reactivateName;
-  if (!await colonyConfirm(`Reactivate ${name}?`)) return;
+  if (!await appConfirm(`Reactivate ${name}?`)) return;
   const result = await state.supabase.from('employees').update({ is_active: true }).eq('id', id);
   if (result.error) {
-    colonyAlert(`Unable to reactivate: ${result.error.message}`);
+    appAlert(`Unable to reactivate: ${result.error.message}`);
     return;
   }
   await loadEmployeeDirectoryFromSupabase();
@@ -2604,11 +3408,11 @@ async function deactivateDirectoryEmployee(employeeId, employeeName = 'Employee'
 
   const displayName = displayPersonName(employeeName, 'Employee');
   if (employeeId === state.currentEmployeeId) {
-    colonyAlert('You cannot deactivate your own account.');
+    appAlert('You cannot deactivate your own account.');
     return;
   }
 
-  const confirmDeactivate = await colonyConfirm(`Deactivate ${displayName}?`);
+  const confirmDeactivate = await appConfirm(`Deactivate ${displayName}?`);
   if (!confirmDeactivate) return;
 
   if (!state.supabase || !state.isAuthenticated) {
@@ -2622,7 +3426,7 @@ async function deactivateDirectoryEmployee(employeeId, employeeName = 'Employee'
 
   const result = await state.supabase.from('employees').update({ is_active: false }).eq('id', employeeId);
   if (result.error) {
-    colonyAlert(`Unable to deactivate ${displayName}: ${result.error.message}`);
+    appAlert(`Unable to deactivate ${displayName}: ${result.error.message}`);
     return;
   }
 
@@ -2670,9 +3474,9 @@ function ensureOffboardModalStyles() {
 
 async function openOffboardEmployeeFlow(employeeId, employeeName) {
   if (!employeeId || !isLeadershipRole()) return;
-  if (!state.supabase) { colonyAlert('Not connected to database.'); return; }
+  if (!state.supabase) { appAlert('Not connected to database.'); return; }
   if (employeeId === state.currentEmployeeId) {
-    colonyAlert('You cannot offboard your own account.');
+    appAlert('You cannot offboard your own account.');
     return;
   }
   ensureOffboardModalStyles();
@@ -2695,7 +3499,7 @@ async function openOffboardEmployeeFlow(employeeId, employeeName) {
   const errors = [tasksRes, leaveRes, allocRes, standingRes, onbRes, clientsRes, dealsRes].filter(r => r.error);
   if (errors.length) {
     console.error('Offboard scan errors', errors);
-    colonyAlert('Could not load offboarding data: ' + errors[0].error.message);
+    appAlert('Could not load offboarding data: ' + errors[0].error.message);
     return;
   }
 
@@ -2828,7 +3632,7 @@ async function openOffboardEmployeeFlow(employeeId, employeeName) {
     } catch (err) {
       console.error('Offboard failed', err);
       statusEl.textContent = '';
-      colonyAlert('Offboarding failed: ' + (err.message || err));
+      appAlert('Offboarding failed: ' + (err.message || err));
       confirmBtn.disabled = false;
     }
   });
@@ -2853,7 +3657,7 @@ if (peopleDirectoryBody) {
     if (action === 'offboard') {
       openOffboardEmployeeFlow(employeeId, employeeName).catch((error) => {
         console.error(error);
-        colonyAlert(`Unable to start offboarding: ${error.message}`);
+        appAlert(`Unable to start offboarding: ${error.message}`);
       });
       return;
     }
@@ -2861,7 +3665,7 @@ if (peopleDirectoryBody) {
     if (action === 'deactivate') {
       deactivateDirectoryEmployee(employeeId, employeeName).catch((error) => {
         console.error(error);
-        colonyAlert(`Unable to deactivate employee: ${error.message}`);
+        appAlert(`Unable to deactivate employee: ${error.message}`);
       });
     }
   });
@@ -2979,9 +3783,9 @@ async function addHoliday() {
 async function removeHoliday(dateStr) {
   if (!state.supabase || !isLeadershipRole() || !dateStr) return;
   const target = getPublicHolidays().find(h => h.date === dateStr);
-  if (!await colonyConfirm(`Remove "${target?.name || dateStr}" from the holiday list?`, { title: 'Remove holiday', confirmLabel: 'Remove', danger: true })) return;
+  if (!await appConfirm(`Remove "${target?.name || dateStr}" from the holiday list?`, { title: 'Remove holiday', confirmLabel: 'Remove', danger: true })) return;
   setHolidaysNotice('Removing…');
-  // .select() to surface silent RLS failures
+  // .select() to surface silent RLS failures (CLAUDE.md pattern)
   const { data, error } = await state.supabase
     .from('public_holidays')
     .delete()
@@ -3004,6 +3808,172 @@ if (holidaysAdminTableBody) {
   });
 }
 
+// ── Partners admin (app.partners, invite-only external users) ──
+
+let partnersAdminRows = [];
+
+function setPartnersNotice(message = '', className = 'mini-meta') {
+  const el = document.getElementById('partnersAdminNotice');
+  if (!el) return;
+  el.textContent = message;
+  el.className = className;
+}
+
+async function loadPartnersAdmin() {
+  const body = document.getElementById('partnersAdminTableBody');
+  if (!body || !state.supabase) return;
+  const { data, error } = await state.supabase
+    .from('partners')
+    .select('id, email, full_name, org, partner_role, is_active, auth_user_id, created_at')
+    .order('created_at', { ascending: true });
+  if (error) {
+    body.innerHTML = `<tr><td colspan="6">Could not load partners: ${escapeHtml(error.message)}</td></tr>`;
+    return;
+  }
+  partnersAdminRows = data || [];
+  renderPartnersAdmin();
+}
+
+function renderPartnersAdmin() {
+  const body = document.getElementById('partnersAdminTableBody');
+  if (!body) return;
+  const canEdit = isBriefReviewer();
+  if (!partnersAdminRows.length) {
+    body.innerHTML = '<tr><td colspan="6">No partners yet. Add one below to enable their sign-in.</td></tr>';
+  } else {
+    body.innerHTML = partnersAdminRows.map(p => `<tr${p.is_active ? '' : ' class="mini-meta"'}>
+      <td data-label="Name">${escapeHtml(p.full_name)}</td>
+      <td data-label="Email">${escapeHtml(p.email)}</td>
+      <td data-label="Org">${escapeHtml(p.org)}</td>
+      <td data-label="Role">${canEdit
+        ? `<select class="partner-role-select" data-partner-role="${escapeHtml(p.id)}" ${p.is_active ? '' : 'disabled'} aria-label="Role for ${escapeHtml(p.full_name)}">
+             ${PARTNER_ROLE_OPTIONS.map(([value, label]) =>
+               `<option value="${value}"${p.partner_role === value ? ' selected' : ''}>${label}</option>`).join('')}
+           </select>`
+        : escapeHtml(p.partner_role)}</td>
+      <td data-label="Status">${p.is_active ? (p.auth_user_id ? 'Active' : 'Invited') : 'Deactivated'}</td>
+      <td data-label="Action">${canEdit ? `<button class="ghost small ${p.is_active ? 'danger-text' : ''}" data-toggle-partner="${escapeHtml(p.id)}" type="button">${p.is_active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</td>
+    </tr>`).join('');
+  }
+  const addBtn = document.getElementById('addPartnerBtn');
+  if (addBtn) addBtn.closest('.editor-bar')?.classList.toggle('hidden', !canEdit);
+}
+
+// The one list of partner roles, shared by the add bar and the row editor, so
+// a new role cannot appear in one and not the other.
+const PARTNER_ROLE_OPTIONS = [
+  ['submitter', 'Submitter'],
+  ['coordinator', 'Coordinator'],
+  ['client_viewer', 'Client viewer']
+];
+
+// Changing a role in place — Alex, 10 Sep 2026. The database already allowed
+// any brief reviewer to update a partner, so this was only ever a missing
+// control: the role rendered as plain text and the row's only action was
+// deactivate. Rhea had to get a partner's role right at the moment she
+// invited them, or ask us.
+async function changePartnerRole(partnerId, nextRole) {
+  if (!state.supabase || !isBriefReviewer()) return;
+  const row = partnersAdminRows.find((p) => String(p.id) === String(partnerId));
+  if (!row || row.partner_role === nextRole) return;
+
+  // Coordinator is not a bigger version of submitter: it approves briefs on
+  // the client's behalf — the the client gate — and can edit anyone's brief in the org.
+  // Worth a beat before granting it by dropdown.
+  if (nextRole === 'coordinator') {
+    const ok = await appConfirm(
+      `Make ${row.full_name} a coordinator?\n\nCoordinators approve their org's briefs before they reach Your Agency, and can edit any brief in the org.`,
+      { title: 'Change partner role', confirmLabel: 'Make coordinator' }
+    );
+    if (!ok) { renderPartnersAdmin(); return; }   // put the dropdown back
+  }
+
+  setPartnersNotice('Saving…');
+  const { error } = await state.supabase.from('partners')
+    .update({ partner_role: nextRole }).eq('id', partnerId);
+  if (error) {
+    setPartnersNotice(`Could not change the role: ${error.message}`, 'status error');
+    renderPartnersAdmin();   // never leave the dropdown showing a value that did not save
+    return;
+  }
+  row.partner_role = nextRole;
+  setPartnersNotice(`${row.full_name} is now a ${PARTNER_ROLE_OPTIONS.find(([v]) => v === nextRole)?.[1].toLowerCase() || nextRole}.`);
+  renderPartnersAdmin();
+}
+
+async function addPartner() {
+  if (!state.supabase || !isBriefReviewer()) return;
+  const nameEl = document.getElementById('newPartnerName');
+  const emailEl = document.getElementById('newPartnerEmail');
+  const orgEl = document.getElementById('newPartnerOrg');
+  const roleEl = document.getElementById('newPartnerRole');
+  const full_name = (nameEl?.value || '').trim();
+  const email = normalizeEmail(emailEl?.value || '');
+  const org = (orgEl?.value || '').trim() || 'Example Collective';
+  const partner_role = roleEl?.value || 'submitter';
+  if (!full_name || !email || !email.includes('@')) {
+    setPartnersNotice('Enter a name and a valid email.', 'mini-meta warn');
+    return;
+  }
+  if (email.endsWith(ANT_DOMAIN)) {
+    setPartnersNotice('Your Agency people are employees, not partners.', 'mini-meta warn');
+    return;
+  }
+  setPartnersNotice('Saving…');
+  const { data, error } = await state.supabase
+    .from('partners')
+    .insert({ email, full_name, org, partner_role, created_by: state.currentEmployeeId })
+    .select();
+  if (error) { setPartnersNotice('Could not add: ' + error.message, 'mini-meta warn'); return; }
+  if (!data || !data.length) { setPartnersNotice('Nothing saved (permission?).', 'mini-meta warn'); return; }
+  if (nameEl) nameEl.value = '';
+  if (emailEl) emailEl.value = '';
+  setPartnersNotice(`✓ Added ${full_name}. They can now sign in via "Partner sign in with Google".`);
+  await loadPartnersAdmin();
+}
+
+async function togglePartnerActive(partnerId) {
+  if (!state.supabase || !isBriefReviewer() || !partnerId) return;
+  const target = partnersAdminRows.find(p => p.id === partnerId);
+  if (!target) return;
+  const deactivating = target.is_active;
+  if (deactivating && !await appConfirm(`Deactivate ${target.full_name}? Their sign-in stops working immediately.`, { title: 'Deactivate partner', confirmLabel: 'Deactivate', danger: true })) return;
+  setPartnersNotice(deactivating ? 'Deactivating…' : 'Reactivating…');
+  // .select() to surface silent RLS failures (CLAUDE.md pattern)
+  const { data, error } = await state.supabase
+    .from('partners')
+    .update({ is_active: !deactivating, updated_at: new Date().toISOString() })
+    .eq('id', partnerId)
+    .select();
+  if (error) { setPartnersNotice('Could not update: ' + error.message, 'mini-meta warn'); return; }
+  if (!data || !data.length) { setPartnersNotice('Nothing updated (permission?).', 'mini-meta warn'); return; }
+  setPartnersNotice('✓ Updated.');
+  await loadPartnersAdmin();
+}
+
+if (document.getElementById('addPartnerBtn')) {
+  document.getElementById('addPartnerBtn').addEventListener('click', () => addPartner().catch(console.error));
+  // Built from the same list as the row editor, so the two can never drift.
+  const newRoleSel = document.getElementById('newPartnerRole');
+  if (newRoleSel) {
+    const keep = newRoleSel.value;
+    newRoleSel.innerHTML = PARTNER_ROLE_OPTIONS
+      .map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+    if (keep) newRoleSel.value = keep;
+  }
+}
+if (document.getElementById('partnersAdminTableBody')) {
+  document.getElementById('partnersAdminTableBody').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-toggle-partner]');
+    if (btn) togglePartnerActive(btn.dataset.togglePartner).catch(console.error);
+  });
+  // A <select> fires change, not click — the click listener above never sees it.
+  document.getElementById('partnersAdminTableBody').addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-partner-role]');
+    if (sel) changePartnerRole(sel.dataset.partnerRole, sel.value).catch(console.error);
+  });
+}
+
 // ── Operational config admin (app.app_config, superadmin-only) ──
 // Generic editor for the six DB-backed lists/maps. Each `get` reads the
 // EFFECTIVE value (DB override or the in-code fallback), so editing a key that
@@ -3011,24 +3981,41 @@ if (holidaysAdminTableBody) {
 // Clearing a key's last entry leaves it empty in the DB and the accessor falls
 // back to the built-in default (a wipe can't silently empty a visibility list).
 const APP_CONFIG_FIELDS = [
-  { key: 'invoice_viewer_emails',   kind: 'list', get: getInvoiceViewerEmails,  label: 'Invoice viewers',
-    help: 'Extra people who can open the Invoice Center beyond finance/leadership.' },
+  // `implicit` names people who ALWAYS have the access regardless of the list,
+  // so each panel shows effective access rather than just the extras — the
+  // Deal Flow incident started with a panel that looked like the whole story.
+  // NOTE: there is deliberately NO invoice_viewer_emails entry. Invoice viewers
+  // are HARDCODED (INVOICE_VIEWER_EMAILS + app.is_invoice_viewer in the DB) per
+  // Alex, 23 Jul 2026 — compensation data must not be openable by a panel edit
+  // or config mistake. Changing viewers is a code change in both places.
   { key: 'invoice_excluded_emails', kind: 'list', get: getInvoiceExcludedEmails, label: 'Invoice-excluded',
     help: 'Hidden from the invoice checklist and their own invoice upload panel.' },
   { key: 'hidden_employee_emails',  kind: 'list', get: getHiddenEmployeeEmails,  label: 'Hidden employees',
     help: 'Keep their access but hide them from directory, team and exec views.' },
   { key: 'deal_flow_extra_emails',  kind: 'list', get: getDealFlowExtraEmails,   label: 'Deal-flow viewers',
-    help: 'Non-leadership people allowed to see the Deal Flow board.' },
+    implicit: () => (state.employeeDirectory || [])
+      .filter(e => e.is_active !== false && ['leadership', 'admin'].includes(normalizeAccessLevel(e.access_level)))
+      .map(e => normalizeEmail(e.email)),
+    help: 'Extra people who can see the Deal Flow board and pipeline data (screen + database reads and writes).' },
+  { key: 'setup_approver_emails',   kind: 'list', get: getSetupApproverEmails,   label: 'Setup approvers',
+    implicit: () => [SUPERADMIN_EMAIL],
+    help: 'Who confirms a new joiner\'s team, type, capacity and clients in Awaiting Setup. Deliberately not leadership-wide — activating someone grants client access.' },
+  { key: 'brief_reviewer_emails',   kind: 'list', get: getBriefReviewerEmails,   label: 'Brief reviewers',
+    implicit: () => (state.employeeDirectory || [])
+      .filter(e => e.is_active !== false && ['leadership', 'admin'].includes(normalizeAccessLevel(e.access_level)))
+      .map(e => normalizeEmail(e.email)),
+    help: 'Who reviews, locks and assigns the client briefs (and gets brief notification emails). Leadership always qualifies.' },
   { key: 'team_manager_by_team',    kind: 'map',  get: getTeamManagerMap,        label: 'Team approver',
     keyLabel: 'Team', valLabel: 'Approver email', keyOptions: ['AM', 'Art', 'Copy', 'Video', 'Strategy'],
     help: 'Department → leave/allocation approver when an employee has no explicit manager.' },
   { key: 'direct_manager_by_email', kind: 'map',  get: getDirectManagerMap,      label: 'Direct manager',
     keyLabel: 'Employee email', valLabel: 'Manager email',
     help: 'Explicit employee → manager overrides (take precedence over the team map).' },
-  { key: 'analytics_personas_by_client', kind: 'json',
-    get: () => getConfigMap('analytics_personas_by_client', ANALYTICS_PERSONAS_BY_CLIENT),
-    label: 'Analytics target personas',
-    help: 'Per-client target audience for Audience Intelligence highlighting, keyed by lowercased client name. Each entry: industries, industriesLabel, jobFunctions, jobFunctionsLabel, decisionMakerSeniority, seniorityLabel. Clients without an entry get plain demographic bars.' },
+  // NOTE: analytics_personas_by_client (Audience Intelligence target personas)
+  // is deliberately NOT in this panel anymore — raw nested JSON in Admin
+  // Settings confused more than it helped (29 Jul 2026). The DB value
+  // still drives the feature via getConfigMap('analytics_personas_by_client',
+  // ANALYTICS_PERSONAS_BY_CLIENT); changing a persona is a scripts/sql.sh job.
 ];
 
 const appConfigEditors = document.getElementById('appConfigEditors');
@@ -3045,9 +4032,12 @@ function renderAppConfigAdmin() {
   if (!isSuperadminUser()) { appConfigEditors.innerHTML = '<p class="mini-meta">Superadmin only.</p>'; return; }
   appConfigEditors.innerHTML = APP_CONFIG_FIELDS.map(field => {
     const stored = state.appConfig && state.appConfig[field.key];
+    // "customised" means a value is STORED, not that it's non-empty — an
+    // explicitly emptied list is very much a customisation, and labelling it
+    // "built-in default" would contradict the empty table right below it.
     const isCustom = field.kind === 'list'
-      ? (Array.isArray(stored) && stored.length > 0)
-      : (stored && typeof stored === 'object' && Object.keys(stored).length > 0);
+      ? Array.isArray(stored)
+      : Boolean(stored && typeof stored === 'object');
     const badge = isCustom
       ? '<span class="mini-meta" style="color:var(--accent, #e8590c)">customised</span>'
       : '<span class="mini-meta">built-in default</span>';
@@ -3065,16 +4055,25 @@ function renderAppConfigAdmin() {
 
     if (field.kind === 'list') {
       const emails = field.get();
-      const rows = emails.length
+      // People with the access regardless of this list (leadership for Deal
+      // Flow, the superadmin for setup approvals) render as fixed rows, so the
+      // panel shows who ACTUALLY has access, not just the removable extras.
+      const implicitEmails = (typeof field.implicit === 'function' ? field.implicit() : [])
+        .filter(e => !emails.includes(e));
+      const implicitRows = implicitEmails.map(e => `<tr>
+          <td data-label="Email">${escapeHtml(e)}</td>
+          <td data-label="Action"><span class="mini-meta">${field.key === 'setup_approver_emails' ? 'superadmin' : 'leadership'} — always included</span></td>
+        </tr>`).join('');
+      const rows = implicitRows + (emails.length
         ? emails.map(e => `<tr>
             <td data-label="Email">${escapeHtml(e)}</td>
             <td data-label="Action"><button class="ghost small danger-text" type="button" data-cfg-remove-list="${escapeHtml(field.key)}" data-val="${escapeHtml(e)}">Remove</button></td>
           </tr>`).join('')
-        : '<tr><td colspan="2" class="mini-meta">Empty — nobody listed.</td></tr>';
+        : `<tr><td colspan="2" class="mini-meta">${implicitEmails.length ? 'Nobody extra listed.' : 'Empty — nobody listed.'}</td></tr>`);
       return `<div class="config-block">${head}
         <table class="m-card-table"><tbody>${rows}</tbody></table>
         <div class="editor-bar action-row">
-          <input type="email" data-cfg-add-input="${escapeHtml(field.key)}" placeholder="user@youragency.com" aria-label="${escapeHtml(field.label)} email">
+          <input type="email" data-cfg-add-input="${escapeHtml(field.key)}" placeholder="name@youragency.com" aria-label="${escapeHtml(field.label)} email">
           <button class="primary" type="button" data-cfg-add-list="${escapeHtml(field.key)}">Add</button>
         </div></div>`;
     }
@@ -3124,7 +4123,7 @@ async function addConfigListEntry(key) {
   const input = appConfigEditors.querySelector(`[data-cfg-add-input="${key}"]`);
   const email = normalizeEmail(input?.value || '');
   if (!email) { setAppConfigNotice('Enter an email.', 'mini-meta warn'); return; }
-  if (!email.endsWith(ANT_DOMAIN)) { setAppConfigNotice('Must be an @youragency.com email.', 'mini-meta warn'); return; }
+  if (!email.endsWith(ANT_DOMAIN)) { setAppConfigNotice('Must be a @youragency.com email.', 'mini-meta warn'); return; }
   const current = field.get().map(normalizeEmail);
   if (current.includes(email)) { setAppConfigNotice(`${email} is already listed.`, 'mini-meta warn'); return; }
   if (await saveAppConfigKey(key, current.concat(email))) setAppConfigNotice(`✓ Added ${email} to ${field.label}.`);
@@ -3132,7 +4131,7 @@ async function addConfigListEntry(key) {
 
 async function removeConfigListEntry(key, email) {
   const field = cfgFieldByKey(key); if (!field) return;
-  if (!await colonyConfirm(`Remove ${email} from ${field.label}?`, { title: 'Remove entry', confirmLabel: 'Remove', danger: true })) return;
+  if (!await appConfirm(`Remove ${email} from ${field.label}?`, { title: 'Remove entry', confirmLabel: 'Remove', danger: true })) return;
   const next = field.get().map(normalizeEmail).filter(e => e !== normalizeEmail(email));
   if (await saveAppConfigKey(key, next)) {
     setAppConfigNotice(next.length ? `✓ Removed ${email}.` : `✓ Removed ${email}. List is now empty.`);
@@ -3148,9 +4147,9 @@ async function setConfigMapEntry(key) {
   // Employee-email key is normalised; team key keeps its label casing.
   const mapKey = field.keyOptions ? rawKey : normalizeEmail(rawKey);
   if (!mapKey) { setAppConfigNotice(`Enter a ${field.keyLabel.toLowerCase()}.`, 'mini-meta warn'); return; }
-  if (!field.keyOptions && !mapKey.endsWith(ANT_DOMAIN)) { setAppConfigNotice(`${field.keyLabel} must be an @youragency.com email.`, 'mini-meta warn'); return; }
+  if (!field.keyOptions && !mapKey.endsWith(ANT_DOMAIN)) { setAppConfigNotice(`${field.keyLabel} must be a @youragency.com email.`, 'mini-meta warn'); return; }
   if (!val) { setAppConfigNotice(`Enter a ${field.valLabel.toLowerCase()}.`, 'mini-meta warn'); return; }
-  if (!val.endsWith(ANT_DOMAIN)) { setAppConfigNotice(`${field.valLabel} must be an @youragency.com email.`, 'mini-meta warn'); return; }
+  if (!val.endsWith(ANT_DOMAIN)) { setAppConfigNotice(`${field.valLabel} must be a @youragency.com email.`, 'mini-meta warn'); return; }
   const next = Object.assign({}, field.get(), { [mapKey]: val });
   if (await saveAppConfigKey(key, next)) {
     if (valInput) valInput.value = '';
@@ -3160,7 +4159,7 @@ async function setConfigMapEntry(key) {
 
 async function removeConfigMapEntry(key, mapKey) {
   const field = cfgFieldByKey(key); if (!field) return;
-  if (!await colonyConfirm(`Remove the ${field.label} mapping for ${mapKey}?`, { title: 'Remove mapping', confirmLabel: 'Remove', danger: true })) return;
+  if (!await appConfirm(`Remove the ${field.label} mapping for ${mapKey}?`, { title: 'Remove mapping', confirmLabel: 'Remove', danger: true })) return;
   const next = Object.assign({}, field.get());
   delete next[mapKey];
   if (await saveAppConfigKey(key, next)) setAppConfigNotice(`✓ Removed mapping for ${mapKey}.`);
@@ -3201,9 +4200,9 @@ if (appConfigEditors) {
 // 2026 outage went unnoticed for two months because nothing surfaced it.
 const CRON_JOBS = [
   { fn: 'daily-reminders',           label: 'Daily reminders (digest + birthdays)',   cadence: 'daily',   schedule: '10:00 IST daily' },
-  { fn: 'task-nudge',                label: 'Task nudge (untouched tasklists)',       cadence: 'daily',   schedule: '11:00 IST weekdays' },
+  { fn: 'task-nudge',                label: 'Task nudge (untouched tasklists)',       cadence: 'daily',   schedule: '11:00 local weekdays' },
   { fn: 'invoice-reminder',          label: 'Invoice upload reminders',               cadence: 'monthly', schedule: '10:00 IST, 25th → month-end' },
-  { fn: 'analytics-upload-reminder', label: 'Analytics upload reminder',              cadence: 'weekly',  schedule: '10:00 IST Mondays' },
+  { fn: 'analytics-upload-reminder', label: 'Analytics upload reminder',              cadence: 'weekly',  schedule: '10:00 IST Tuesdays' },
   { fn: 'policy-update-reminder',    label: 'Policy review reminder',                 cadence: 'weekly',  schedule: '10:00 IST Mondays' }
 ];
 
@@ -3249,6 +4248,204 @@ function renderCronHealthAdmin(latestByFn) {
   }).join('');
 }
 
+// ── Awaiting Setup (Admin Settings, setup approvers only) ──
+// New joiners who finished onboarding and need confirming. This is the
+// persistent half of the notification: the email is a ping that can be missed
+// on a busy day, but a project-based person is locked out of every client until
+// someone acts, so the outstanding work has to stay visible until it's done.
+async function loadPendingSetups() {
+  if (!state.supabase || !isSetupApprover()) return [];
+  const { data, error } = await state.supabase
+    .from('employees')
+    .select('id, full_name, email, employment_type, created_at, timezone, current_city, direct_manager_email, requested_department:departments!employees_requested_department_id_fkey(id, name), department:departments!employees_department_id_fkey(id, name)')
+    .eq('is_active', true).eq('setup_pending', true)
+    .order('created_at', { ascending: true });
+  if (error) { console.warn('Pending setups load failed:', error.message); return []; }
+  // What is already scheduled, so the panel can say so rather than offering to
+  // schedule the same person twice.
+  const sched = await state.supabase.from('scheduled_activations')
+    .select('employee_id, activate_on').is('applied_at', null);
+  state.scheduledActivations = sched.error ? [] : (sched.data || []);
+  return data || [];
+}
+
+async function renderPendingSetupAdmin() {
+  const panel = document.getElementById('pendingSetupPanel');
+  const list = document.getElementById('pendingSetupList');
+  if (!panel || !list) return;
+  if (!isSetupApprover()) { panel.style.display = 'none'; return; }
+
+  const rows = await loadPendingSetups();
+  // Keep the panel in place even when empty: hiding it after an approval made
+  // the page reflow and dumped the approver onto whatever panel came next
+  // (the Operational Config JSON editor — very confusing).
+  panel.style.display = '';
+  if (!rows.length) {
+    list.innerHTML = '<p class="mini-meta">No one waiting — all new joiners are set up. ✓</p>';
+    return;
+  }
+
+  // Active, real clients only. Archived ones are out (you can't be "dedicated
+  // to" an archived client — 7 of the 26 rows), as are the internal buckets in
+  // NON_CLIENT_BUCKETS, which are allocation targets rather than clients.
+  const clients = (state.clients || [])
+    .filter((c) => c.is_active !== false
+      && !NON_CLIENT_BUCKETS.includes(String(c.name || '').trim().toLowerCase()))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  list.innerHTML = rows.map((emp) => {
+    const requested = emp.requested_department?.name || '';
+    const scheduledFor = (state.scheduledActivations || []).find((a) => a.employee_id === emp.id) || null;
+    // EVERY department, not ONBOARDING_DEPARTMENTS. That list exists to stop a
+    // new joiner declaring themselves Leadership or Finance — it is about what
+    // someone may claim, not about what an approver may assign. Reusing it here
+    // meant Maya, who is Strategy, could not be put in Strategy at all
+    // (9 Sep 2026). Falls back to the onboarding list only if the
+    // departments have not loaded, so the select is never empty.
+    const assignableTeams = (state.departmentOptions || []).length
+      ? state.departmentOptions.map((d) => d.name)
+      : ONBOARDING_DEPARTMENTS;
+    const teamOptions = assignableTeams.map((name) =>
+      `<option value="${escapeHtml(name)}"${name === requested ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    const isProject = employmentIsScoped(emp.employment_type);
+    // Layout lives in .setup-client-grid (styles.css), not inline: the fix
+    // needed an attribute selector for the checkbox width, which inline styles
+    // can't express cleanly. See that rule for why width:auto is load-bearing.
+    const clientChecks = clients.map((c) =>
+      `<label class="mini-meta">
+         <input type="checkbox" class="setup-client" value="${escapeHtml(c.id)}" />
+         <span>${escapeHtml(c.name)}</span>
+       </label>`).join('');
+    return `
+      <div class="pending-setup-row" data-employee="${escapeHtml(emp.id)}" style="border-top:1px solid var(--line);padding:12px 0;">
+        <div><strong>${escapeHtml(displayPersonName(emp.full_name, 'New joiner'))}</strong>
+          <span class="mini-meta"> · ${escapeHtml(emp.email || '')}${emp.current_city ? ` · 📍 ${escapeHtml(emp.current_city)}` : ''}</span></div>
+        <p class="mini-meta">Asked for <strong>${escapeHtml(requested || 'no team')}</strong> · says <strong>${escapeHtml(employmentTypeLabel(emp.employment_type).toLowerCase())}</strong>${isProject ? ' · <span class="status warn">no client access until activated</span>' : ''}</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:6px 0;">
+          <label class="mini-meta">Team<br/><select class="setup-team">${teamOptions}</select></label>
+          <label class="mini-meta">Type<br/><select class="setup-type">${EMPLOYMENT_TYPES.map((t) =>
+            `<option value="${t}"${emp.employment_type === t ? ' selected' : ''}>${escapeHtml(employmentTypeLabel(t))}</option>`).join('')}
+          </select></label>
+          <label class="mini-meta">Capacity %<br/><input class="setup-capacity" value="${isProject ? '50' : '100'}" style="width:70px;" /></label>
+          <button class="btn-primary setup-activate" type="button">Activate</button>
+          <label class="mini-meta">or activate on<br/>
+            <input type="date" class="setup-activate-on" min="${escapeHtml(shiftIsoDays(istToday(), 1))}" />
+          </label>
+          <button class="ghost small setup-schedule" type="button">Schedule</button>
+        </div>
+        <details class="setup-clients"${isProject ? ' open' : ''}${isProject ? '' : ' hidden'}>
+          <summary class="mini-meta">Clients they work on (at least one required)</summary>
+          <div class="setup-client-grid">${clientChecks}</div>
+        </details>
+        ${scheduledFor ? `<p class="mini-meta hire-next-step">Scheduled to activate on ${escapeHtml(briefDateLabel(scheduledFor.activate_on))} — <button class="ghost small setup-cancel-schedule" type="button">cancel</button></p>` : ''}
+        <p class="mini-meta setup-notice" style="display:none;"></p>
+      </div>`;
+  }).join('');
+}
+
+// Only a fractional person is scoped to named clients — for anyone else the
+// picker is a control that does nothing at all, since app.is_client_scoped()
+// stopped honouring scope rows for non-fractional employees on 1 Sep. It was
+// still being shown to full-time joiners, offering an approver a choice that
+// would be silently discarded (7 Sep 2026, activating Dev).
+function syncSetupClientPicker(row) {
+  if (!row) return;
+  const scoped = employmentIsScoped(row.querySelector('.setup-type')?.value);
+  const details = row.querySelector('.setup-clients');
+  if (details) {
+    details.hidden = !scoped;
+    if (scoped) details.open = true;
+    // Ticks made before the type was corrected must not survive as inert rows.
+    else row.querySelectorAll('.setup-client:checked').forEach((cb) => { cb.checked = false; });
+  }
+  const capacity = row.querySelector('.setup-capacity');
+  if (capacity) capacity.value = scoped ? '50' : '100';
+}
+
+document.getElementById('pendingSetupList')?.addEventListener('change', (event) => {
+  if (event.target.matches('.setup-type')) syncSetupClientPicker(event.target.closest('.pending-setup-row'));
+});
+
+// Schedule instead of activating: the approver decides now, Colony applies it
+// on the day. The payload is validated server-side at scheduling time too, so a
+// bad one is refused while someone is looking at it rather than failing in a
+// cron on the joiner's start date.
+document.getElementById('pendingSetupList')?.addEventListener('click', async (event) => {
+  const sched = event.target.closest('.setup-schedule');
+  if (sched) {
+    const row = sched.closest('.pending-setup-row');
+    const notice = row.querySelector('.setup-notice');
+    const say = (msg, cls = 'mini-meta') => { notice.className = `${cls} setup-notice`; notice.style.display = ''; notice.textContent = msg; };
+    const on = row.querySelector('.setup-activate-on')?.value;
+    if (!on) return say('Pick a date first.', 'status error');
+    const team = row.querySelector('.setup-team')?.value;
+    const type = row.querySelector('.setup-type')?.value;
+    const capacity = parseCapacityPercentInput(row.querySelector('.setup-capacity')?.value);
+    const clientIds = employmentIsScoped(type)
+      ? [...row.querySelectorAll('.setup-client:checked')].map((i) => i.value) : [];
+    const dept = departmentByExactName(team);
+    if (!dept) return say('Pick a team.', 'status error');
+    say('Scheduling…');
+    const { error } = await state.supabase.rpc('schedule_employee_setup', {
+      p_employee_id: row.dataset.employee, p_activate_on: on, p_department_id: dept.id,
+      p_employment_type: type, p_capacity_percent: capacity, p_client_ids: clientIds
+    });
+    if (error) return say(error.message, 'status error');
+    await renderPendingSetupAdmin();
+    return;
+  }
+  const cancel = event.target.closest('.setup-cancel-schedule');
+  if (cancel) {
+    const row = cancel.closest('.pending-setup-row');
+    const { error } = await state.supabase.rpc('cancel_scheduled_activation', { p_employee_id: row.dataset.employee });
+    if (error) console.error(error);
+    await renderPendingSetupAdmin();
+    return;
+  }
+  const btn = event.target.closest('.setup-activate');
+  if (!btn) return;
+  const row = btn.closest('.pending-setup-row');
+  const notice = row.querySelector('.setup-notice');
+  const say = (msg, cls = 'mini-meta') => { notice.className = `${cls} setup-notice`; notice.style.display = ''; notice.textContent = msg; };
+
+  const team = row.querySelector('.setup-team')?.value;
+  const type = row.querySelector('.setup-type')?.value;
+  const capacity = parseCapacityPercentInput(row.querySelector('.setup-capacity')?.value);
+  // Belt and braces: the picker is hidden for non-fractional types, but a
+  // stale tick must never become an inert scope row on their record.
+  const clientIds = employmentIsScoped(type)
+    ? [...row.querySelectorAll('.setup-client:checked')].map((i) => i.value)
+    : [];
+
+  if (capacity === null || capacity <= 0 || capacity > 100) return say('Capacity must be a number from 1 to 100.', 'status error');
+  // Mirrors the DB guard. Without at least one client a project-based person
+  // reads as "unscoped" and would see every client — the hole this closes.
+  if (employmentIsScoped(type) && !clientIds.length) return say('Pick at least one client — a fractional person with none would see them all.', 'status error');
+
+  btn.disabled = true; btn.textContent = 'Activating…';
+  try {
+    const deptId = await resolveDepartmentIdByName(team, null);
+    if (!deptId) throw new Error(`Could not resolve the team "${team}".`);
+    const { error } = await state.supabase.rpc('activate_employee_setup', {
+      p_employee_id: row.dataset.employee,
+      p_department_id: deptId,
+      p_employment_type: type,
+      p_capacity_percent: capacity,
+      p_client_ids: clientIds
+    });
+    if (error) throw error;
+    say('Activated.', 'status');
+    // Refresh what activation changed: the directory (team/type/capacity) and
+    // the scope map that drives capacity exclusion + client gating.
+    await loadEmployeeDirectoryFromSupabase().catch(() => {});
+    await loadClientScope().catch(() => {});
+    await renderPendingSetupAdmin();
+    loadNotifySignals().catch(() => {});
+  } catch (err) {
+    say(`Activation failed: ${err.message}`, 'status error');
+    btn.disabled = false; btn.textContent = 'Activate';
+  }
+});
+
 // ── Enforced Access overrides admin (Admin Settings, superadmin-only) ──
 const accessOverridesTableBody = document.getElementById('accessOverridesTableBody');
 
@@ -3286,7 +4483,7 @@ async function addAccessOverride() {
   const email = normalizeEmail(emailEl?.value || '');
   const role = roleEl?.value || 'leadership';
   if (!email) { setOverridesNotice('Enter an email.', 'mini-meta warn'); return; }
-  if (!email.endsWith(ANT_DOMAIN)) { setOverridesNotice('Must be an @youragency.com email.', 'mini-meta warn'); return; }
+  if (!email.endsWith(ANT_DOMAIN)) { setOverridesNotice('Must be a @youragency.com email.', 'mini-meta warn'); return; }
   setOverridesNotice('Saving…');
   const { error } = await state.supabase
     .from('access_overrides')
@@ -3303,7 +4500,7 @@ async function addAccessOverride() {
 async function removeAccessOverride(email) {
   if (!state.supabase || !isSuperadminUser() || !email) return;
   if (isSuperadminEmail(email)) { setOverridesNotice('The superadmin pin cannot be removed.', 'mini-meta warn'); return; }
-  if (!await colonyConfirm(`Remove the enforced-access pin for ${email}? Their role will then follow the DB ("Save Roles") instead.`, { title: 'Remove access pin', confirmLabel: 'Remove', danger: true })) return;
+  if (!await appConfirm(`Remove the enforced-access pin for ${email}? Their role will then follow the DB ("Save Roles") instead.`, { title: 'Remove access pin', confirmLabel: 'Remove', danger: true })) return;
   setOverridesNotice('Removing…');
   const { data, error } = await state.supabase
     .from('access_overrides')
@@ -3590,7 +4787,7 @@ function renderDailyTaskTable() {
       : '';
     row.innerHTML = `
       ${priorityCell}
-      <td data-label="Task">${task.recurring_task_id ? '<span class="recur-mark" title="Repeats monthly">\u21bb</span> ' : ''}${taskTitleHtml(task)}</td>
+      <td data-label="Task">${task.recurring_task_id ? '<span class="recur-mark" title="Repeats monthly">\u21bb</span> ' : ''}${taskTitleHtml(task)}${hasWeeklyOriginal ? ' <span class="weekly-chip" title="This is today\u2019s copy of a Weekly Planner task">weekly</span>' : ''}</td>
       <td data-label="Client">${escapeHtml(task.notes || '--')}</td>
       <td data-label="Description">${escapeHtml(taskLinkParts(task.description).displayDesc || '--')}</td>
       <td data-label="Status">
@@ -3791,7 +4988,10 @@ async function loadEmployeeDirectoryFromSupabase() {
       direct_manager_email,
       date_of_birth,
       current_city,
+      timezone,
       onboarding_completed,
+      setup_pending,
+      job_title,
       department:departments!employees_department_id_fkey (
         id,
         name,
@@ -4005,7 +5205,7 @@ function renderDailyTaskViews() {
 
 async function addTask(targetDate = null) {
   if (addTask._inFlight) {
-    // Never let a hung save silently eat every future click (a BD viewer, 2 Jul
+    // Never let a hung save silently eat every future click (2 Jul
     // 2026: one wedged request killed task-adds for a whole day in one tab).
     // Tell the user, and self-heal if the previous attempt is clearly dead.
     if (Date.now() - (addTask._inFlightAt || 0) < 20000) {
@@ -4035,27 +5235,31 @@ async function addTask(targetDate = null) {
   }
 
   const description = String(newTaskDescriptionInput?.value || '').trim() || null;
-  if (description && description.length > 200) {
-    setDailyTaskNotice('Description must be 200 characters or less.');
+  if (description && description.length > TASK_DESCRIPTION_MAX) {
+    setDailyTaskNotice(`Description must be ${TASK_DESCRIPTION_MAX} characters or less.`);
     return;
   }
   const deadline = newTaskDeadlineInput?.value || null;
   const noticeTarget = targetDate ? 'Today' : 'Weekly Planner';
 
-  // ↻ Monthly: save a recurring rule instead of a one-time task. The 10 AM
-  // cron spawns it on the chosen day (short months clamp); if today IS the
-  // day, spawn immediately too.
+  // ↻ Weekly / ↻ Monthly: save a recurring rule instead of a one-time task. The
+  // 10 AM cron spawns it on the chosen day (short months clamp for monthly); if
+  // today IS the day, spawn immediately too.
   const repeatMode = document.getElementById('newTaskRepeatSelect')?.value || '';
-  if (repeatMode === 'monthly' && state.supabase && state.isAuthenticated) {
-    const dayOfMonth = Number(document.getElementById('newTaskRepeatDay')?.value) || new Date().getDate();
+  if ((repeatMode === 'monthly' || repeatMode === 'weekly') && state.supabase && state.isAuthenticated) {
+    // Exactly one of the two days is sent — the schedule CHECK constraint
+    // rejects a rule carrying both.
+    const rule = repeatMode === 'weekly'
+      ? { frequency: 'weekly', day_of_week: Number(document.getElementById('newTaskRepeatWeekday')?.value ?? new Date().getDay()), day_of_month: null }
+      : { frequency: 'monthly', day_of_month: Number(document.getElementById('newTaskRepeatDay')?.value) || new Date().getDate(), day_of_week: null };
     addTask._inFlight = true;
     addTask._inFlightAt = Date.now();
     try {
       const ruleRes = await state.supabase.from('recurring_tasks')
-        .insert({ employee_id: state.currentEmployeeId, task_title: title, notes: client, description, day_of_month: dayOfMonth })
+        .insert({ employee_id: state.currentEmployeeId, task_title: title, notes: client, description, ...rule })
         .select().single();
       if (ruleRes.error) { setDailyTaskNotice(`Could not save repeating task: ${ruleRes.error.message}`); return; }
-      if (recurringRuleDueOn(dayOfMonth, toISODateLocal())) {
+      if (recurringRuleDueOn(rule, toISODateLocal())) {
         const spawn = await state.supabase.rpc('create_daily_task', {
           p_task_date: toISODateLocal(), p_task_title: title, p_notes: client,
           p_status: 'in_progress', p_description: description, p_deadline: null
@@ -4067,7 +5271,7 @@ async function addTask(targetDate = null) {
       if (newTaskDescriptionInput) newTaskDescriptionInput.value = '';
       const rsel = document.getElementById('newTaskRepeatSelect');
       if (rsel) { rsel.value = ''; rsel.dispatchEvent(new Event('change')); }
-      setDailyTaskNotice(`\u21bb Saved — "${title}" repeats monthly on day ${dayOfMonth}.`);
+      setDailyTaskNotice(`\u21bb Saved — "${title}" repeats ${recurringRuleLabel(rule)}.`);
       loadRecurringTasks().catch(console.error);
     } finally { addTask._inFlight = false; }
     return;
@@ -4116,6 +5320,9 @@ async function addTask(targetDate = null) {
         setDailyTaskNotice(`Task add failed: ${insertResult.error.message}`);
         return;
       }
+      // Only your own list counts: a lead adding a task for someone else is
+      // not that person's streak, and not the lead's either.
+      if (targetEmployeeId === state.currentEmployeeId) recordTaskActivity();
     } else {
       const createResult = await state.supabase.rpc('create_daily_task', {
         p_task_date: targetDate,
@@ -4130,6 +5337,8 @@ async function addTask(targetDate = null) {
         setDailyTaskNotice(`Task add failed: ${createResult.error.message}`);
         return;
       }
+      // create_daily_task always creates for the caller, so this is always own.
+      recordTaskActivity();
     }
 
     if (newTaskTitleInput) newTaskTitleInput.value = '';
@@ -4151,7 +5360,7 @@ async function deleteTaskById(taskId) {
   const confirmMsg = isWeekly
     ? 'Delete this task from the weekly planner? Daily copies already promoted will not be affected.'
     : 'Delete this task from today? The weekly copy is not affected.';
-  if (!await colonyConfirm(confirmMsg)) return;
+  if (!await appConfirm(confirmMsg)) return;
 
   if (!state.supabase || !state.isAuthenticated) {
     state.dailyTasks = state.dailyTasks.filter((t) => t.id !== taskId);
@@ -4175,6 +5384,7 @@ async function deleteTaskById(taskId) {
     setDailyTaskNotice('Unable to delete task: permission denied or task not found.');
     return;
   }
+  if (task.employee_id === state.currentEmployeeId) recordTaskActivity();
 
   // Remove from local state immediately for instant UI feedback
   state.dailyTasks = state.dailyTasks.filter((t) => t.id !== taskId);
@@ -4242,6 +5452,8 @@ async function promoteTaskToToday(taskId) {
   }
 
   setDailyTaskNotice('Task copied to Today.');
+  // Moving your own work into Today is the daily ritual — it has to count.
+  if (task.employee_id === state.currentEmployeeId) recordTaskActivity();
   await loadDailyTasksFromSupabase();
 }
 
@@ -4272,8 +5484,162 @@ async function demoteTaskToWeekly(taskId) {
   }
 
   state.dailyTasks = state.dailyTasks.filter((t) => t.id !== taskId);
+  if (task.employee_id === state.currentEmployeeId) recordTaskActivity();
   renderDailyTaskViews();
   setDailyTaskNotice('Removed from today. Task stays in Weekly Planner.');
+}
+
+// ── Task streaks ────────────────────────────────────────────────────────────
+// Recorded when a PERSON acts on their own tasks. Never inferred from row
+// timestamps: the nightly cleanup archives and carries tasks forward, so
+// updated_at would credit everyone with a streak they never earned.
+let streakActivityDates = new Set();   // 'YYYY-MM-DD' for me
+let streakMyLeaveDates = new Set();    // my approved leave, so it never breaks my streak
+let streakLeaderboard = [];            // [{ name, count }], only those on a run
+let streakTeamSize = 0;                // everyone counted, so the rank has a stable denominator
+
+function renderStreakStrip() {
+  const wrap = document.getElementById('homeStreakPanel');
+  if (!wrap) return;
+  if (!state.currentEmployeeId || !streakLeaderboard) { wrap.classList.add('hidden'); return; }
+
+  const today = istToday();
+  const mine = computeStreak(streakActivityDates, today, holidayDates(), streakMyLeaveDates);
+  const progress = streakProgress(mine.count);
+  const top = streakLeaderboard.slice(0, 3);
+  // Rank among the team, shown only once you actually have a streak.
+  const myIndex = streakLeaderboard.findIndex((p) => p.id === state.currentEmployeeId);
+  const myRank = mine.count > 0 && myIndex >= 0 ? myIndex + 1 : null;
+
+  // Show a zero state rather than hiding: on launch day nobody has a streak, and
+  // an invisible feature is one nobody starts (26 Aug 2026).
+  const empty = !mine.count && !top.length;
+
+  // Celebrated the day it lands, then it clears itself. Broken streaks are
+  // never announced — the point is to restart quietly, not to be seen falling.
+  const milestoneRows = streakLeaderboard
+    .filter((p) => milestoneReached(p.count))
+    .map((p) => `<span class="streak-pill is-milestone">🎉 ${escapeHtml(p.name)} hit <b>${milestoneLabel(p.count)}</b></span>`);
+
+  const meId = state.currentEmployeeId;
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    ${milestoneRows.length ? `<div class="streak-milestone"><span class="streak-lead-label">Milestone</span>${milestoneRows.join('')}</div>` : ''}
+    <div class="streak-strip">
+      <div class="streak-mine">
+        <span class="streak-flame">${mine.count ? '🔥' : '·'}</span>
+        <span class="streak-count">${mine.count}<small>day streak</small></span>
+      </div>
+      <div class="streak-progress">
+        ${empty ? '' : `<div class="streak-bar"><i style="width:${progress.next ? progress.percent : 100}%"></i></div>`}
+        ${myRank ? `<p class="streak-rank">You're ${ordinal(myRank)} of ${streakTeamSize}</p>` : ''}
+        <p class="streak-next">${empty
+          ? 'Update any task today to start your streak.'
+          : (progress.next
+            ? `Next: <b>${milestoneLabel(progress.next)}</b> — ${progress.remaining} working day${progress.remaining === 1 ? '' : 's'} to go`
+            : 'Every milestone reached. Nothing left to chase.')}</p>
+      </div>
+      <div class="streak-lead">
+        ${top.length ? '<span class="streak-lead-label">Leading now</span>' : ''}
+        ${top.map((p) => `<span class="streak-pill${p.id === meId ? ' is-me' : ''}">🔥 <b>${p.count}</b> ${escapeHtml(p.name.split(' ')[0])}</span>`).join('')}
+        <span class="streak-help">
+          <button class="streak-help-btn" type="button" id="streakHelpBtn">ⓘ How streaks work</button>
+          <div class="streak-tip hidden" id="streakTip">
+            <h4>How streaks work</h4>
+            <ul>
+              <li>Update <b>any one task</b> on a working day and the day counts.</li>
+              <li>Weekends, public holidays and approved leave <b>never break</b> a streak — they simply don't count.</li>
+              <li>Everyone gets <b>one grace day a month</b>, applied automatically if you miss a day.</li>
+            </ul>
+            <p class="rungs">Milestones: <b>${STREAK_MILESTONES.join(' · ')}</b><br>A half-day off at <b>${STREAK_REWARD_DAY} days</b>.</p>
+          </div>
+        </span>
+      </div>
+    </div>`;
+
+  document.getElementById('streakHelpBtn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('streakTip')?.classList.toggle('hidden');
+  });
+}
+
+// Click anywhere else to dismiss the explainer.
+document.addEventListener('click', (e) => {
+  const tip = document.getElementById('streakTip');
+  if (tip && !tip.classList.contains('hidden') && !e.target.closest('.streak-help')) tip.classList.add('hidden');
+});
+
+// Everyone's last ~5 months of activity plus approved leave: enough history to
+// resolve any streak worth showing, small enough to fetch in one go.
+async function loadStreakData() {
+  if (!state.supabase || !state.currentEmployeeId) return;
+  const since = shiftIsoDays(istToday(), -170);
+  const [actRes, leaveRes] = await Promise.all([
+    state.supabase.from('task_activity').select('employee_id, activity_date').gte('activity_date', since),
+    state.supabase.from('leave_requests').select('employee_id, start_date, end_date').eq('status', 'approved').gte('end_date', since)
+  ]);
+  if (actRes.error) { console.warn('Streaks unavailable:', actRes.error.message); return; }
+
+  const byEmployee = new Map();
+  (actRes.data || []).forEach((r) => {
+    if (!byEmployee.has(r.employee_id)) byEmployee.set(r.employee_id, new Set());
+    byEmployee.get(r.employee_id).add(r.activity_date);
+  });
+
+  // Approved leave expanded to individual dates, so a fortnight off does not
+  // read as a fortnight of missed days.
+  const leaveByEmployee = new Map();
+  (leaveRes.data || []).forEach((r) => {
+    if (!leaveByEmployee.has(r.employee_id)) leaveByEmployee.set(r.employee_id, new Set());
+    const set = leaveByEmployee.get(r.employee_id);
+    let d = r.start_date;
+    for (let i = 0; i < 60 && d <= r.end_date; i++) { set.add(d); d = shiftIsoDays(d, 1); }
+  });
+
+  const today = istToday();
+  const hols = holidayDates();
+  streakActivityDates = byEmployee.get(state.currentEmployeeId) || new Set();
+  streakMyLeaveDates = leaveByEmployee.get(state.currentEmployeeId) || new Set();
+
+  const hidden = getHiddenEmployeeEmails();
+  const considered = (state.employeeDirectory || [])
+    .filter((e) => e.is_active !== false && !hidden.includes(normalizeEmail(e.email)));
+  streakTeamSize = considered.length;
+  streakLeaderboard = considered
+    .map((e) => ({
+      id: e.id,
+      name: displayPersonName(e.full_name, 'Employee'),
+      count: computeStreak(byEmployee.get(e.id) || new Set(), today, hols, leaveByEmployee.get(e.id) || new Set()).count
+    }))
+    .filter((e) => e.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  renderStreakStrip();
+}
+
+let streakWriteInFlight = false;
+
+async function recordTaskActivity() {
+  if (!state.supabase || !state.currentEmployeeId || streakWriteInFlight) return;
+  // IST, because the insert policy pins activity_date to the agency day.
+  const today = istToday();
+  if (streakActivityDates.has(today)) return;
+  streakWriteInFlight = true;
+  // Fire and forget — a streak must never delay or fail a task action.
+  state.supabase.from('task_activity')
+    .insert({ employee_id: state.currentEmployeeId, activity_date: today })
+    .then(({ error }) => {
+      streakWriteInFlight = false;
+      const duplicate = error && String(error.message || '').toLowerCase().includes('duplicate');
+      if (error && !duplicate) {
+        // Do NOT mark the day as logged: a later action in this session should
+        // get another chance rather than the streak being lost silently.
+        console.warn('Streak activity not recorded:', error.message);
+        return;
+      }
+      streakActivityDates.add(today);
+      renderStreakStrip();
+    });
 }
 
 async function updateTaskStatus(taskId, newStatus) {
@@ -4300,6 +5666,9 @@ async function updateTaskStatus(taskId, newStatus) {
     updateQuery = updateQuery.eq('employee_id', state.currentEmployeeId);
   }
   const result = await updateQuery;
+  // Your own tasks only — a lead updating someone else's row is not that
+  // person's streak, and is not the lead's either.
+  if (!result.error && task.employee_id === state.currentEmployeeId) recordTaskActivity();
 
   if (result.error) {
     setDailyTaskNotice(`Status update failed: ${result.error.message}`);
@@ -4387,7 +5756,7 @@ function editTaskById(taskId) {
     <td data-label="Priority"><select class="priority-input" data-task-id="${task.id}"><option value="0">\u2013</option>${[1,2,3,4,5,6,7,8,9,10].map(n => `<option value="${n}"${(task.sort_order || 0) === n ? ' selected' : ''}>${n}</option>`).join('')}</select></td>
     <td><input type="text" class="edit-task-title" value="${escapeHtml(task.task_title || '')}" maxlength="25" /></td>
     <td><select class="edit-task-client"><option value="">Select client</option>${clientOptions}</select></td>
-    <td><input type="text" class="edit-task-desc" value="${escapeHtml(task.description || '')}" placeholder="Optional" maxlength="200" /></td>
+    <td><input type="text" class="edit-task-desc" value="${escapeHtml(task.description || '')}" placeholder="Optional" maxlength="${TASK_DESCRIPTION_MAX}" /></td>
     <td>
       <select class="status-select" data-task-id="${task.id}">
         <option value="in_progress"${task.status !== 'done' ? ' selected' : ''}>In progress</option>
@@ -4417,7 +5786,7 @@ async function saveTaskEdit(taskId) {
   if (!nextTitle) { setDailyTaskNotice('Task title cannot be empty.'); return; }
   if (nextTitle.length > 25) { setDailyTaskNotice('Task title must be 25 characters or less.'); return; }
   if (!nextClient) { setDailyTaskNotice('Client cannot be empty.'); return; }
-  if (nextDescription && nextDescription.length > 50) { setDailyTaskNotice('Description must be 50 characters or less.'); return; }
+  if (nextDescription && nextDescription.length > TASK_DESCRIPTION_MAX) { setDailyTaskNotice(`Description must be ${TASK_DESCRIPTION_MAX} characters or less.`); return; }
 
   const updates = { task_title: nextTitle, notes: nextClient, description: nextDescription };
 
@@ -4438,6 +5807,7 @@ async function saveTaskEdit(taskId) {
     return;
   }
 
+  if (task.employee_id === state.currentEmployeeId) recordTaskActivity();
   const oldTitle = task.task_title;
   const oldClient = task.notes;
   const isWeekly = task.task_date === null;
@@ -4502,18 +5872,28 @@ if (archiveDayDetailClose) {
   });
 }
 
-// ── Recurring monthly tasks: form controls + manage list ──
+// ── Recurring tasks: form controls + manage list ──
 (function wireRecurringControls() {
   const sel = document.getElementById('newTaskRepeatSelect');
   const daySel = document.getElementById('newTaskRepeatDay');
-  if (!sel || !daySel) return;
+  const wdaySel = document.getElementById('newTaskRepeatWeekday');
+  if (!sel || !daySel || !wdaySel) return;
   daySel.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}"${i + 1 === new Date().getDate() ? ' selected' : ''}>on the ${i + 1}</option>`).join('');
-  sel.addEventListener('change', () => daySel.classList.toggle('hidden', sel.value !== 'monthly'));
+  // Value is the 0=Sunday index the DB stores; the list starts at Monday
+  // because that is how the team reads a week.
+  wdaySel.innerHTML = [1, 2, 3, 4, 5, 6, 0]
+    .map((d) => `<option value="${d}"${d === new Date().getDay() ? ' selected' : ''}>every ${WEEKDAY_NAMES[d]}</option>`).join('');
+  // Only one day picker is ever visible, so the two can't disagree.
+  sel.addEventListener('change', () => {
+    daySel.classList.toggle('hidden', sel.value !== 'monthly');
+    wdaySel.classList.toggle('hidden', sel.value !== 'weekly');
+  });
 })();
 
 async function loadRecurringTasks() {
   if (!state.supabase || !state.isAuthenticated) return;
-  const res = await state.supabase.from('recurring_tasks').select('*').eq('is_active', true).order('day_of_month');
+  const res = await state.supabase.from('recurring_tasks').select('*').eq('is_active', true)
+    .order('frequency').order('day_of_week', { nullsFirst: false }).order('day_of_month', { nullsFirst: false });
   if (res.error) { console.warn('Recurring load failed:', res.error.message); return; }
   const list = document.getElementById('recurringTasksList');
   const count = document.getElementById('recurringCount');
@@ -4522,16 +5902,16 @@ async function loadRecurringTasks() {
   if (count) count.textContent = String(rows.length);
   list.innerHTML = rows.length ? rows.map(r => `
     <div class="notify-item" style="display:flex;align-items:center;gap:10px;cursor:default;">
-      <span class="recur-mark" title="Repeats monthly">\u21bb</span>
-      <span style="flex:1;">${escapeHtml(r.task_title)} <span class="mini-meta">· ${escapeHtml(r.notes || '')} · monthly on the ${r.day_of_month}</span></span>
+      <span class="recur-mark" title="Repeats ${escapeHtml(recurringRuleLabel(r))}">\u21bb</span>
+      <span style="flex:1;">${escapeHtml(r.task_title)} <span class="mini-meta">· ${escapeHtml(r.notes || '')} · ${escapeHtml(recurringRuleLabel(r))}</span></span>
       <button class="ghost small danger-text" type="button" data-stop-recurring="${escapeHtml(r.id)}">stop</button>
-    </div>`).join('') : '<p class="mini-meta">None yet — pick "\u21bb Monthly" when adding a task.</p>';
+    </div>`).join('') : '<p class="mini-meta">None yet — pick "\u21bb Weekly" or "\u21bb Monthly" when adding a task.</p>';
 }
 
 document.getElementById('recurringTasksList')?.addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-stop-recurring]');
   if (!btn) return;
-  if (!await colonyConfirm('Stop this repeating task? Already-created tasks stay.', { title: 'Stop repeating', confirmLabel: 'Stop', danger: true })) return;
+  if (!await appConfirm('Stop this repeating task? Already-created tasks stay.', { title: 'Stop repeating', confirmLabel: 'Stop', danger: true })) return;
   const res = await state.supabase.from('recurring_tasks').update({ is_active: false }).eq('id', btn.dataset.stopRecurring).select();
   if (res.error || !res.data?.length) { setDailyTaskNotice('Could not stop (permission?).'); return; }
   loadRecurringTasks().catch(console.error);
@@ -4672,7 +6052,7 @@ async function loadFeatureRequestsFromSupabase() {
 
   const response = await state.supabase
     .from('feature_requests')
-    .select('id, employee_id, request_text, request_type, status, created_at, updated_at, links, attachments, employee:employees!feature_requests_employee_id_fkey(full_name)')
+    .select('id, employee_id, author_partner_id, author_name, request_text, request_type, status, created_at, updated_at, links, attachments, employee:employees!feature_requests_employee_id_fkey(full_name)')
     .order('created_at', { ascending: true })
     .limit(2000);
 
@@ -4685,14 +6065,18 @@ async function loadFeatureRequestsFromSupabase() {
   state.loadedAt.featureRequests = Date.now();
   const requests = (response.data || []).map(r => ({
     ...r,
-    author_name: displayPersonName(r.employee?.full_name || '', 'Unknown'),
+    // Partner-authored posts carry a denormalized author_name (partners can't
+    // be joined through employees); employee posts keep the join.
+    author_name: r.employee?.full_name
+      ? displayPersonName(r.employee.full_name, 'Unknown')
+      : (r.author_name || 'Unknown'),
     replies: []
   }));
 
   // Batch-load all replies
   const repliesRes = await state.supabase
     .from('feature_request_replies')
-    .select('id, feature_request_id, employee_id, reply_text, created_at, attachments, employee:employees!feature_request_replies_employee_id_fkey(full_name)')
+    .select('id, feature_request_id, employee_id, author_partner_id, author_name, reply_text, created_at, attachments, employee:employees!feature_request_replies_employee_id_fkey(full_name)')
     .order('created_at', { ascending: true })
     .limit(2000);
 
@@ -4701,7 +6085,12 @@ async function loadFeatureRequestsFromSupabase() {
     for (const r of repliesRes.data) {
       const frId = r.feature_request_id;
       if (!byFr[frId]) byFr[frId] = [];
-      byFr[frId].push({ ...r, author_name: displayPersonName(r.employee?.full_name || '', 'Unknown') });
+      byFr[frId].push({
+        ...r,
+        author_name: r.employee?.full_name
+          ? displayPersonName(r.employee.full_name, 'Unknown')
+          : (r.author_name || 'Unknown')
+      });
     }
     for (const req of requests) {
       req.replies = byFr[req.id] || [];
@@ -5084,7 +6473,7 @@ async function submitFeatureRequest() {
     return;
   }
 
-  // Notify the superadmin on new posts (bugs AND feature requests)
+  // Notify admin on new posts (bugs AND feature requests)
   if (result.data?.id) {
     notifyFeatureRequestOwner('new_bug', result.data.id);
   }
@@ -5236,6 +6625,9 @@ async function submitFeatureRequestReply(frId) {
   const result = await state.supabase.from('feature_request_replies').insert({
     feature_request_id: frId,
     employee_id: state.currentEmployeeId,
+    // Denormalized for partner-authored posts: the partner reading this reply
+    // can't join app.employees to resolve the name.
+    author_name: state.employeeProfile?.full_name || null,
     reply_text: text || '(screenshot)',
     attachments: attachments
   });
@@ -5366,7 +6758,7 @@ async function deleteFeatureRequest(frId) {
     return;
   }
 
-  if (!await colonyConfirm('Delete this feature request? This cannot be undone.', { title: 'Delete request', confirmLabel: 'Delete', danger: true })) return;
+  if (!await appConfirm('Delete this feature request? This cannot be undone.', { title: 'Delete request', confirmLabel: 'Delete', danger: true })) return;
 
   // Delete related data first (upvotes, replies), then the request
   const upvoteDel = await state.supabase.from('feature_request_upvotes').delete().eq('feature_request_id', frId).select();
@@ -5621,11 +7013,36 @@ if (frCompletedList) {
 if (featureRequestsFooterLink) {
   featureRequestsFooterLink.addEventListener('click', (event) => {
     event.preventDefault();
-    navigateToScreen('feature-requests');
+    // Staff on Circle have no employee wall here; they get the client one.
+    navigateToScreen((isPartnerRole() || state.staffOnCircle) ? 'partner-feedback' : 'feature-requests');
   });
 }
 
 const allocSummary = document.getElementById('allocSummary');
+
+// Over capacity is an error, near it a warning — the one place that decides.
+function allocTotalVariant(totalPct) {
+  if (totalPct > 100) return 'error';
+  if (totalPct > 90) return 'warn';
+  return '';
+}
+
+// Writes the figure and its unit separately, so the total stacks under the
+// right-aligned inputs rather than floating in the middle of the column.
+function setAllocTotal(value, unit, variant) {
+  if (!allocSummary) return;
+  const valueEl = document.getElementById('allocSummaryValue');
+  const unitEl = document.getElementById('allocSummaryUnit');
+  if (valueEl) valueEl.textContent = value;
+  if (unitEl) unitEl.textContent = unit || '';
+  allocSummary.className = `status alloc-total${variant ? ` ${variant}` : ''}`;
+}
+
+// A failure is a sentence, not a figure: no unit, and it takes the whole cell.
+function setAllocTotalMessage(text, variant) {
+  setAllocTotal(text, '', variant);
+  if (allocSummary) allocSummary.classList.add('is-message');
+}
 const addRow = document.getElementById('addRow');
 const saveAllocationsBtn = document.getElementById('saveAllocationsBtn');
 const allocWeekDisplay = document.getElementById('allocWeekDisplay');
@@ -5922,30 +7339,13 @@ function updateAllocationSummary() {
 
   if (!allocSummary) return;
 
+  // The unit is a separate element so the figure lines up with the column of
+  // right-aligned inputs above it; writing textContent straight onto the
+  // paragraph would delete it.
   if (isHours) {
-    const totalHrs = Math.round((totalPct / 100) * effectiveHours);
-    const label = `${totalHrs} hrs`;
-    if (totalPct > 100) {
-      allocSummary.textContent = label;
-      allocSummary.className = 'status alloc-total error';
-    } else if (totalPct > 90) {
-      allocSummary.textContent = label;
-      allocSummary.className = 'status alloc-total warn';
-    } else {
-      allocSummary.textContent = label;
-      allocSummary.className = 'status alloc-total';
-    }
+    setAllocTotal(String(Math.round((totalPct / 100) * effectiveHours)), 'hrs', allocTotalVariant(totalPct));
   } else {
-    if (totalPct > 100) {
-      allocSummary.textContent = `${total}%`;
-      allocSummary.className = 'status alloc-total error';
-    } else if (totalPct > 90) {
-      allocSummary.textContent = `${total}%`;
-      allocSummary.className = 'status alloc-total warn';
-    } else {
-      allocSummary.textContent = `${total}%`;
-      allocSummary.className = 'status alloc-total';
-    }
+    setAllocTotal(String(total), '%', allocTotalVariant(totalPct));
   }
 
   const allocWeekNote = document.getElementById('allocWeekNote');
@@ -6270,10 +7670,17 @@ async function resolveProjectIdForLine(line, internalClientId) {
   if (!projectName) return null;
 
   // Always use Internal-client projects — must match save_my_allocations RPC
-  // which resolves project names under the Internal client. Using real client
-  // project IDs would cause project_id mismatches on upsert conflict checks,
-  // leading to delete+re-insert that resets updated_at timestamps.
-  return ensureInternalProjectId(internalClientId, projectName);
+  // which resolves project names under the Internal client. Resolution goes
+  // through the SECURITY DEFINER RPC: client-scoped employees (Ruby, Mara)
+  // can't SEE the Internal client under RLS, so the old client-side
+  // find-or-create silently failed for them (Ruby's bug, 5 Aug 2026).
+  const { data, error } = await state.supabase.rpc('resolve_internal_project', {
+    p_project_name: projectName
+  });
+  if (error) throw error;
+  if (data) return data;
+  // Fallback for callers that already resolved the Internal client id.
+  return internalClientId ? ensureInternalProjectId(internalClientId, projectName) : null;
 }
 
 async function persistAllocationLinesForEmployeeDirect(targetEmployeeId, lines, weekStartIso) {
@@ -6375,8 +7782,9 @@ async function populateAllocationForClient(clientName, scope) {
   }
 
   const targetEmployeeId = getAllocationViewEmployeeId() || state.currentEmployeeId;
-  const internalClientId = await ensureInternalClientId();
-  const projectId = await resolveProjectIdForLine(targetLine, internalClientId);
+  // No ensureInternalClientId() here: that lookup runs under RLS and fails for
+  // client-scoped employees. The RPC inside resolveProjectIdForLine handles it.
+  const projectId = await resolveProjectIdForLine(targetLine, null);
   if (!projectId) {
     setAllocationPolicyNote(`Unable to resolve project for ${clientName}.`);
     return;
@@ -6399,14 +7807,14 @@ async function populateAllocationForClient(clientName, scope) {
   if (conflicting.length > 0 && alreadyMatching.length === 0 && conflicting.length === targetWeeks.length) {
     // All target weeks already have the same different value — show conflict
     const weekLabels = conflicting.map(r => `${formatWeekRangeLabel(r.period_start)} (${r.allocation_percent}%)`).join(', ');
-    const ok = await colonyConfirm(`${clientName} already has allocations for ${weekLabels}. Overwrite with ${newPct}%?`);
+    const ok = await appConfirm(`${clientName} already has allocations for ${weekLabels}. Overwrite with ${newPct}%?`);
     if (!ok) {
       setAllocationPolicyNote('Populate cancelled.');
       return;
     }
   } else if (conflicting.length > 0) {
     const weekLabels = conflicting.map(r => `${formatWeekRangeLabel(r.period_start)} (${r.allocation_percent}%)`).join(', ');
-    const ok = await colonyConfirm(`${clientName} has different allocations for: ${weekLabels}. Overwrite with ${newPct}%?`);
+    const ok = await appConfirm(`${clientName} has different allocations for: ${weekLabels}. Overwrite with ${newPct}%?`);
     if (!ok) {
       setAllocationPolicyNote('Populate cancelled.');
       return;
@@ -6446,6 +7854,11 @@ async function populateAllocationForClient(clientName, scope) {
 
   const label = scope === 'next-week' ? 'next week' : scope === 'indefinite' ? `${populatedCount} weeks (~6 months)` : `${populatedCount} week${populatedCount > 1 ? 's' : ''}`;
   setAllocationPolicyNote(`${clientName} allocation (${newPct}%) copied to ${label}.`);
+  // Refresh the local cache so the copied weeks show up when the user
+  // navigates to them — without this the copy landed in the DB but the view
+  // looked unchanged (the other half of Ruby's "did not reflect").
+  await loadWeeklyAllocationsFromSupabase().catch(console.error);
+  renderWeeklyAllocationViews();
 }
 
 async function persistAllocationsToSupabase() {
@@ -6581,8 +7994,7 @@ if (saveAllocationsBtn) {
     } catch (error) {
       console.error(error);
       if (allocSummary) {
-        allocSummary.textContent = `Save failed: ${error.message}. Please check your connection and try again.`;
-        allocSummary.className = 'status alloc-total warn';
+        setAllocTotalMessage(`Save failed: ${error.message}. Please check your connection and try again.`, 'warn');
       }
       saveAllocationsBtn.textContent = 'Retry Save';
     } finally {
@@ -6789,7 +8201,7 @@ if (allocationTableEl) {
       if (!row) return;
       const clientSelect = row.querySelector('select');
       const clientName = clientSelect?.value || 'this row';
-      if (!await colonyConfirm(`Remove ${clientName} from this week's allocation?`)) return;
+      if (!await appConfirm(`Remove ${clientName} from this week's allocation?`)) return;
       row.remove();
       updateAllocationSummary();
       applyAllocationClientRowFilter();
@@ -7071,6 +8483,23 @@ async function loadNotifySignals() {
     ]);
     signals.invoiceDue = !invRes.error && (invRes.count || 0) === 0;
     signals.policyAckPending = !ackRes.error && (ackRes.count || 0) === 0;
+    // New joiners awaiting setup — only Alex/Nadia see these. (RLS doesn't
+    // hide the rows; this is the same UX-level gate as the rest of the bell.)
+    if (isSetupApprover()) {
+      const pendRes = await state.supabase.from('employees')
+        .select('id, full_name, employment_type, created_at, requested_department:departments!employees_requested_department_id_fkey(name)')
+        .eq('is_active', true).eq('setup_pending', true)
+        .order('created_at', { ascending: true });
+      if (!pendRes.error) {
+        signals.pendingSetups = (pendRes.data || []).map(p => ({
+          id: p.id,
+          fullName: p.full_name,
+          employmentType: p.employment_type,
+          requestedTeam: p.requested_department?.name || '',
+          createdAt: p.created_at
+        }));
+      }
+    }
     if (!replyRes.error) {
       signals.featureReplies = (replyRes.data || []).map(r => ({
         id: r.id,
@@ -7078,6 +8507,41 @@ async function loadNotifySignals() {
         requestText: r.request?.request_text || '',
         createdAt: r.created_at
       }));
+    }
+    // Brief pipeline signals — reviewer counts for Rhea/Mara/leadership,
+    // assigned-deliverable count for everyone.
+    const nowIso = new Date().toISOString();
+    const briefQueries = [
+      state.supabase.from('brief_deliverables').select('id', { count: 'exact', head: true })
+        .eq('assignee_employee_id', state.currentEmployeeId)
+        .in('status', ['queued', 'in_progress', 'in_review'])
+    ];
+    if (isBriefReviewer()) {
+      briefQueries.push(
+        state.supabase.from('briefs').select('id', { count: 'exact', head: true })
+          .eq('request_type', 'brief').eq('status', 'ready_for_review'),
+        state.supabase.from('briefs').select('id', { count: 'exact', head: true })
+          .eq('request_type', 'notify_only').eq('status', 'submitted'),
+        state.supabase.from('brief_deliverables').select('id', { count: 'exact', head: true })
+          .neq('status', 'delivered').not('due_at', 'is', null).lt('due_at', nowIso)
+      );
+    }
+    const [mineRes, reviewRes, quickRes, overdueRes] = await Promise.all(briefQueries);
+    signals.briefAssignedToMe = (!mineRes?.error && mineRes?.count) || 0;
+    signals.briefsAwaitingReview = (!reviewRes?.error && reviewRes?.count) || 0;
+    signals.briefQuickOpen = (!quickRes?.error && quickRes?.count) || 0;
+    signals.briefOverdue = (!overdueRes?.error && overdueRes?.count) || 0;
+    // Hiring pipeline: stages waiting on ME (crew employees only; Leo's
+    // hiring-only surface IS his queue, no bell there).
+    const myHireStages = [];
+    if (isSetupApprover()) myHireStages.push('contract_uploaded');
+    if (isSuperadminUser()) myHireStages.push('reviewed');
+    if (getHiringCrewEmails().includes(myEmail)) myHireStages.push('signed');
+    if (myHireStages.length) {
+      const hireRes = await state.supabase.from('hires')
+        .select('id', { count: 'exact', head: true })
+        .in('stage', myHireStages);
+      signals.hiresMyTurn = (!hireRes.error && hireRes.count) || 0;
     }
   } catch (err) { console.warn('Notify signals load failed:', err); }
   state.notifySignals = signals;
@@ -7117,11 +8581,32 @@ function refreshNotifyBell() {
   badge.textContent = String(unseen);
   badge.classList.toggle('hidden', unseen === 0);
   list.innerHTML = items.length
-    ? items.map(i => `<div class="notify-item" data-notify-screen="${escapeHtml(i.screen)}">
+    ? items.map(i => `<div class="notify-item" data-notify-screen="${escapeHtml(i.screen)}"${i.anchor ? ` data-notify-anchor="${escapeHtml(i.anchor)}"` : ''}>
         <div class="notify-item-text">${escapeHtml(i.icon)} ${escapeHtml(i.text)}</div>
         <div class="notify-item-detail">${escapeHtml(i.detail)}</div>
       </div>`).join('')
     : '<div class="notify-empty">All caught up — nothing needs your action.</div>';
+}
+
+// Scroll a just-opened screen to the section the notification points at.
+// Screens aren't URL-sectioned; data loads reflow the page, so retry briefly
+// until the element has real height, then flash it so the eye lands right.
+// Keeps trying for ~15s: panels like Awaiting Setup stay display:none until
+// their data has loaded, and on a cold load that took longer than the old 3s
+// — the setup email then landed Alex at the top of Admin Settings with
+// nothing to say why (15 Sep 2026, Asha's setup).
+function scrollToNotifyAnchor(anchorId, attempt = 0) {
+  const el = document.getElementById(anchorId);
+  if (el && el.offsetHeight > 0) {
+    // Instant, not smooth: the canvas is its own scroller and a smooth scroll
+    // into it was being cancelled before it moved (verified 15 Sep 2026 —
+    // scrollTop stayed 0). The flash does the "look here" job.
+    el.scrollIntoView({ block: 'start' });
+    el.classList.add('notify-anchor-flash');
+    setTimeout(() => el.classList.remove('notify-anchor-flash'), 2400);
+    return;
+  }
+  if (attempt < 50) setTimeout(() => scrollToNotifyAnchor(anchorId, attempt + 1), 300);
 }
 
 (function wireNotifyBell() {
@@ -7144,6 +8629,7 @@ function refreshNotifyBell() {
     if (!item) return;
     panel.classList.add('hidden');
     navigateToScreen(item.dataset.notifyScreen);
+    if (item.dataset.notifyAnchor) scrollToNotifyAnchor(item.dataset.notifyAnchor);
   });
   document.addEventListener('click', (e) => {
     if (!panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== bell) {
@@ -7728,7 +9214,7 @@ async function notifyApproverOnLeaveSubmit(leaveRequestId) {
 function updateLeaveHint() {
   if (!leaveType || !leaveStart || !leaveEnd || !leaveRuleHint) return;
   const employeeRecord = selectedEmployeeRecord();
-  const leaveBlocked = employeeRecord.employmentType === 'fractional' || employeeRecord.leaveTrackingEnabled === false;
+  const leaveBlocked = employmentIsScoped(employeeRecord.employmentType) || employeeRecord.leaveTrackingEnabled === false;
   if (submitLeaveBtn) submitLeaveBtn.disabled = leaveBlocked;
 
   if (leaveBlocked) {
@@ -7818,7 +9304,7 @@ if (submitLeaveBtn) {
       return;
     }
 
-    if (employeeRecord.employmentType === 'fractional' || employeeRecord.leaveTrackingEnabled === false) {
+    if (employmentIsScoped(employeeRecord.employmentType) || employeeRecord.leaveTrackingEnabled === false) {
       if (leaveEmailNotice) {
         leaveEmailNotice.textContent = 'Leave workflow is unavailable for fractional or leave-excluded employees.';
         leaveEmailNotice.className = 'mini-meta';
@@ -8149,7 +9635,7 @@ function renderResourceMatrix(teamMembers, allocationRows, weekStarts, monthLabe
     const totalPercent = [...projMap.values()].reduce((s, v) => s + v, 0);
     const capacity = Number(emp.capacity_percent) || 100;
     const freePercent = capacity - totalPercent;
-    byDept.get(team).push({ employee: emp, team, projMap, totalPercent, capacity, freePercent, status: utilizationStatusMeta(totalPercent) });
+    byDept.get(team).push({ employee: emp, team, projMap, totalPercent, capacity, freePercent, status: utilizationStatusMeta(totalPercent, capacity) });
   });
 
   const orderedDepts = [...byDept.keys()].sort((a, b) => {
@@ -8354,6 +9840,10 @@ async function loadTeamDashboardFromSupabase() {
     ? state.employeeDirectory.slice().sort((a, b) => String(a.full_name || '').localeCompare(String(b.full_name || '')))
     : reporteeEmployeesForManager(managerEmail))
     .filter(e => !getHiddenEmployeeEmails().includes(normalizeEmail(e.email)))
+    // Not part of the capacity pool — the planner is for assigning against
+    // available capacity, and these people don't have any to offer. They stay
+    // visible everywhere else (directory, clients, scope owners, tasks).
+    .filter(e => !isCapacityExcluded(e))
     .filter(e => e.is_active !== false);
   const monthWindow = plannerMonthWindow();
   const weekStarts = plannerWeekStartsForMonth(monthWindow);
@@ -8684,6 +10174,8 @@ async function loadClientsFromSupabase() {
       is_active,
       created_at,
       updated_at,
+      account_owner_employee_id,
+      audience_persona,
       account_owner:employees!clients_account_owner_employee_id_fkey (
         id,
         full_name
@@ -8956,7 +10448,7 @@ async function fetchClientDependencySummary(clientId, clientName) {
   if (clientName) {
     // Only LIVE tasks count as "currently linked". Archived/done tasks are
     // historical and show in no active view — counting them made dormant
-    // clients with only archived/done work look busy at archive time.
+    // clients (e.g. EXAMPLE RESEARCH: 9 archived + 1 in-progress) look busy at archive time.
     const tasksRes = await state.supabase.from('daily_tasks')
       .select('id', { count: 'exact', head: true })
       .eq('notes', clientName)
@@ -8989,7 +10481,7 @@ async function deleteClientById(clientId) {
   } catch (err) {
     console.warn('Dependency summary failed:', err);
   }
-  const confirmed = await colonyConfirm(`Delete ${targetName}?${summaryText}\n\nThis cannot be undone.`, { title: 'Delete client', confirmLabel: 'Delete', danger: true });
+  const confirmed = await appConfirm(`Delete ${targetName}?${summaryText}\n\nThis cannot be undone.`, { title: 'Delete client', confirmLabel: 'Delete', danger: true });
   if (!confirmed) return;
 
   if (state.supabase && state.isAuthenticated && !String(clientId).startsWith('local-')) {
@@ -9033,7 +10525,7 @@ async function archiveClientById(clientId) {
   let termination = null; // 'Good Termination' | 'Bad Termination' | null (leave the deal alone)
   if (activeDeals.length) {
     const dealLabel = activeDeals.map(d => d.deal_name).join(', ');
-    const choice = await colonyChoice(
+    const choice = await appChoice(
       `Archive ${targetName}? The client will be hidden but all data is preserved.${summaryText}\n\n${targetName} has a live engagement (${dealLabel}). How did it end?`,
       {
         title: 'Archive client',
@@ -9047,7 +10539,7 @@ async function archiveClientById(clientId) {
     if (!choice) return; // cancelled
     if (choice !== 'leave') termination = choice;
   } else {
-    const confirmed = await colonyConfirm(`Archive ${targetName}? The client will be hidden but all data is preserved.${summaryText}`);
+    const confirmed = await appConfirm(`Archive ${targetName}? The client will be hidden but all data is preserved.${summaryText}`);
     if (!confirmed) return;
   }
 
@@ -9234,11 +10726,9 @@ async function showClientDetail(clientId) {
   // Allocations — find from homeAllocations where project's client matches.
   // Build maps from BOTH active and offboarded employees so historical names always resolve.
   const empNameMap = new Map();
-  const empCapMap = new Map();
   _allEmployees().forEach(e => {
     const display = displayPersonName(e.full_name, e.email);
     empNameMap.set(e.id, e.is_active === false ? `${display} (offboarded)` : display);
-    empCapMap.set(e.id, (e.capacity_percent || 100) / 100);
   });
 
   const clientName = client.name.toLowerCase().trim();
@@ -9259,8 +10749,11 @@ async function showClientDetail(clientId) {
     let allocHtml = '';
     [...empAllocMap.entries()].sort((a, b) => b[1] - a[1]).forEach(([empId, pct]) => {
       const name = empNameMap.get(empId) || lookupEmployeeName(empId);
-      const cap = empCapMap.get(empId) || 1;
-      const hrs = (pct / 100) * cap * WORK_HOURS_PER_WEEK;
+      // Client-level: everyone counts here, INCLUDING client-scoped people —
+      // this is the work the client is actually getting. allocation % is
+      // already % of a full week, so no capacity multiplier (that showed a
+      // 40%-capacity person allocated 40% as 7.2h instead of 18h).
+      const hrs = (pct / 100) * WORK_HOURS_PER_WEEK;
       totalClientHours += hrs;
       allocHtml += `<tr>
         <td data-label="Person">${escapeHtml(name)}</td>
@@ -9365,29 +10858,197 @@ function scopeDeptLabel(name) {
 // helpers) lives in js/analytics.js — relocated verbatim in slice 6.
 
 // --- Upload Flow (auto-detect + append/merge) ---
-if (analyticsFileInput) {
-  analyticsFileInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (!['xls', 'xlsx', 'csv'].includes(ext)) {
-      colonyAlert('Only .xls, .xlsx, or .csv files are supported.');
-      return;
-    }
-    if (file.size > 20 * 1024 * 1024) {
-      colonyAlert('File too large (max 20 MB).');
-      return;
-    }
-    if (!analyticsCurrentClientId) return;
 
+// ── Comms DOCX pipeline: unzip → vision-extract per send → review → merge ──
+// Numbers read from screenshots by a model are PROPOSALS: the uploader sees
+// every extracted row next to its send and confirms before anything is saved.
+async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
+  if (detectedLabel) { detectedLabel.textContent = 'Comms report (screenshots) detected'; detectedLabel.style.display = ''; }
+  if (metaEl) metaEl.textContent = 'Reading document\u2026';
+
+  const entries = await extractZipEntries(await file.arrayBuffer());
+  const docXml = new TextDecoder().decode(entries['word/document.xml'] || new Uint8Array());
+  const relsXml = new TextDecoder().decode(entries['word/_rels/document.xml.rels'] || new Uint8Array());
+  const sends = parseCommsDocxStructure(docXml, relsXml);
+  if (!sends.length) throw new Error('No send sections with screenshots found in this document.');
+
+  const token = state.session?.access_token;
+  if (!token) throw new Error('Not authenticated');
+  const toB64 = (bytes) => {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
+
+  const rows = [];
+  const failures = [];
+  for (let i = 0; i < sends.length; i++) {
+    const send = sends[i];
+    if (metaEl) metaEl.textContent = `Reading screenshots ${i + 1}/${sends.length}\u2026`;
+    const images = send.imagePaths
+      .filter((path) => entries[path])
+      .map((path) => ({ data: toB64(entries[path]), mediaType: path.endsWith('.jpeg') || path.endsWith('.jpg') ? 'image/jpeg' : 'image/png' }));
+    if (!images.length) { failures.push(send.heading); continue; }
+    try {
+      const res = await fetch('/.netlify/functions/extract-send-stats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ heading: send.heading, images })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { stats } = await res.json();
+      const n = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
+      rows.push({
+        date: send.dateIso,
+        name: send.heading,
+        send_type: send.sendType === 'Dispatch' ? 'Dispatches' : send.sendType,
+        delivered: Math.round(n(stats.delivered)),
+        delivered_rate: n(stats.delivered_rate),
+        opened: Math.round(n(stats.opened)),
+        open_rate: n(stats.open_rate),
+        clicked: Math.round(n(stats.clicked) || n(stats.unique_clicks)),
+        click_rate: n(stats.click_rate),
+        unsubscribed: Math.round(n(stats.unsubscribed)),
+        hard_bounce: Math.round(n(stats.hard_bounce)),
+        skipped: Math.round(n(stats.skipped))
+      });
+    } catch (err) {
+      failures.push(`${send.heading} (${err.message})`);
+    }
+  }
+  if (metaEl) metaEl.textContent = '';
+  if (!rows.length) throw new Error('No sends could be read.' + (failures.length ? ` Failed: ${failures.join(', ')}` : ''));
+
+  const approved = await showCommsReviewModal(rows, failures);
+  if (!approved) { if (metaEl) metaEl.textContent = 'Upload cancelled — nothing saved.'; return; }
+  if (metaEl) metaEl.textContent = 'Saving\u2026';
+
+  // Raw file to storage for the record, like every other upload
+  const filePath = `${analyticsCurrentClientId}/${Date.now()}_${file.name}`;
+  await state.supabase.storage.from('client-analytics').upload(filePath, file, { upsert: false });
+  await logAnalyticsUpload({
+    clientId: analyticsCurrentClientId,
+    reportType: 'community_pulse',
+    fileName: file.name,
+    objectName: filePath.split('/').pop()
+  });
+
+  const { data: existing } = await state.supabase
+    .from('client_analytics')
+    .select('report_label, metrics_data, demographics_data')
+    .eq('client_id', analyticsCurrentClientId)
+    .eq('report_type', 'community_pulse')
+    .maybeSingle();
+
+  // Same merge rule as the workbook path: sends merge by date+name.
+  // Demographics are untouched — this file has none, and wiping the workbook's
+  // subscriber/forum snapshot with null would be data loss.
+  const oldMetrics = existing?.metrics_data || [];
+  const mergedMetrics = mergeByKey(oldMetrics, rows, (r) => `${r.date}|${r.name}`)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const mergedSummary = communityPulseSummary(mergedMetrics, existing?.demographics_data || { subscribers: null, forum: null });
+
+  const record = {
+    client_id: analyticsCurrentClientId,
+    report_type: 'community_pulse',
+    report_label: mergedSummary.date_from && mergedSummary.date_to
+      ? `${mergedSummary.date_from} \u2013 ${mergedSummary.date_to}` : file.name,
+    file_name: file.name,
+    file_path: filePath,
+    file_size_bytes: file.size,
+    uploaded_by: state.currentEmployeeId,
+    uploaded_at: new Date().toISOString(),
+    insights_cache: {},
+    metrics_data: mergedMetrics,
+    summary: mergedSummary
+  };
+  record.data_through = computeDataThrough('community_pulse', { metricsData: mergedMetrics, summary: mergedSummary });
+
+  const { error: dbError } = await state.supabase
+    .from('client_analytics')
+    .upsert(record, { onConflict: 'client_id,report_type' });
+  if (dbError) throw new Error('Database save failed: ' + dbError.message);
+
+  const added = mergedMetrics.length - oldMetrics.length;
+  if (metaEl) metaEl.textContent = `\u2713 Comms report saved \u2014 ${added > 0 ? `${added} new send${added > 1 ? 's' : ''}` : 'sends updated'}`;
+  await renderClientAnalyticsTab(analyticsCurrentClientId);
+}
+
+// Review table: every extracted row, editable nowhere — approve or cancel.
+// (Editing invites silently "fixing" a misread into a different wrong number;
+// if a row is wrong, cancel and tell Alex/the board.)
+function showCommsReviewModal(rows, failures) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;';
+    const pct = (f) => `${((f || 0) * 100).toFixed(1)}%`;
+    overlay.innerHTML = `
+      <div style="background:var(--bg);border-radius:14px;max-width:820px;width:100%;max-height:85vh;overflow:auto;padding:22px;">
+        <h3 style="margin-top:0">Review extracted sends</h3>
+        <p class="mini-meta">These numbers were read from the screenshots in the document. Check them against the file before saving \u2014 nothing is stored until you confirm.</p>
+        <table class="m-card-table" style="font-size:13px">
+          <thead><tr><th>Date</th><th>Send</th><th>Type</th><th style="text-align:right">Delivered</th><th style="text-align:right">Open</th><th style="text-align:right">Click</th><th style="text-align:right">Unsubs</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `<tr>
+              <td>${escapeHtml(r.date)}</td>
+              <td>${escapeHtml(String(r.name).slice(0, 40))}</td>
+              <td>${escapeHtml(r.send_type)}</td>
+              <td style="text-align:right">${r.delivered ? r.delivered.toLocaleString() : '\u2014'}</td>
+              <td style="text-align:right">${r.open_rate ? pct(r.open_rate) : '\u2014'}</td>
+              <td style="text-align:right">${r.click_rate ? pct(r.click_rate) : '\u2014'}</td>
+              <td style="text-align:right">${r.unsubscribed || 0}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        ${failures.length ? `<p class="status warn" style="margin-top:10px">Could not read: ${escapeHtml(failures.join(', '))}</p>` : ''}
+        <div class="editor-bar action-row" style="margin-top:14px;justify-content:flex-end;gap:10px">
+          <button type="button" class="ghost" data-comms-cancel>Cancel</button>
+          <button type="button" class="primary" data-comms-save>Save ${rows.length} send${rows.length > 1 ? 's' : ''}</button>
+        </div>
+      </div>`;
+    overlay.addEventListener('click', (e) => {
+      if (e.target.closest('[data-comms-save]')) { overlay.remove(); resolve(true); }
+      else if (e.target.closest('[data-comms-cancel]') || e.target === overlay) { overlay.remove(); resolve(false); }
+    });
+    document.body.appendChild(overlay);
+  });
+}
+
+// One row per FILE, so the archive can say what each upload was and who sent
+// it. app.client_analytics keeps only one row per report type and overwrites
+// its file_name, so without this only the newest file of each type could ever
+// be labelled (18 Sep 2026). Best-effort: a failure here must never
+// fail an upload whose data already landed — the file is safe either way.
+async function logAnalyticsUpload({ clientId, reportType, fileName, objectName }) {
+  try {
+    await state.supabase.from('client_analytics_uploads').insert({
+      client_id: clientId,
+      report_type: reportType,
+      file_name: fileName,
+      object_name: objectName,
+      uploaded_by: state.currentEmployeeId || null
+    });
+  } catch (err) {
+    console.warn('Upload log failed (file is saved):', err);
+  }
+}
+
+// One spreadsheet, start to finish: detect → parse → merge → upsert. Returns a
+// RESULT instead of alerting, so a batch can report per file (24 Aug
+// 2026). Batches must run these one at a time: every file merges into the
+// existing row for its report type, so two files of the same type running in
+// parallel would race and one would silently overwrite the other.
+async function processAnalyticsSpreadsheet(file, batch = {}) {
     const detectedLabel = document.getElementById('analyticsDetectedType');
     const metaEl = document.getElementById('analyticsClientMeta');
-
     try {
       // Auto-detect report type from sheet names
       const { type: reportType, workbook } = await detectReportType(file);
       // Instagram metrics CSVs live on the same DB row as the post export
-      const dbReportType = reportType === 'instagram_metrics' ? 'instagram' : reportType;
+      // Per-metric CSVs share a DB row with their platform's post export.
+      // Which platform that is cannot be known until the file is parsed, so
+      // this is settled just below rather than here.
+      let dbReportType = reportType === 'instagram_metrics' ? 'instagram' : reportType;
       if (detectedLabel) { detectedLabel.textContent = (reportType.charAt(0).toUpperCase() + reportType.slice(1)).replace(/_/g, ' ') + ' report detected'; detectedLabel.style.display = ''; }
 
       // Parse using detected type (reuse already-read workbook)
@@ -9407,6 +11068,60 @@ if (analyticsFileInput) {
       }
       if (!parsed) throw new Error('Unknown report type');
 
+      // Instagram and Facebook per-metric CSVs are the same file shape from the
+      // same Meta screen. Some name their platform ("Facebook follows"); the
+      // shared ones do not ("Viewers", "Content interactions"). Before this,
+      // every one of them was filed as Instagram — so a client's Facebook
+      // numbers merged into their Instagram figures, on the same metric keys,
+      // with nothing on screen to show it (found against Example Collective's real
+      // export, 10 Sep 2026).
+      //
+      // Where the file says, believe it. Where it does not, ask: there is no
+      // other signal in the file, and a wrong guess quietly corrupts a client's
+      // reporting.
+      if (reportType === 'instagram_metrics') {
+        // A file that names its own platform always wins; only the unnamed
+        // ones need asking. Meta exports the same file shape for both
+        // accounts, so there is no other signal — guessing would quietly
+        // merge a client's Facebook numbers into their Instagram figures.
+        //
+        // Ask ONCE per upload, not once per file (18 Sep 2026: a
+        // batch of metric CSVs meant a modal each, which read as an error).
+        // Meta exports are downloaded per account, so one answer fits a
+        // batch; the summary says how many it was applied to, so a wrong
+        // answer is visible straight away rather than silently filed.
+        let platform = parsed.platform;
+        if (!platform && batch.platform) {
+          platform = batch.platform;
+          batch.platformApplied = (batch.platformApplied || 0) + 1;
+        }
+        if (!platform) {
+          const more = Math.max(0, (batch.ambiguousTotal || 1) - 1);
+          platform = await appChoice(
+            `Meta names this file the same way for both accounts, so it doesn't say which one it is:\n\n"${parsed.title || parsed.metricLabel}"\n\nWhich account is this upload from?${more ? `\n\nYour answer covers the other ${more} file${more > 1 ? 's' : ''} in this upload that don't name a platform.` : ''}`,
+            {
+              title: 'Which account?',
+              choices: [
+                { label: 'Instagram', value: 'instagram', variant: 'primary' },
+                { label: 'Facebook', value: 'facebook' }
+              ],
+              cancelLabel: 'Skip this file'
+            }
+          );
+          if (platform) { batch.platform = platform; batch.platformApplied = 1; }
+        }
+        if (!platform) {
+          if (detectedLabel) detectedLabel.style.display = 'none';
+          return { ok: false, name: file.name, error: 'skipped — platform not chosen' };
+        }
+        dbReportType = platform;
+        parsed.platform = platform;
+        if (detectedLabel) {
+          detectedLabel.textContent = `${platform === 'facebook' ? 'Facebook' : 'Instagram'} ${parsed.metricLabel} detected`;
+          detectedLabel.style.display = '';
+        }
+      }
+
       // Instagram-only: warn if the file's IG account looks like it belongs
       // to a DIFFERENT existing client than the current page.
       if (reportType === 'instagram') {
@@ -9418,15 +11133,14 @@ if (analyticsFileInput) {
         if (suggestion) {
           const currentClient = (state.clients || []).find(c => c.id === analyticsCurrentClientId);
           const acct = parsed.summary?.account_name || parsed.summary?.account_username || 'this account';
-          const ok = await colonyConfirm(
+          const ok = await appConfirm(
             `Heads up: this Instagram export is for "${acct}", which looks like it belongs to "${suggestion.name}".\n\n` +
             `You're currently uploading on "${currentClient?.name || 'the current client'}'s" page.\n\n` +
             `Continue and attach to ${currentClient?.name || 'the current client'} anyway?`
           );
           if (!ok) {
-            analyticsFileInput.value = '';
             if (detectedLabel) detectedLabel.style.display = 'none';
-            return;
+            return { ok: false, name: file.name, error: 'skipped — looks like another client\u2019s account' };
           }
         }
       }
@@ -9545,7 +11259,8 @@ if (analyticsFileInput) {
         mergedMetrics = [...byDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
         newItemCount = mergedMetrics.length - oldMetrics.length;
         if (metaEl) {
-          metaEl.textContent = `✓ Instagram ${parsed.metricLabel.toLowerCase()} merged — ${parsed.daily.length} day${parsed.daily.length > 1 ? 's' : ''}`;
+          const platformLabel = parsed.platform === 'facebook' ? 'Facebook' : 'Instagram';
+          metaEl.textContent = `✓ ${platformLabel} ${parsed.metricLabel.toLowerCase()} merged — ${parsed.daily.length} day${parsed.daily.length > 1 ? 's' : ''}`;
         }
       } else if (reportType === 'community_pulse') {
         // Sends merge by date+name; subscriber/forum demographics are
@@ -9604,7 +11319,7 @@ if (analyticsFileInput) {
         // report_label must ALWAYS be sent: PostgREST upsert is an INSERT ..
         // ON CONFLICT, and Postgres enforces NOT NULL on the proposed insert
         // row before conflict resolution — omitting it broke every upload
-        // onto an existing row (an AM's second metrics CSV, 14 Jul 2026).
+        // onto an existing row (Rhea's second metrics CSV, 14 Jul 2026).
         record.metrics_data = mergedMetrics;
         record.report_label = existing?.report_label
           || (mergedMetrics.length
@@ -9634,14 +11349,95 @@ if (analyticsFileInput) {
         .upsert(record, { onConflict: 'client_id,report_type' });
       if (dbError) throw new Error('Database save failed: ' + dbError.message);
 
-      analyticsFileInput.value = '';
+      await logAnalyticsUpload({
+        clientId: analyticsCurrentClientId,
+        reportType: dbReportType,
+        fileName: file.name,
+        objectName: filePath.split('/').pop()
+      });
+
       if (detectedLabel) detectedLabel.style.display = 'none';
-      renderClientAnalyticsTab(analyticsCurrentClientId);
-      // Revert meta text after 4 seconds
-      setTimeout(() => { if (analyticsCurrentClientId) renderClientAnalyticsTab(analyticsCurrentClientId); }, 4000);
+      return { ok: true, name: file.name, type: reportType };
     } catch (err) {
       console.error('Analytics upload error:', err);
-      colonyAlert('Upload failed: ' + err.message);
+      return { ok: false, name: file.name, error: err.message };
+    }
+}
+
+if (analyticsFileInput) {
+  analyticsFileInput.addEventListener('change', async (e) => {
+    const files = [...(e.target.files || [])];
+    if (!files.length || !analyticsCurrentClientId) return;
+    const metaEl = document.getElementById('analyticsClientMeta');
+    const detectedLabel = document.getElementById('analyticsDetectedType');
+    const clear = () => { analyticsFileInput.value = ''; };
+
+    const ok = [];
+    const failed = [];
+    const accept = [];
+    for (const f of files) {
+      const ext = f.name.split('.').pop().toLowerCase();
+      if (!['xls', 'xlsx', 'csv', 'docx'].includes(ext)) {
+        failed.push({ name: f.name, error: 'unsupported file type' });
+      } else if (f.size > 20 * 1024 * 1024) {
+        failed.push({ name: f.name, error: 'over 20 MB' });
+      } else {
+        accept.push({ file: f, ext });
+      }
+    }
+
+    // The comms DOCX pipeline unzips, reads screenshots and needs a human to
+    // check the extraction, so it stays a one-at-a-time job rather than being
+    // dragged into a batch.
+    const docx = accept.filter((f) => f.ext === 'docx');
+    const sheets = accept.filter((f) => f.ext !== 'docx');
+    if (docx.length && (sheets.length || docx.length > 1)) {
+      docx.forEach((d) => failed.push({ name: d.file.name, error: 'comms reports must be uploaded on their own' }));
+    } else if (docx.length === 1) {
+      try {
+        await handleCommsDocxUpload(docx[0].file, metaEl, detectedLabel);
+      } catch (docxErr) {
+        console.error('Comms docx upload failed:', docxErr);
+        appAlert('Could not process the comms report: ' + docxErr.message);
+      }
+      clear();
+      return;
+    }
+
+    // Strictly sequential — see processAnalyticsSpreadsheet. One batch
+    // object carries the platform answer across the whole upload.
+    const batch = { ambiguousTotal: sheets.length };
+    for (let i = 0; i < sheets.length; i++) {
+      if (sheets.length > 1 && detectedLabel) {
+        detectedLabel.textContent = `Processing ${i + 1} of ${sheets.length}…`;
+        detectedLabel.style.display = '';
+      }
+      const result = await processAnalyticsSpreadsheet(sheets[i].file, batch);
+      (result?.ok ? ok : failed).push(result || { name: sheets[i].file.name, error: 'unknown error' });
+      if (batch.ambiguousTotal > 1) batch.ambiguousTotal -= 1;
+    }
+
+    clear();
+    if (detectedLabel) detectedLabel.style.display = 'none';
+
+    // Re-render ONCE, after the last file — each upload clears the AI insight
+    // cache, so doing this per file would regenerate insights repeatedly.
+    if (ok.length) {
+      renderClientAnalyticsTab(analyticsCurrentClientId);
+      setTimeout(() => { if (analyticsCurrentClientId) renderClientAnalyticsTab(analyticsCurrentClientId); }, 4000);
+    }
+
+    // One failure must not bury the successes, or hide itself.
+    if (failed.length) {
+      const lines = failed.map((f) => `• ${f.name} — ${f.error}`).join('\n');
+      appAlert(ok.length
+        ? `${ok.length} file${ok.length > 1 ? 's' : ''} uploaded. ${failed.length} could not be:\n\n${lines}`
+        : `Upload failed:\n\n${lines}`);
+    } else if (ok.length > 1 && metaEl) {
+      const filed = batch.platform && batch.platformApplied > 1
+        ? ` \u00b7 ${batch.platformApplied} filed as ${batch.platform === 'facebook' ? 'Facebook' : 'Instagram'}`
+        : '';
+      metaEl.textContent = `\u2713 ${ok.length} reports uploaded${filed}`;
     }
   });
 }
@@ -9665,7 +11461,7 @@ function destroyAnalyticsCharts() {
 // quality snapshot, since those metrics only mean something against a defined
 // persona. Add new clients here as their personas get agreed.
 const ANALYTICS_PERSONAS_BY_CLIENT = {
-  'helixlabs': {
+  'example materials': {
     industries: ['Pharmaceuticals', 'Biotechnology', 'Chemical Manufacturing', 'Research Services'],
     industriesLabel: 'Pharma, Biotech, Chemical, Research',
     jobFunctions: ['Research', 'Engineering', 'Business Development'],
@@ -9677,9 +11473,10 @@ const ANALYTICS_PERSONAS_BY_CLIENT = {
 
 function currentAnalyticsPersona() {
   const client = (state.clients || []).find(c => String(c.id) === String(analyticsCurrentClientId));
-  // DB-backed (app_config 'analytics_personas_by_client', superadmin-editable
-  // in Admin Settings → Operational Config) with the in-code map as fallback —
-  // new client personas need no deploy.
+  // Lives on the CLIENT (clients.audience_persona), set by the account-owner
+  // AM via the editor on the Audience tab (29 Jul 2026). Legacy
+  // config/in-code map kept as fallback for clients not yet migrated.
+  if (client?.audience_persona) return client.audience_persona;
   const personas = getConfigMap('analytics_personas_by_client', ANALYTICS_PERSONAS_BY_CLIENT);
   return personas[normalizeClientNameKey(client?.name)] || null;
 }
@@ -9792,26 +11589,33 @@ async function loadScopeCoverageReferenceData() {
       .filter(Boolean);
   }
 
+  // Hidden employees come from config (Admin Settings → Operational Config),
+  // never a hardcoded name: name tests broke on rename and were inconsistent
+  // here (they filtered only Blake, so Anya — also hidden — still showed).
+  const hiddenEmails = getHiddenEmployeeEmails();
+  const isHidden = (emp) => hiddenEmails.includes(normalizeEmail(emp.email));
+
   // Employees (active, in one of the 5 disciplines)
   const validDeptIds = new Set(scopeCoverageState.deptOptions.map((d) => d.id));
   scopeCoverageState.employeeOptions = (state.employeeDirectory || [])
-    .filter((emp) => emp.is_active !== false && emp.department && validDeptIds.has(emp.department.id)
-      && !getHiddenEmployeeEmails().includes(normalizeEmail(emp.email || '')))
+    .filter((emp) => emp.is_active !== false && emp.department && validDeptIds.has(emp.department.id) && !isHidden(emp))
     .map((emp) => ({
       id: emp.id,
       full_name: emp.full_name,
       department_id: emp.department.id,
-      department_name: emp.department.name
+      department_name: emp.department.name,
+      access_level: emp.access_level
     }))
     .sort((a, b) => a.full_name.localeCompare(b.full_name));
 
   // Owner dropdown should be wide open: every active employee, regardless of discipline.
   scopeCoverageState.ownerOptions = (state.employeeDirectory || [])
-    .filter((emp) => emp.is_active !== false && !/finance/i.test(emp.full_name || ''))
+    .filter((emp) => emp.is_active !== false && !isHidden(emp))
     .map((emp) => ({
       id: emp.id,
       full_name: emp.full_name,
-      department_name: emp.department?.name || ''
+      department_name: emp.department?.name || '',
+      access_level: emp.access_level // consumers sort leadership last
     }))
     .sort((a, b) => a.full_name.localeCompare(b.full_name));
 }
@@ -10169,8 +11973,11 @@ function renderScopeBlock(item) {
     const fs = scopeCoverageState.allocFormState;
     if (!fs || fs.editingId !== 'new' || fs.data?.scope_item_id !== item.id) return '';
     const data = fs.data;
+    // Hidden employees from config (not a hardcoded name — this used to filter
+    // only Anya, so Blake, also hidden, still appeared here).
+    const scHidden = getHiddenEmployeeEmails();
     const empSource = (state.employeeDirectory || [])
-      .filter((e) => e.is_active !== false && !getHiddenEmployeeEmails().includes(normalizeEmail(e.email || '')))
+      .filter((e) => e.is_active !== false && !scHidden.includes(normalizeEmail(e.email)))
       .map((e) => ({ id: e.id, full_name: e.full_name, department_id: e.department?.id || '' }))
       .sort((a, b) => a.full_name.localeCompare(b.full_name));
     const empOpts = '<option value="">Select person</option>' + empSource
@@ -10323,7 +12130,7 @@ function readScopeFormFromDom() {
 async function saveScopeForm() {
   const data = readScopeFormFromDom();
   if (!data) return;
-  if (!data.title) { colonyAlert('Scope item needs a title.'); return; }
+  if (!data.title) { appAlert('Scope item needs a title.'); return; }
 
   const formState = scopeCoverageState.scopeFormState;
   const isNew = formState.editingId === 'new';
@@ -10385,12 +12192,12 @@ async function saveScopeForm() {
     rerenderScopeCoverage();
   } catch (err) {
     console.error('Save scope item failed:', err);
-    colonyAlert('Save failed: ' + err.message);
+    appAlert('Save failed: ' + err.message);
   }
 }
 
 async function removeScopeItem(scopeItemId) {
-  if (!await colonyConfirm('Remove this scope item? This cannot be undone.', { title: 'Remove scope item', confirmLabel: 'Remove', danger: true })) return;
+  if (!await appConfirm('Remove this scope item? This cannot be undone.', { title: 'Remove scope item', confirmLabel: 'Remove', danger: true })) return;
   try {
     const res = await state.supabase.from('client_scope_items').delete().eq('id', scopeItemId);
     if (res.error) throw res.error;
@@ -10398,7 +12205,7 @@ async function removeScopeItem(scopeItemId) {
     rerenderScopeCoverage();
   } catch (err) {
     console.error('Remove scope item failed:', err);
-    colonyAlert('Remove failed: ' + err.message);
+    appAlert('Remove failed: ' + err.message);
   }
 }
 
@@ -10478,7 +12285,9 @@ function renderAvailableEmployees() {
   );
   const clientById = new Map((state.clients || []).map((c) => [String(c.id), c.name || 'Untitled']));
 
-  const sourceList = (scopeCoverageState.ownerOptions || scopeCoverageState.employeeOptions);
+  // Both option lists are already filtered against hidden_employee_emails
+  // where they're built (loadScopeCoverageRefData) — no name test needed.
+  const sourceList = scopeCoverageState.ownerOptions || scopeCoverageState.employeeOptions;
   const month = getCurrentViewMonth();
   const rows = sourceList.map((emp) => {
     const allocs = scopeCoverageState.allAllocations.filter((a) => a.employee_id === emp.id && isAllocActiveInMonth(a, month));
@@ -10496,7 +12305,9 @@ function renderAvailableEmployees() {
       available: Math.max(0, 100 - Math.round(used)),
       segments: [...byClient.entries()].sort((a, b) => b[1] - a[1])
     };
-  }).sort((a, b) => a.used - b.used || a.full_name.localeCompare(b.full_name));
+  }).sort((a, b) => {
+    return a.used - b.used || a.full_name.localeCompare(b.full_name);
+  });
 
   if (!rows.length) {
     wrap.innerHTML = '<div class="sc-empty" style="padding:10px 0">No employees loaded.</div>';
@@ -10603,7 +12414,7 @@ function renderAllocFormRow(formState) {
     .filter((a) => formState.editingId === 'new' || a.id !== formState.editingId)
     .map((a) => `${a.employee_id}::${a.department_id}`));
 
-  // Build full employee list from directory (so people like the AM lead outside
+  // Build full employee list from directory (so people like Nadia outside
   // the 5-discipline shortlist still appear).
   const empSource = (state.employeeDirectory || [])
     .filter((e) => e.is_active !== false)
@@ -10670,7 +12481,7 @@ function readAllocFormFromDom() {
 async function saveAllocForm() {
   const data = readAllocFormFromDom();
   if (!data) return;
-  if (!data.employee_id || !data.department_id) { colonyAlert('Pick a person and discipline.'); return; }
+  if (!data.employee_id || !data.department_id) { appAlert('Pick a person and discipline.'); return; }
 
   const formState = scopeCoverageState.allocFormState;
   const isNew = formState.editingId === 'new';
@@ -10708,12 +12519,12 @@ async function saveAllocForm() {
     rerenderScopeCoverage();
   } catch (err) {
     console.error('Save allocation failed:', err);
-    colonyAlert('Save failed: ' + err.message);
+    appAlert('Save failed: ' + err.message);
   }
 }
 
 async function removeAllocation(allocId) {
-  if (!await colonyConfirm('Remove this person from this client?')) return;
+  if (!await appConfirm('Remove this person from this client?')) return;
   try {
     const res = await state.supabase.from('client_standing_allocations').delete().eq('id', allocId);
     if (res.error) throw res.error;
@@ -10721,7 +12532,7 @@ async function removeAllocation(allocId) {
     rerenderScopeCoverage();
   } catch (err) {
     console.error('Remove allocation failed:', err);
-    colonyAlert('Remove failed: ' + err.message);
+    appAlert('Remove failed: ' + err.message);
   }
 }
 
@@ -10783,7 +12594,7 @@ async function removeAllocation(allocId) {
       const employeeId = f.querySelector('[data-inline-alloc="employee_id"]').value;
       const departmentId = f.querySelector('[data-inline-alloc="department_id"]').value;
       const percent = Number(f.querySelector('[data-inline-alloc="percent"]').value || 0);
-      if (!employeeId || !departmentId) { colonyAlert('Pick a person.'); return; }
+      if (!employeeId || !departmentId) { appAlert('Pick a person.'); return; }
       (async () => {
         try {
           const scopeTitle = scopeCoverageState.scopeItems.find((s) => s.id === id)?.title || null;
@@ -10801,7 +12612,7 @@ async function removeAllocation(allocId) {
           rerenderScopeCoverage();
         } catch (err) {
           console.error('Inline alloc save failed:', err);
-          colonyAlert('Save failed: ' + err.message);
+          appAlert('Save failed: ' + err.message);
         }
       })();
       return;
@@ -10854,26 +12665,33 @@ async function renderClientAnalyticsTab(clientId) {
   const followersReport = grouped.followers || null;
   const visitorsReport = grouped.visitors || null;
   const instagramReport = grouped.instagram || null;
+  const facebookReport = grouped.facebook || null;
   const instagramAudienceReport = grouped.instagram_audience || null;
 
   // Header meta shows DATA coverage, not upload-click time — uploaded_at lies
-  // both ways (frozen stamps under fresh data: Helix Labs; fresh re-upload of an
-  // old file). data_through comes from the report contents; uploaded_at is
-  // only a fallback for rows that predate the column.
-  if (metaEl) {
-    const allCoverage = (reports || [])
+  // both ways (frozen stamps under fresh data: Example Materials; fresh re-upload of an
+  // old file). Coverage is PER TAB: one global stamp showed LinkedIn's date
+  // above Instagram's charts (and a FUTURE date at that — LinkedIn's weekly
+  // buckets end on the coming Saturday). Capped at today: "data through"
+  // cannot honestly exceed the calendar.
+  const coverageOf = (...reps) => {
+    const dates = reps.filter(Boolean)
       .map(r => r.data_through || String(r.uploaded_at || '').slice(0, 10))
       .filter(Boolean).sort();
-    const latest = allCoverage.length ? new Date(allCoverage[allCoverage.length - 1] + 'T00:00:00') : null;
-    if (latest && !isNaN(latest)) {
-      const dd = String(latest.getDate()).padStart(2, '0');
-      const mm = String(latest.getMonth() + 1).padStart(2, '0');
-      const yy = String(latest.getFullYear()).slice(-2);
-      metaEl.innerHTML = `Data through:<br>${dd}/${mm}/${yy}`;
-    } else {
-      metaEl.textContent = '';
-    }
-  }
+    const todayIso = toISODateLocal();
+    if (!dates.length) return null;
+    const latest = dates[dates.length - 1];
+    return latest > todayIso ? todayIso : latest;
+  };
+  window._analyticsCoverageByTab = {
+    overview: coverageOf(...(reports || [])),
+    linkedin: coverageOf(contentReport, followersReport, visitorsReport),
+    instagram: coverageOf(instagramReport, instagramAudienceReport),
+    facebook: coverageOf(facebookReport),
+    community: coverageOf(grouped.community_pulse)
+  };
+  renderAnalyticsCoverageMeta('overview');
+  renderUploadedFilesPanel(clientId).catch((e) => console.warn('Uploaded files list failed:', e));
 
   // Store content report as current for insights
   window._analyticsCurrentReport = contentReport;
@@ -10893,6 +12711,7 @@ async function renderClientAnalyticsTab(clientId) {
   };
   setTabVisible('linkedin', hasLinkedIn);
   setTabVisible('instagram', Boolean(instagramReport));
+  setTabVisible('facebook', Boolean(facebookReport));
   setTabVisible('community', Boolean(communityReport));
   wireAnalyticsInnerTabs();
   if (renderClientAnalyticsTab._lastClient !== clientId) {
@@ -10903,7 +12722,8 @@ async function renderClientAnalyticsTab(clientId) {
     if (activeBtn && activeBtn.style.display === 'none') activateAnalyticsTab('overview');
   }
 
-  if (!contentReport && !followersReport && !visitorsReport && !instagramReport && !communityReport) {
+  if (!contentReport && !followersReport && !visitorsReport && !instagramReport
+      && !facebookReport && !communityReport) {
     overviewPanel.innerHTML = `
       <div class="analytics-empty">
         <div class="analytics-empty-icon">📊</div>
@@ -10914,6 +12734,7 @@ async function renderClientAnalyticsTab(clientId) {
     if (audiencePanel) audiencePanel.innerHTML = '';
     if (postsPanel) postsPanel.innerHTML = '';
     if (instagramPanel) instagramPanel.innerHTML = '';
+    document.getElementById('analyticsTabFacebook')?.replaceChildren();
     if (communityPanel) communityPanel.innerHTML = '';
     return;
   }
@@ -10935,11 +12756,26 @@ async function renderClientAnalyticsTab(clientId) {
   // 'instagram_audience' report has been uploaded)
   renderAnalyticsInstagram(instagramReport, instagramAudienceReport);
 
+  // Render Facebook tab (page-level daily metrics only — see renderFacebookTab)
+  renderFacebookTab(facebookReport);
+
   // Render Community Pulse tab (newsletter/dispatch/survey sends + community)
   renderAnalyticsCommunity(communityReport);
 
   // Wire inner tab switching
   wireAnalyticsInnerTabs();
+}
+
+// Coverage stamp for the ACTIVE tab (see loader: per-tab, capped at today).
+function renderAnalyticsCoverageMeta(tabKey) {
+  const metaEl = document.getElementById('analyticsClientMeta');
+  if (!metaEl) return;
+  const iso = (window._analyticsCoverageByTab || {})[tabKey];
+  if (!iso) { metaEl.textContent = ''; return; }
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d)) { metaEl.textContent = ''; return; }
+  metaEl.style.whiteSpace = 'nowrap';
+  metaEl.textContent = `Data through: ${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(-2)}`;
 }
 
 // --- Inner Tab Switching ---
@@ -10956,15 +12792,18 @@ function activateAnalyticsTab(key) {
     key === 'overview' ? 'analyticsTabOverview' :
     key === 'linkedin' ? 'analyticsTabLinkedIn' :
     key === 'instagram' ? 'analyticsTabInstagram' :
+    key === 'facebook' ? 'analyticsTabFacebook' :
     'analyticsTabCommunity'
   );
   if (!panel) return;
   panel.classList.add('active');
+  renderAnalyticsCoverageMeta(key);
   // Charts created while their panel was display:none have zero height
   // (Chart.js only sizes on visible canvases) — deferred builders run on
   // first show of their tab.
   if (panel.dataset.chartsPending) {
-    if (panel.id === 'analyticsTabInstagram') requestAnimationFrame(() => buildIgMetricCharts());
+    if (panel.id === 'analyticsTabInstagram') requestAnimationFrame(() => buildIgMetricCharts('instagram'));
+    if (panel.id === 'analyticsTabFacebook') requestAnimationFrame(() => buildIgMetricCharts('facebook'));
     if (panel.id === 'analyticsTabLinkedIn') requestAnimationFrame(() => buildLinkedInCharts());
   }
 }
@@ -10994,6 +12833,10 @@ function renderAnalyticsSnapshot(grouped) {
 
   const freshChip = (isoDate) => {
     if (!isoDate) return '<span class="chip pending">no coverage date</span>';
+    // Cap at today: LinkedIn's weekly buckets end on a future Saturday, and
+    // "data through 25 Jul" on the 24th is a claim the data can't make.
+    const todayIso = toISODateLocal();
+    if (String(isoDate).slice(0, 10) > todayIso) isoDate = todayIso;
     const d = new Date(String(isoDate).slice(0, 10) + 'T00:00:00');
     if (isNaN(d)) return '';
     const days = Math.floor((new Date() - d) / 86400000);
@@ -11021,7 +12864,7 @@ function renderAnalyticsSnapshot(grouped) {
   // LinkedIn — reuse the tested week-on-week KPI math
   const cr = grouped.content, fr = grouped.followers, vr = grouped.visitors;
   if (cr || fr || vr) {
-    const { kpis, kpiPeriod } = computeOverviewKpis(cr, fr, vr);
+    const { kpis, kpiPeriod, weekInProgress } = computeOverviewKpis(cr, fr, vr, toISODateLocal());
     cards.push(card('LinkedIn', 'linkedin', maxThrough(cr, fr, vr),
       kpis.map(k => kpiCell(k.label, k.value, k.arrow)).join(''), escapeHtml(kpiPeriod)));
   }
@@ -11081,23 +12924,16 @@ function renderAnalyticsOverview(contentReport, followersReport, visitorsReport)
   const followerDemo = followersReport?.demographics_data || {};
 
   // KPI math is pure and lives in js/analytics.js (computeOverviewKpis, tested)
-  const { kpis, kpiPeriod, hasPrevWeek } = computeOverviewKpis(contentReport, followersReport, visitorsReport);
-  const kpiHtml = `<div class="analytics-kpi-period">${kpiPeriod}${hasPrevWeek ? ' · vs previous week' : ''}</div>
-  <div class="analytics-overview-kpi">${kpis.map(k => `
-    <div class="analytics-kpi-card">
-      <div class="analytics-kpi-label">${k.label}</div>
-      <div class="analytics-kpi-value">${k.value}${k.arrow || ''}</div>
-    </div>`).join('')}</div>`;
+  // — complete weeks only; the comparison selector re-renders liCmpBody.
+  const kpiHtml = `<div id="liCmpBody"></div>`;
 
-  // AI insight banners — brand signal + the weekly/monthly analyses (the API
-  // slices its own windows: last 4 weeks / last 3 months of content data)
-  let brandSignalHtml = buildInsightsBanner('brand-signal', 'Week-on-week brand signal analysis', 'Brand signal');
-  if (weekly.length) {
-    brandSignalHtml += buildInsightsBanner('weekly', 'Last 4 weeks — tactical pulse', 'Weekly pulse');
-  }
-  if (weekly.length >= 5) {
-    brandSignalHtml += buildInsightsBanner('monthly', 'Last 3 months — trend analysis', 'Monthly trend');
-  }
+  // ONE insight banner, and it lives inside the comparison section (renderLiCmp)
+  // following the selected windows. The old fixed-window trio (Brand signal /
+  // Weekly pulse / Monthly trend) was accretion: the comparison modes cover
+  // their windows, and their one unique ingredient — audience fit — now rides
+  // in the comparison payload. Four banners answering overlapping questions
+  // was clutter pretending to be depth.
+  const brandSignalHtml = '';
 
   // Charts placeholder canvases
   const chartsHtml = `<div class="analytics-charts-row">
@@ -11122,6 +12958,7 @@ function renderAnalyticsOverview(contentReport, followersReport, visitorsReport)
   </div>`;
 
   panel.innerHTML = kpiHtml + brandSignalHtml + chartsHtml;
+  renderLiCmp();
 
   // LinkedIn now lives in a non-default tab — hidden canvases stay 0-height
   // in the vendored Chart.js, so defer chart creation to tab-show (same
@@ -11138,6 +12975,59 @@ function renderAnalyticsOverview(contentReport, followersReport, visitorsReport)
 }
 
 // Deferred LinkedIn chart builder — consumed by the tab-switch handler.
+
+// ── Value labels on chart points (24 Jul 2026: "the engagement rate
+// numbers should be on top of the graph"). The vendored Chart.js has no
+// datalabels plugin and there is no build step, so this is a ~25-line inline
+// plugin. Per-chart opt-in via options.plugins.valueLabels = { fmt } — and
+// automatically silent above 16 points per dataset, where labels turn to soup
+// (the 90-day Instagram lines keep tooltips instead).
+if (typeof Chart !== 'undefined') {
+  // Formatters are STRING KEYS, not functions: Chart.js treats any function
+  // in options as a scriptable option and auto-invokes it with a context
+  // object — fmtAnalytics(contextObject) threw and killed every chart created
+  // after it. Strings pass through the option resolver untouched, and the
+  // plugin reads chart.config.options (raw) rather than chart.options (proxy).
+  const VALUE_LABEL_FMTS = {
+    compact: (v) => fmtAnalytics(v),
+    pct1: (v) => Number(v).toFixed(1) + '%',
+    plusCompact: (v) => '+' + fmtAnalytics(v)
+  };
+  Chart.register({
+    id: 'valueLabels',
+    afterDatasetsDraw(chart) {
+      const opt = chart.config && chart.config.options && chart.config.options.plugins
+        && chart.config.options.plugins.valueLabels;
+      if (!opt || opt.enabled === false) return;
+      const { ctx } = chart;
+      const fmt = VALUE_LABEL_FMTS[opt.fmt] || ((v) => v);
+      chart.data.datasets.forEach((ds, di) => {
+        if (opt.datasetIndex !== undefined && di !== opt.datasetIndex) return;
+        const meta = chart.getDatasetMeta(di);
+        if (!meta || meta.hidden || !meta.data || meta.data.length > 16) return;
+        ctx.save();
+        ctx.font = '600 10px Manrope, sans-serif';
+        ctx.fillStyle = getChartThemeColors().text;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        meta.data.forEach((pt, i) => {
+          const v = Number(ds.data[i]);
+          if (!isFinite(v) || v === 0) return; // zeros label as clutter
+          const isHorizontal = chart.options.indexAxis === 'y';
+          if (isHorizontal) {
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(fmt(v), pt.x + 4, pt.y);
+          } else {
+            ctx.fillText(fmt(v), pt.x, pt.y - 4);
+          }
+        });
+        ctx.restore();
+      });
+    }
+  });
+}
+
 function buildLinkedInCharts() {
   const liPanel = document.getElementById('analyticsTabLinkedIn');
   if (!liPanel || typeof Chart === 'undefined') return;
@@ -11188,6 +13078,10 @@ function renderOverviewCharts(weekly, followerDaily) {
     }
   };
 
+  // Axis titles so a chart says what it's measuring (24 Jul 2026:
+  // "your graphs don't have x axis, y axis, I don't know what I'm looking at")
+  const axT = (text) => ({ display: true, text, color: colors.text, font: { ...chartFont, size: 11 } });
+
   // Limit weekly data to last N weeks
   const recentWeekly = weekly.slice(-MAX_CHART_WEEKS);
 
@@ -11212,8 +13106,8 @@ function renderOverviewCharts(weekly, followerDaily) {
       },
       options: {
         ...chartDefaults,
-        plugins: { ...chartDefaults.plugins, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => fmtAnalytics(ctx.parsed.y) + ' impressions' } } },
-        scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, beginAtZero: true, ticks: { ...chartDefaults.scales.y.ticks, callback: v => v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v } } }
+        plugins: { ...chartDefaults.plugins, valueLabels: { fmt: 'compact' }, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => fmtAnalytics(ctx.parsed.y) + ' impressions' } } },
+        scales: { x: { ...chartDefaults.scales.x, title: axT('Week starting') }, y: { ...chartDefaults.scales.y, title: axT('Impressions'), beginAtZero: true, ticks: { ...chartDefaults.scales.y.ticks, callback: v => v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v } } }
       }
     });
     _analyticsChartInstances.push(chart);
@@ -11236,8 +13130,8 @@ function renderOverviewCharts(weekly, followerDaily) {
       },
       options: {
         ...chartDefaults,
-        plugins: { ...chartDefaults.plugins, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + '% engagement' } } },
-        scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, beginAtZero: true, ticks: { ...chartDefaults.scales.y.ticks, callback: v => v + '%' } } }
+        plugins: { ...chartDefaults.plugins, valueLabels: { fmt: 'pct1' }, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + '% engagement' } } },
+        scales: { x: { ...chartDefaults.scales.x, title: axT('Week starting') }, y: { ...chartDefaults.scales.y, title: axT('Engagement rate (%)'), beginAtZero: true, ticks: { ...chartDefaults.scales.y.ticks, callback: v => v + '%' } } }
       }
     });
     _analyticsChartInstances.push(chart);
@@ -11282,8 +13176,8 @@ function renderOverviewCharts(weekly, followerDaily) {
       },
       options: {
         ...chartDefaults,
-        plugins: { ...chartDefaults.plugins, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => '+' + ctx.parsed.y + ' new followers' } } },
-        scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, beginAtZero: true } }
+        plugins: { ...chartDefaults.plugins, valueLabels: { fmt: 'plusCompact' }, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => '+' + ctx.parsed.y + ' new followers' } } },
+        scales: { x: { ...chartDefaults.scales.x, title: axT('Week starting') }, y: { ...chartDefaults.scales.y, title: axT('New followers'), beginAtZero: true } }
       }
     });
     _analyticsChartInstances.push(chart);
@@ -11364,15 +13258,51 @@ function renderAnalyticsAudience(followersReport, visitorsReport) {
   }
 
   const legendPersona = currentAnalyticsPersona();
+  // The target audience belongs to the AM leading this client — they (and
+  // leadership) edit it right here, in plain fields, not in admin config.
+  const clientRow = (state.clients || []).find(c => String(c.id) === String(analyticsCurrentClientId));
+  const canEditPersona = isLeadershipRole()
+    || (clientRow && clientRow.account_owner_employee_id === state.currentEmployeeId);
+  const personaEditBtn = canEditPersona
+    ? `<button class="ghost small" id="audiencePersonaEditBtn" type="button">${legendPersona ? 'Edit' : 'Set'} target audience</button>`
+    : '';
   const targetLegend = legendPersona
     ? `<div class="audience-target-legend">
     <span class="audience-target-dot"></span>
     <span>Green rows = target persona (${escapeHtml(legendPersona.industriesLabel)})</span>
+    ${personaEditBtn}
   </div>`
-    : '';
+    : (personaEditBtn ? `<div class="audience-target-legend"><span class="mini-meta">No target audience set for this client yet.</span> ${personaEditBtn}</div>` : '');
 
-  panel.innerHTML = `${toggleHtml}${targetLegend}
+  const joinList = (arr) => (Array.isArray(arr) ? arr.join(', ') : '');
+  const personaFormHtml = canEditPersona ? `
+    <div id="audiencePersonaForm" class="panel hidden"><div>
+      <h3>Target audience — ${escapeHtml(clientRow?.name || 'this client')}</h3>
+      <p class="mini-meta">Who is this client trying to reach? Comma-separated lists — used to highlight matching rows in the audience charts and to steer the AI insights.</p>
+      <div class="form-grid">
+        <label class="form-field"><span>Industries</span>
+          <input type="text" id="apIndustries" placeholder="e.g. Pharmaceuticals, Biotechnology" value="${escapeHtml(joinList(legendPersona?.industries))}"></label>
+        <label class="form-field"><span>Job functions</span>
+          <input type="text" id="apJobFunctions" placeholder="e.g. Research, Engineering" value="${escapeHtml(joinList(legendPersona?.jobFunctions))}"></label>
+        <label class="form-field"><span>Seniority levels</span>
+          <input type="text" id="apSeniority" placeholder="e.g. Manager, Director, VP, CXO" value="${escapeHtml(joinList(legendPersona?.decisionMakerSeniority))}"></label>
+      </div>
+      <div class="action-row">
+        <button class="primary" id="apSaveBtn" type="button">Save</button>
+        <button class="ghost small" id="apCancelBtn" type="button">Cancel</button>
+      </div>
+      <p id="apNotice" class="mini-meta"></p>
+    </div></div>` : '';
+
+  panel.innerHTML = `${toggleHtml}${targetLegend}${personaFormHtml}
     <div id="audiencePanelsContainer"></div>`;
+
+  if (canEditPersona) {
+    const form = document.getElementById('audiencePersonaForm');
+    document.getElementById('audiencePersonaEditBtn')?.addEventListener('click', () => form?.classList.toggle('hidden'));
+    document.getElementById('apCancelBtn')?.addEventListener('click', () => form?.classList.add('hidden'));
+    document.getElementById('apSaveBtn')?.addEventListener('click', () => saveClientAudiencePersona().catch(console.error));
+  }
 
   renderAudiencePanels(defaultView);
 
@@ -11385,6 +13315,40 @@ function renderAnalyticsAudience(followersReport, visitorsReport) {
       renderAudiencePanels(btn.dataset.audienceView);
     });
   });
+}
+
+async function saveClientAudiencePersona() {
+  const notice = document.getElementById('apNotice');
+  const split = (id) => (document.getElementById(id)?.value || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const industries = split('apIndustries');
+  const jobFunctions = split('apJobFunctions');
+  const seniority = split('apSeniority');
+  const clientRow = (state.clients || []).find(c => String(c.id) === String(analyticsCurrentClientId));
+  if (!clientRow || !state.supabase) return;
+
+  const allEmpty = !industries.length && !jobFunctions.length && !seniority.length;
+  const persona = allEmpty ? null : {
+    industries,
+    jobFunctions,
+    decisionMakerSeniority: seniority,
+    industriesLabel: industries.join(', '),
+    jobFunctionsLabel: jobFunctions.join(', '),
+    seniorityLabel: seniority.length > 1
+      ? `${seniority[0]} – ${seniority[seniority.length - 1]}`
+      : (seniority[0] || '')
+  };
+  if (allEmpty && !await appConfirm('Clear the target audience for this client? Charts go back to plain bars.', { title: 'Clear target audience', confirmLabel: 'Clear' })) return;
+
+  if (notice) notice.textContent = 'Saving…';
+  const { error } = await state.supabase.rpc('set_client_audience_persona', {
+    p_client_id: clientRow.id,
+    p_persona: persona
+  });
+  if (error) { if (notice) notice.textContent = 'Could not save: ' + error.message; return; }
+  clientRow.audience_persona = persona;
+  const reports = window._analyticsReports || {};
+  renderAnalyticsAudience(reports.followers, reports.visitors);
 }
 
 function renderAudiencePanels(viewType) {
@@ -11658,23 +13622,16 @@ function renderAnalyticsInstagram(instagramReport, audienceReport) {
       ${truncatedNote}
     </section>` : '';
 
-  // Account Trends — daily metrics from the Insights CSV uploads (one metric
-  // per file: follows, views, reach…). Keys discovered from the merged rows.
+  // Account Trends — daily metrics from the Insights CSV uploads, framed as a
+  // COMPARISON (23 Jul 2026): every number answers "vs what?". The
+  // section body re-renders on mode change without touching the rest of the
+  // tab; renderIgTrends() owns it.
   const daily = Array.isArray(instagramReport.metrics_data) ? instagramReport.metrics_data : [];
   const metricKeys = [...new Set(daily.flatMap(r => Object.keys(r)))].filter(k => k !== 'date').sort();
-  const prettyMetric = (k) => k.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
-  const trendCards = metricKeys.map(k => {
-    const total = daily.reduce((sum, r) => sum + (Number(r[k]) || 0), 0);
-    return `<div class="analytics-chart-card panel">
-      <h4>${escapeHtml(prettyMetric(k))} <span class="mini-meta">· ${fmt(total)} total</span></h4>
-      <canvas id="chartIgMetric_${escapeHtml(k)}"></canvas>
-    </div>`;
-  });
   const trendsSection = metricKeys.length ? `
     <section style="margin-top:var(--space-5)">
       <h3 style="margin-bottom:var(--space-3)">Account Trends</h3>
-      ${Array.from({ length: Math.ceil(trendCards.length / 2) }, (_, i) =>
-        `<div class="analytics-charts-row">${trendCards.slice(i * 2, i * 2 + 2).join('')}</div>`).join('')}
+      <div id="igTrendsBody"></div>
     </section>` : '';
 
   panel.innerHTML = `
@@ -11691,29 +13648,504 @@ function renderAnalyticsInstagram(instagramReport, audienceReport) {
   // create them only when the tab is actually visible, else defer to the
   // tab-switch handler via a pending flag.
   window._igMetricsDaily = daily;
+  window._metricsDailyBySurface.instagram = daily;
   if (metricKeys.length) {
-    if (panel.classList.contains('active')) buildIgMetricCharts();
+    renderIgTrends('instagram'); // builds the comparison DOM; charts wait for visibility
+    if (panel.classList.contains('active')) buildIgMetricCharts('instagram');
     else panel.dataset.chartsPending = '1';
   } else {
     delete panel.dataset.chartsPending;
   }
 }
 
-function buildIgMetricCharts() {
-  const panel = document.getElementById('analyticsTabInstagram');
-  const daily = window._igMetricsDaily || [];
+
+
+// ── Uploaded files panel (Rhea's request, 29 Jul 2026) ──
+// Lists the client's storage folder — the FULL upload history, not just the
+// latest file per report type that survives on the client_analytics rows.
+window._uploadedFilesShowAll = false;
+
+async function renderUploadedFilesPanel(clientId) {
+  const panel = document.getElementById('uploadedFilesPanel');
+  const listEl = document.getElementById('uploadedFilesList');
+  const countEl = document.getElementById('uploadedFilesCount');
+  if (!panel || !listEl || !clientId) return;
+  window._uploadedFilesShowAll = false;
+
+  const { data: objects, error } = await state.supabase.storage
+    .from('client-analytics')
+    .list(clientId, { limit: 200 });
+  if (error || !objects || !objects.length) { panel.style.display = 'none'; return; }
+
+  // Newest first: the upload timestamp is the filename prefix.
+  const files = objects
+    .filter((o) => o.name && !o.name.endsWith('/'))
+    .map((o) => ({ ...parseStoredUploadName(o.name), objectName: o.name, size: o.metadata?.size || 0 }))
+    .sort((a, b) => String(b.objectName).localeCompare(String(a.objectName)));
+
+  // Type + uploader are only knowable for files still referenced by a report
+  // row (the upsert keeps one row per type). Older files get a neutral chip
+  // and an em-dash — shown honestly rather than guessed.
+  const TYPE_META = {
+    content: ['LinkedIn', 'approved'], followers: ['LinkedIn', 'approved'], visitors: ['LinkedIn', 'approved'],
+    instagram: ['Instagram', 'pending'], facebook: ['Facebook', 'info'],
+    community_pulse: ['Community', 'info']
+  };
+  const byFileName = new Map();
+  Object.values(window._analyticsReports || {}).forEach((r) => {
+    if (r?.file_name) byFileName.set(r.file_name, r);
+  });
+  // The per-file log is the truth where it exists; the report-row match stays
+  // as the fallback for everything uploaded before the log did (20 Sep 2026).
+  const byObject = new Map();
+  const logged = await state.supabase
+    .from('client_analytics_uploads')
+    .select('report_type, uploaded_by, object_name')
+    .eq('client_id', clientId)
+    .limit(500);
+  (logged.data || []).forEach((r) => byObject.set(r.object_name, r));
+  const empNameById = new Map((state.employeeDirectory || []).map((e) => [e.id, displayPersonName(e.full_name, '')]));
+
+  panel.style.display = '';
+  if (countEl) countEl.textContent = `\u00b7 ${files.length}`;
+
+  const renderRows = () => {
+    const shown = window._uploadedFilesShowAll ? files : files.slice(0, 4);
+    const rows = shown.map((f) => {
+      const report = byObject.get(f.objectName) || byFileName.get(f.displayName);
+      const [typeLabel, chipClass] = report ? (TYPE_META[report.report_type] || ['File', '']) : ['File', ''];
+      const by = report?.uploaded_by ? (empNameById.get(report.uploaded_by) || '\u2014') : '\u2014';
+      const when = f.dateIso
+        ? new Date(f.dateIso + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+        : '\u2014';
+      return `<tr>
+        <td data-label="File" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(f.displayName)}">${escapeHtml(f.displayName)}</td>
+        <td data-label="Type"><span class="chip ${chipClass}" style="font-size:0.65rem;">${escapeHtml(typeLabel)}</span></td>
+        <td data-label="By" class="mini-meta">${escapeHtml(by)}</td>
+        <td data-label="Uploaded" class="mini-meta">${escapeHtml(when)}</td>
+        <td data-label="" style="text-align:right;"><button type="button" class="ghost small" data-download-upload="${escapeHtml(f.objectName)}">\u2b07</button></td>
+      </tr>`;
+    }).join('');
+    const more = !window._uploadedFilesShowAll && files.length > 4
+      ? `<tr><td colspan="5"><button type="button" class="ghost small" data-uploads-show-all>Show ${files.length - 4} older file${files.length - 4 > 1 ? 's' : ''}</button></td></tr>`
+      : '';
+    listEl.innerHTML = `<table class="m-card-table" style="font-size:13px;">
+      <thead><tr><th>File</th><th>Type</th><th>By</th><th>Uploaded</th><th></th></tr></thead>
+      <tbody>${rows}${more}</tbody></table>`;
+  };
+  renderRows();
+  window._renderUploadedFileRows = renderRows;
+}
+
+document.getElementById('client-analytics')?.addEventListener('click', async (e) => {
+  const toggle = e.target.closest('#uploadedFilesToggle');
+  if (toggle) {
+    const body = document.getElementById('uploadedFilesBody');
+    const chev = document.getElementById('uploadedFilesChevron');
+    const open = body.style.display === 'none';
+    body.style.display = open ? '' : 'none';
+    if (chev) chev.textContent = open ? '\u2039' : '\u203a';
+    return;
+  }
+  const showAll = e.target.closest('[data-uploads-show-all]');
+  if (showAll) {
+    window._uploadedFilesShowAll = true;
+    if (window._renderUploadedFileRows) window._renderUploadedFileRows();
+    return;
+  }
+  const dl = e.target.closest('[data-download-upload]');
+  if (dl) {
+    // Short-lived signed link — access stays behind Colony login.
+    const { data, error } = await state.supabase.storage
+      .from('client-analytics')
+      .createSignedUrl(`${analyticsCurrentClientId}/${dl.dataset.downloadUpload}`, 300);
+    if (error || !data?.signedUrl) { appAlert('Could not create a download link: ' + (error?.message || 'unknown error')); return; }
+    window.open(data.signedUrl, '_blank', 'noopener');
+  }
+});
+
+// ── LinkedIn comparison selector (complete weeks only; js/analytics.js math) ──
+window._liCmp = window._liCmp || { mode: 'wow', aKey: '', bKey: '' };
+
+function cmpTilesHtml(win, metricDefs) {
+  // Same boxed tiles as the Overview snapshot (.snap-kpi) — one visual
+  // language for KPIs everywhere, per Alex.
+  const tiles = metricDefs.map(([key, label, kind]) => {
+    const aRaw = Number((win.a.totals || {})[key]) || 0;
+    const bRaw = Number((win.b.totals || {})[key]) || 0;
+    let value, chip;
+    if (kind === 'rate') {
+      value = pctAnalytics(aRaw);
+      chip = trendArrowPoints(aRaw, bRaw);
+    } else {
+      value = fmtAnalytics(Math.round(aRaw));
+      chip = trendArrow(aRaw, bRaw);
+    }
+    const bShown = kind === 'rate' ? pctAnalytics(bRaw) : fmtAnalytics(Math.round(bRaw));
+    // "was 784" — the header sentence names the baseline window once.
+    return `<div class="snap-kpi">
+      <span class="snap-kpi-label">${escapeHtml(label)}</span>
+      <span class="snap-kpi-value">${value}${chip || ''}</span>
+      <span class="mini-meta">was ${bShown}</span>
+    </div>`;
+  }).join('');
+  return `<div class="snap-kpis">${tiles}</div>`;
+}
+
+function renderLiCmp() {
+  const body = document.getElementById('liCmpBody');
+  if (!body) return;
+  const weekly = (window._analyticsReports || {}).content?.metrics_data || [];
+  if (!weekly.length) { body.innerHTML = ''; return; }
+  const todayIso = toISODateLocal();
+  const cmp = window._liCmp;
+  // Custom mode: seed the picks with real weeks. An empty state behind a
+  // <select> is a lie — the browser DISPLAYS the first option while the app
+  // holds '', so it looked selected but said "pick two weeks" (Vera's
+  // bug: she changed A, never touched B, and nothing rendered).
+  if (cmp.mode === 'custom' && weekly.length) {
+    const valid = (k) => weekly.some(r => r.week === k);
+    if (!valid(cmp.aKey)) cmp.aKey = weekly[weekly.length - 1].week;
+    if (!valid(cmp.bKey)) cmp.bKey = weekly.length > 1 ? weekly[weekly.length - 2].week : cmp.aKey;
+  }
+  const MODES = [['wow', 'Last week vs previous'], ['wo4', 'vs 4-week average'], ['mom', 'Month vs month'], ['custom', 'Custom weeks']];
+  const chips = MODES.map(([m, l]) =>
+    `<button type="button" class="chip${cmp.mode === m ? ' approved' : ''}" data-li-cmp-mode="${m}">${l}</button>`).join(' ');
+  const weekOpts = (sel) => weekly.slice().reverse().map(r =>
+    `<option value="${escapeHtml(r.week)}"${r.week === sel ? ' selected' : ''}>${escapeHtml(weekRangeLabel(r.week))}</option>`).join('');
+  const customSel = cmp.mode === 'custom' ? `
+    <span class="mini-meta">A <select data-li-cmp-week="aKey" style="width:auto;display:inline-block">${weekOpts(cmp.aKey)}</select>
+    vs B <select data-li-cmp-week="bKey" style="width:auto;display:inline-block">${weekOpts(cmp.bKey)}</select></span>` : '';
+
+  const win = liComparisonWindows(weekly, cmp.mode, todayIso, cmp.aKey, cmp.bKey);
+  const METRICS = [
+    ['Impressions (organic)', 'Impressions', 'count'],
+    ['Engagement rate (total)', 'Engagement Rate', 'rate'],
+    ['Clicks (total)', 'Clicks', 'count'],
+    ['Reactions (total)', 'Reactions', 'count'],
+    ['Comments (total)', 'Comments', 'count'],
+    ['Posts', 'Posts', 'count']
+  ];
+  const content = win
+    ? `<div class="analytics-kpi-period"><strong>${escapeHtml(win.a.label)}</strong> vs ${escapeHtml(win.b.label)}</div>${cmpTilesHtml(win, METRICS)}${buildInsightsBanner('comparison-li', 'AI summary of this comparison', 'LinkedIn insights')}`
+    : (cmp.mode === 'custom'
+      ? '<p class="mini-meta">Pick two weeks to compare.</p>'
+      : '<p class="mini-meta">Not enough complete weeks for this comparison yet.</p>');
+  body.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">${chips}${customSel}</div>${content}`;
+}
+
+// ── Community Pulse comparison (send-based: last vs previous send) ──
+window._cpCmp = window._cpCmp || { mode: 'prev' };
+
+function renderCpCmp() {
+  const body = document.getElementById('cpCmpBody');
+  if (!body) return;
+  const sends = ((window._analyticsReports || {}).community_pulse?.metrics_data || []).slice()
+    .sort((x, y) => String(x.date).localeCompare(String(y.date)));
+  if (sends.length < 2) { body.innerHTML = ''; return; }
+  const cmp = window._cpCmp;
+  const last = sends[sends.length - 1];
+  let base = sends[sends.length - 2];
+  if (cmp.mode === 'type') {
+    base = [...sends.slice(0, -1)].reverse().find(r => r.send_type === last.send_type) || null;
+  }
+  const MODES = [['prev', 'Last send vs previous'], ['type', `vs previous ${escapeHtml(last.send_type || 'same type')}`]];
+  const chips = MODES.map(([m, l]) =>
+    `<button type="button" class="chip${cmp.mode === m ? ' approved' : ''}" data-cp-cmp-mode="${m}">${l}</button>`).join(' ');
+  let content;
+  if (!base) {
+    content = `<p class="mini-meta">No earlier ${escapeHtml(last.send_type || '')} send to compare against.</p>`;
+  } else {
+    const win = {
+      a: { label: `"${last.name}" (${last.date})`, totals: last },
+      b: { label: `"${base.name}" (${base.date})`, totals: base }
+    };
+    const METRICS = [
+      ['delivered', 'Delivered', 'count'],
+      ['open_rate', 'Open Rate', 'rate'],
+      ['click_rate', 'Click Rate', 'rate'],
+      ['unsubscribed', 'Unsubs', 'count']
+    ];
+    content = `<div class="analytics-kpi-period"><strong>${escapeHtml(win.a.label)}</strong> vs ${escapeHtml(win.b.label)}</div>${cmpTilesHtml(win, METRICS)}${buildInsightsBanner('comparison-cp', 'AI summary of this comparison', 'Community insights')}`;
+  }
+  body.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">${chips}</div>${content}`;
+}
+
+document.getElementById('client-analytics')?.addEventListener('click', (e) => {
+  const li = e.target.closest('[data-li-cmp-mode]');
+  if (li) { window._liCmp.mode = li.dataset.liCmpMode; renderLiCmp(); return; }
+  const cp = e.target.closest('[data-cp-cmp-mode]');
+  if (cp) { window._cpCmp.mode = cp.dataset.cpCmpMode; renderCpCmp(); }
+});
+document.getElementById('client-analytics')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-li-cmp-week]');
+  if (sel) { window._liCmp[sel.dataset.liCmpWeek] = sel.value; renderLiCmp(); }
+});
+
+// ── Instagram comparison state + rendering ──
+// Facebook: page-level daily metrics only (10 Sep 2026). Meta's
+// per-metric CSVs carry no page name and no posts, and Example Collective's post
+// export came back with a header and zero rows — so a KPI header or a posts
+// table here would be inventing numbers. Account Trends is the whole tab, and
+// it is the same surface Instagram uses rather than a near-copy.
+// No AI insights banner yet: the generator branches by report type and has no
+// Facebook branch, so the button would fire a request shaped for another
+// platform. Better an honest gap than a control that misbehaves.
+function renderFacebookTab(facebookReport) {
+  const panel = document.getElementById('analyticsTabFacebook');
+  if (!panel) return;
+
+  if (!facebookReport) {
+    panel.innerHTML = `
+      <div class="analytics-empty">
+        <div class="analytics-empty-icon">📘</div>
+        <p>No Facebook report uploaded yet.</p>
+        ${canUploadAnalytics() ? '<p class="mini-meta">Upload the per-metric CSVs from Meta Business Suite — Follows, Visits, Link clicks, Content interactions, Viewers.</p>' : ''}
+      </div>`;
+    window._metricsDailyBySurface.facebook = [];
+    return;
+  }
+
+  const daily = Array.isArray(facebookReport.metrics_data) ? facebookReport.metrics_data : [];
+  const metricKeys = [...new Set(daily.flatMap(r => Object.keys(r)))].filter(k => k !== 'date').sort();
+  window._metricsDailyBySurface.facebook = daily;
+
+  if (!metricKeys.length) {
+    panel.innerHTML = `
+      <div class="analytics-empty">
+        <div class="analytics-empty-icon">📘</div>
+        <p>This Facebook report has no daily figures in it yet.</p>
+      </div>`;
+    delete panel.dataset.chartsPending;
+    return;
+  }
+
+  const first = daily[0]?.date || '';
+  const last = daily[daily.length - 1]?.date || '';
+  panel.innerHTML = `
+    <div class="screen-head-top" style="margin-bottom:var(--space-3)">
+      <div>
+        <h3 style="margin:0">Facebook page</h3>
+        <p class="mini-meta" style="margin:2px 0 0">${escapeHtml(first)} – ${escapeHtml(last)} · ${daily.length} days</p>
+      </div>
+    </div>
+    <section style="margin-top:var(--space-5)">
+      <h3 style="margin-bottom:var(--space-3)">Page Trends</h3>
+      <div id="fbTrendsBody"></div>
+    </section>`;
+
+  // Same visibility rule as Instagram: Chart.js cannot size a canvas inside a
+  // display:none panel, so a hidden tab defers to the tab-switch handler.
+  renderIgTrends('facebook');
+  if (panel.classList.contains('active')) buildIgMetricCharts('facebook');
+  else panel.dataset.chartsPending = '1';
+}
+
+// Modes: wow (last full week vs previous), wo4 (vs 4-week average),
+// mom (last full month vs previous), custom (pick two weeks), all (history).
+window._igCmp = window._igCmp || { mode: 'wow', customA: '', customB: '' };
+
+// Instagram and Facebook produce the same daily-metric shape from the same
+// Meta screen, so they get the same Account Trends surface rather than two
+// half-matching copies. Everything below takes a surface key; Instagram stays
+// the default so the existing callers (AI insights, export) read unchanged.
+// _igCmp IS the instagram entry — same object, so its in-place mutations and
+// every existing `window._igCmp.mode` reference keep working.
+const METRIC_SURFACES = {
+  instagram: { key: 'instagram', label: 'Instagram', panelId: 'analyticsTabInstagram', bodyId: 'igTrendsBody', chartPrefix: 'chartIgMetric_', cmpChartPrefix: 'chartIgCmp_' },
+  facebook: { key: 'facebook', label: 'Facebook', panelId: 'analyticsTabFacebook', bodyId: 'fbTrendsBody', chartPrefix: 'chartFbMetric_', cmpChartPrefix: 'chartFbCmp_' }
+};
+window._metricsDailyBySurface = window._metricsDailyBySurface || {};
+window._metricsCmpBySurface = window._metricsCmpBySurface || {};
+window._metricsCmpBySurface.instagram = window._igCmp;
+window._metricsCmpBySurface.facebook = window._metricsCmpBySurface.facebook
+  || { mode: 'wow', customA: '', customB: '' };
+
+function metricSurface(key) { return METRIC_SURFACES[key] || METRIC_SURFACES.instagram; }
+function metricSurfaceDaily(key) { return window._metricsDailyBySurface[metricSurface(key).key] || []; }
+function metricSurfaceCmp(key) { return window._metricsCmpBySurface[metricSurface(key).key]; }
+
+function igActiveComparison(surfaceKey = 'instagram') {
+  const daily = metricSurfaceDaily(surfaceKey);
+  const cmp = metricSurfaceCmp(surfaceKey);
+  if (cmp.mode === 'all') return null;
+  if (cmp.mode === 'custom') {
+    return (cmp.customA && cmp.customB) ? igCustomWeekWindows(daily, cmp.customA, cmp.customB) : null;
+  }
+  return igComparisonWindows(daily, cmp.mode);
+}
+
+function renderIgTrends(surfaceKey = 'instagram') {
+  const surface = metricSurface(surfaceKey);
+  const body = document.getElementById(surface.bodyId);
+  const daily = metricSurfaceDaily(surface.key);
+  if (!body || !daily.length) return;
+  const cmp = metricSurfaceCmp(surface.key);
+  const metricKeys = [...new Set(daily.flatMap(r => Object.keys(r)))].filter(k => k !== 'date').sort();
+  const prettyMetric = (k) => k.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  const fmt = (n) => fmtAnalytics(Math.round(Number(n) || 0));
+
+  const MODES = [
+    ['wow', 'Last week vs previous'],
+    ['wo4', 'vs 4-week average'],
+    ['mom', 'Month vs month'],
+    ['custom', 'Custom weeks'],
+    ['all', 'All time']
+  ];
+  const chips = MODES.map(([m, label]) =>
+    `<button type="button" class="chip${cmp.mode === m ? ' approved' : ''}" data-ig-cmp-mode="${m}" data-cmp-surface="${surface.key}">${label}</button>`).join(' ');
+  const customInputs = cmp.mode === 'custom' ? `
+    <span class="mini-meta" style="margin-left:8px">Pick any date in each week (snapped to Mon–Sun):
+      A <input type="date" data-ig-cmp-date="customA" data-cmp-surface="${surface.key}" value="${escapeHtml(cmp.customA)}" style="width:auto;display:inline-block">
+      vs B <input type="date" data-ig-cmp-date="customB" data-cmp-surface="${surface.key}" value="${escapeHtml(cmp.customB)}" style="width:auto;display:inline-block">
+    </span>` : '';
+
+  const win = igActiveComparison(surface.key);
+
+  let content;
+  if (cmp.mode === 'all' || (!win && cmp.mode !== 'custom')) {
+    // Full-history charts (the old view). Also the honest fallback when a
+    // preset can't be computed from the history on record.
+    const insufficient = cmp.mode !== 'all'
+      ? '<p class="mini-meta">Not enough history for this comparison yet — showing all time.</p>' : '';
+    const cards = metricKeys.map(k => {
+      const total = daily.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+      return `<div class="analytics-chart-card panel">
+        <h4>${escapeHtml(prettyMetric(k))} <span class="mini-meta">· ${fmt(total)} total</span></h4>
+        <canvas id="${surface.chartPrefix}${escapeHtml(k)}"></canvas>
+      </div>`;
+    });
+    content = insufficient + Array.from({ length: Math.ceil(cards.length / 2) }, (_, i) =>
+      `<div class="analytics-charts-row">${cards.slice(i * 2, i * 2 + 2).join('')}</div>`).join('');
+  } else if (!win) {
+    content = '<p class="mini-meta">Pick a date in each of the two weeks to compare.</p>';
+  } else {
+    const tiles = metricKeys.map(k => {
+      const aVal = win.a.totals[k] || 0;
+      const bVal = win.b.totals[k] || 0;
+      const delta = pctDeltaLabel(aVal, bVal);
+      const chip = delta
+        ? `<span class="${aVal >= bVal ? 'trend-up' : 'trend-down'}">${aVal >= bVal ? '↑' : '↓'} ${delta.slice(1)}</span>`
+        : (aVal > 0 && bVal === 0 ? '<span class="trend-up">new</span>' : '<span class="mini-meta">flat</span>');
+      return `<div class="snap-kpi">
+        <span class="snap-kpi-label">${escapeHtml(prettyMetric(k))}</span>
+        <span class="snap-kpi-value">${fmt(aVal)} ${chip}</span>
+        <span class="mini-meta">was ${fmt(bVal)}</span>
+      </div>`;
+    }).join('');
+    const cards = metricKeys.map(k => `
+      <div class="analytics-chart-card panel">
+        <h4>${escapeHtml(prettyMetric(k))}</h4>
+        <canvas id="${surface.cmpChartPrefix}${escapeHtml(k)}"></canvas>
+      </div>`);
+    content = `
+      <p class="mini-meta" style="margin:4px 0 10px"><strong>${escapeHtml(win.a.label)}</strong> vs ${escapeHtml(win.b.label)}</p>
+      <div class="snap-kpis">${tiles}</div>
+      ${Array.from({ length: Math.ceil(cards.length / 2) }, (_, i) =>
+        `<div class="analytics-charts-row">${cards.slice(i * 2, i * 2 + 2).join('')}</div>`).join('')}`;
+  }
+
+  body.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">${chips}${customInputs}</div>${content}`;
+}
+
+// Delegated: comparison mode switches + custom week picks.
+document.getElementById('client-analytics')?.addEventListener('click', (e) => {
+  const chip = e.target.closest('[data-ig-cmp-mode]');
+  if (!chip) return;
+  const key = chip.dataset.cmpSurface || 'instagram';
+  metricSurfaceCmp(key).mode = chip.dataset.igCmpMode;
+  renderIgTrends(key);
+  buildIgMetricCharts(key);
+});
+document.getElementById('client-analytics')?.addEventListener('change', (e) => {
+  const input = e.target.closest('[data-ig-cmp-date]');
+  if (!input) return;
+  const key = input.dataset.cmpSurface || 'instagram';
+  metricSurfaceCmp(key)[input.dataset.igCmpDate] = input.value;
+  renderIgTrends(key);
+  buildIgMetricCharts(key);
+});
+
+// Builds whichever chart set the current comparison mode rendered: overlay
+// charts (A solid, B ghost) for comparisons, full-history lines for All time.
+// Mode switches re-render in place, so IG charts are tracked separately and
+// destroyed before each rebuild (the global list only clears on screen load).
+window._igChartInstances = window._igChartInstances || [];
+window._metricChartsBySurface = window._metricChartsBySurface || {};
+function buildIgMetricCharts(surfaceKey = 'instagram') {
+  const surface = metricSurface(surfaceKey);
+  const panel = document.getElementById(surface.panelId);
+  const daily = metricSurfaceDaily(surface.key);
   if (!panel || !daily.length || typeof Chart === 'undefined') return;
   delete panel.dataset.chartsPending;
+  // Tracked per surface: destroying Instagram's charts when Facebook rebuilds
+  // would leave Instagram's canvases blank until its tab re-rendered.
+  const live = window._metricChartsBySurface[surface.key] || [];
+  live.forEach(c => { try { c.destroy(); } catch (e) { /* already gone */ } });
+  window._metricChartsBySurface[surface.key] = [];
+  if (surface.key === 'instagram') window._igChartInstances = window._metricChartsBySurface.instagram;
+
   const metricKeys = [...new Set(daily.flatMap(r => Object.keys(r)))].filter(k => k !== 'date').sort();
   const colors = getChartThemeColors();
   const chartFont = { family: "'Manrope', 'Avenir Next', sans-serif", size: 11 };
+  const axT = (text) => ({ display: true, text, color: colors.text, font: chartFont });
+  const prettyMetric = (k) => k.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  const baseOpts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { grid: { display: false }, ticks: { font: chartFont, color: colors.muted, maxTicksLimit: 8, maxRotation: 45 } },
+      y: { grid: { color: colors.line }, ticks: { font: chartFont, color: colors.muted }, beginAtZero: true }
+    }
+  };
+  // Every chart says what it measures on both axes.
+  const optsFor = (xTitle, yTitle, extra) => ({ ...baseOpts, ...extra,
+    scales: { x: { ...baseOpts.scales.x, title: axT(xTitle) }, y: { ...baseOpts.scales.y, title: axT(yTitle) } } });
+  const track = (chart) => { window._metricChartsBySurface[surface.key].push(chart); _analyticsChartInstances.push(chart); };
+
+  const win = igActiveComparison(surface.key);
+  if (win) {
+    // Overlay: align by day index. Weeks align Mon–Sun; months by day-of-month.
+    const dayLabels = win.a.rows.map(r => {
+      const d = new Date(String(r.date).slice(0, 10) + 'T00:00:00');
+      return isNaN(d) ? String(r.date) : d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric' });
+    });
+    metricKeys.forEach(k => {
+      const canvas = document.getElementById(`${surface.cmpChartPrefix}${k}`);
+      if (!canvas) return;
+      const aData = win.a.rows.map(r => Number(r[k]) || 0);
+      // Average baselines have totals but no single week of rows — draw them as
+      // a flat per-day reference line rather than pretending a daily shape.
+      const bData = win.b.rows
+        ? win.a.rows.map((_, i) => Number((win.b.rows[i] || {})[k]) || 0)
+        : win.a.rows.map(() => (win.b.totals[k] || 0) / Math.max(1, win.a.rows.length));
+      const chart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: dayLabels,
+          datasets: [
+            { label: win.a.label, data: aData, borderColor: colors.primary, backgroundColor: colors.primarySoft,
+              fill: true, tension: 0.3, pointRadius: 2, pointHoverRadius: 5, borderWidth: 2 },
+            { label: win.b.label, data: bData, borderColor: colors.muted, backgroundColor: 'transparent',
+              fill: false, tension: 0.3, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1.5, borderDash: [5, 4] }
+          ]
+        },
+        options: optsFor('Day', prettyMetric(k), { plugins: { valueLabels: { fmt: 'compact', datasetIndex: 0 }, legend: { display: true, labels: { font: chartFont, color: colors.muted, boxWidth: 18 } } } })
+      });
+      track(chart);
+    });
+    return;
+  }
+
+  // All-time history (also the insufficient-history fallback)
   const recent = daily.slice(-90);
   const labels = recent.map(r => {
     const d = new Date(String(r.date).slice(0, 10) + 'T00:00:00');
     return isNaN(d) ? String(r.date) : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
   });
   metricKeys.forEach(k => {
-    const canvas = document.getElementById(`chartIgMetric_${k}`);
+    const canvas = document.getElementById(`${surface.chartPrefix}${k}`);
     if (!canvas) return;
     const chart = new Chart(canvas.getContext('2d'), {
       type: 'line',
@@ -11730,18 +14162,9 @@ function buildIgMetricCharts() {
           borderWidth: 2
         }]
       },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { grid: { display: false }, ticks: { font: chartFont, color: colors.muted, maxTicksLimit: 8, maxRotation: 45 } },
-          y: { grid: { color: colors.line }, ticks: { font: chartFont, color: colors.muted }, beginAtZero: true }
-        }
-      }
+      options: optsFor('Date', prettyMetric(k), { plugins: { legend: { display: false } } })
     });
-    _analyticsChartInstances.push(chart);
+    track(chart);
   });
 }
 
@@ -11810,6 +14233,7 @@ function renderAnalyticsCommunity(report) {
       <div class="analytics-kpi-card"><div class="analytics-kpi-label">Click Rate</div><div class="analytics-kpi-value">${pct(s.click_rate)}</div></div>
     </div>
 
+    <div id="cpCmpBody" style="margin-top:var(--space-4)"></div>
     ${buildInsightsBanner('community_pulse', 'Movement lens: attention vs participation', 'Community pulse')}
 
     <section class="panel" style="margin-top:var(--space-5)">
@@ -11837,6 +14261,7 @@ function renderAnalyticsCommunity(report) {
       ${segTable('Forum by Region', demo.forum?.by_region)}
     </div>
   `;
+  renderCpCmp();
 }
 
 function getClientName() {
@@ -11892,7 +14317,6 @@ function renderPostTable(posts, sortKey) {
       <tr class="post-insight-row" id="post-insight-row-${i}" style="display:none">
         <td colspan="7"><div class="post-insight-cell" data-insights-label="post">
           <div class="post-insight-content insights-banner-content"></div>
-          <button class="ghost small insights-copy-btn" type="button" style="display:none">Copy insights</button>
         </div></td>
       </tr>`;
     }).join('')}</tbody>
@@ -11906,7 +14330,10 @@ function renderContentTypeChart(posts) {
   // Group by content type
   const typeMap = new Map();
   posts.forEach(p => {
-    const ct = p['Content Type'] || 'Post';
+    // LinkedIn's export only tags 'Video'; images, text, carousels and
+    // documents all arrive BLANK — the export cannot tell them apart, so the
+    // bucket must not pretend otherwise.
+    const ct = p['Content Type'] || 'Other (image/text/carousel)';
     if (!typeMap.has(ct)) typeMap.set(ct, { sum: 0, count: 0 });
     const entry = typeMap.get(ct);
     entry.sum += Number(p['Engagement rate']) || 0;
@@ -11934,10 +14361,12 @@ function renderContentTypeChart(posts) {
       responsive: true,
       maintainAspectRatio: false,
       indexAxis: 'y',
-      plugins: { legend: { display: false } },
+      plugins: { valueLabels: { fmt: (v) => v.toFixed(1) + '%' }, legend: { display: false } },
       scales: {
-        x: { grid: { color: colors.line }, ticks: { callback: v => v + '%', color: colors.muted } },
-        y: { grid: { display: false }, ticks: { color: colors.text } }
+        x: { grid: { color: colors.line }, ticks: { callback: v => v + '%', color: colors.muted },
+             title: { display: true, text: 'Avg engagement rate (%)', color: colors.muted } },
+        y: { grid: { display: false }, ticks: { color: colors.text },
+             title: { display: true, text: 'Post type', color: colors.muted } }
       }
     }
   });
@@ -12027,17 +14456,8 @@ function buildInsightsBanner(type, previewText, label) {
     </button>
     <div class="insights-banner-body" id="${id}-body" style="display:none">
       <div class="insights-banner-content" id="${id}-content"></div>
-      <button class="ghost small insights-copy-btn" type="button" style="display:none">Copy insights</button>
     </div>
   </div>`;
-}
-
-// Reveal the copy button once a banner has real insight text to copy
-function showInsightsCopy(banner, rawText) {
-  if (!banner || !rawText) return;
-  banner._insightsRaw = rawText;
-  const btn = banner.querySelector('.insights-copy-btn');
-  if (btn) btn.style.display = '';
 }
 
 
@@ -12045,7 +14465,7 @@ function showInsightsCopy(banner, rawText) {
 // The analyses should read EVERYTHING the uploaded reports can say — every
 // post with full metrics, follower gains + demographics, visitor trends —
 // not just aggregate weekly totals. Aggregates alone misdiagnose content-mix
-// swings (real case: Northwind Nonprofit's recruitment-post spike ending read as
+// swings (real case: Example Collective's recruitment-post spike ending read as
 // "reach collapsed", Jun 2026).
 function buildInsightsContext(windowDays) {
   const reports = window._analyticsReports || {};
@@ -12184,30 +14604,6 @@ async function fetchInsights(analysisType, data, clientName, extras) {
 const analyticsScreenEl = document.getElementById('client-analytics');
 if (analyticsScreenEl) {
   analyticsScreenEl.addEventListener('click', async (e) => {
-    // --- Copy insights (for pasting into a client email) ---
-    const copyBtn = e.target.closest('.insights-copy-btn');
-    if (copyBtn) {
-      e.preventDefault();
-      const holder = copyBtn.closest('.insights-banner, .post-insight-cell');
-      const raw = holder?._insightsRaw || '';
-      if (!raw) return;
-      const type = holder?.querySelector('.insights-banner-trigger')?.dataset.insightsType || holder?.dataset.insightsLabel || '';
-      const labelMap = { 'brand-signal': 'Brand signal', weekly: 'Weekly', monthly: 'Monthly', instagram: 'Instagram', post: 'Post', community_pulse: 'Community pulse' };
-      const clientRow = state.clients?.find(c => c.id === analyticsCurrentClientId);
-      const dateStr = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-      const channelLabel = type === 'instagram' ? 'Instagram' : type === 'community_pulse' ? 'Newsletter & community' : 'LinkedIn';
-      const header = `${clientRow?.name || 'Client'} — ${labelMap[type] || 'AI'} insights (${channelLabel}) · ${dateStr}`;
-      try {
-        await navigator.clipboard.writeText(`${header}\n\n${raw}`);
-        copyBtn.textContent = 'Copied ✓';
-      } catch (err) {
-        console.error('Copy failed:', err);
-        copyBtn.textContent = 'Copy failed';
-      }
-      setTimeout(() => { copyBtn.textContent = 'Copy insights'; }, 2000);
-      return;
-    }
-
     // --- Per-post deep analysis (Post Performance tab) ---
     const postBtn = e.target.closest('.post-insight-btn');
     if (postBtn) {
@@ -12227,9 +14623,6 @@ if (analyticsScreenEl) {
       const contentEl = cell.querySelector('.post-insight-content');
       const showResult = (text) => {
         contentEl.innerHTML = formatInsightsText(text);
-        cell._insightsRaw = text;
-        const b = cell.querySelector('.insights-copy-btn');
-        if (b) b.style.display = '';
       };
       const postCached = getDbInsightCache(postCacheKey);
       if (postCached) { showResult(postCached); return; }
@@ -12286,17 +14679,29 @@ if (analyticsScreenEl) {
       // payload gets richer: v4 weekly/monthly + v3 brand-signal = full report
       // context (all posts, followers, visitors); instagram v1 = new analysis.
       const vm = 'organic';
-      const CACHE_VER = { weekly: 'v4', monthly: 'v4', 'brand-signal': 'v3', instagram: 'v3', community_pulse: 'v1' };
-      const cacheKey = `${type}-${vm}-${CACHE_VER[type] || 'v2'}`;
+      // Bumped 23 Jul 2026: cached insights predate the skimmable-format contract
+      const CACHE_VER = { weekly: 'v7', monthly: 'v7', 'brand-signal': 'v8', instagram: 'v6', community_pulse: 'v3', 'comparison-li': 'v2', 'comparison-cp': 'v1' };
+      // Instagram insights are PER COMPARISON (the summary of what's on
+      // screen, not a fixed whole-file retrospective) — so the active
+      // comparison window is part of the cache key. Presets therefore cache
+      // once per upload; changing the comparison generates for that view.
+      const igCmpSuffix = type === 'instagram'
+        ? `-${window._igCmp?.mode || 'all'}${(() => { const w = igActiveComparison(); return w ? `-${w.a.startIso}-${w.b.startIso || 'avg'}` : ''; })()}`
+        : type === 'comparison-li'
+        ? `-${window._liCmp?.mode}-${window._liCmp?.aKey || 'auto'}`
+        : type === 'comparison-cp'
+        ? `-${window._cpCmp?.mode}`
+        : '';
+      const cacheKey = `${type}-${vm}-${CACHE_VER[type] || 'v2'}${igCmpSuffix}`;
       // Instagram/community insights cache on their own report rows (there may
-      // be no content report for e.g. IG-only clients like Acme Media).
+      // be no content report for e.g. IG-only clients like Example Records).
       const cacheReport = type === 'instagram' ? (window._analyticsReports || {}).instagram
-        : type === 'community_pulse' ? (window._analyticsReports || {}).community_pulse
+        : (type === 'community_pulse' || type === 'comparison-cp') ? (window._analyticsReports || {}).community_pulse
+        : type === 'comparison-li' ? (window._analyticsReports || {}).content
         : undefined;
       const cached = getDbInsightCache(cacheKey, cacheReport);
       if (cached) {
         content.innerHTML = formatInsightsText(cached);
-        showInsightsCopy(banner, cached);
         return;
       }
 
@@ -12304,7 +14709,8 @@ if (analyticsScreenEl) {
       content.innerHTML = '<div class="insights-loading"><span class="insights-spinner"></span> Analyzing...</div>';
       try {
         const report = (window._analyticsCurrentReport);
-        const weekly = report?.metrics_data || [];
+        // Complete weeks only — an in-progress bucket vs a full one manufactures a collapse
+        const weekly = trimInProgressWeek(report?.metrics_data || [], toISODateLocal());
         let analysisData;
         let clientName = '';
 
@@ -12320,7 +14726,7 @@ if (analyticsScreenEl) {
           const vr = reports.visitors;
 
           // Content: last 2 weekly rows
-          const contentWeekly = cr?.metrics_data || [];
+          const contentWeekly = trimInProgressWeek(cr?.metrics_data || [], toISODateLocal());
           const last2Weeks = contentWeekly.slice(-2);
           // Posts: last 14 days only
           const allPosts = cr?.posts_data || [];
@@ -12342,10 +14748,22 @@ if (analyticsScreenEl) {
               avgEngagement: (() => { const rows = last2Weeks.filter(w => w['Engagement rate (total)'] > 0); return rows.length ? rows.reduce((s, w) => s + w['Engagement rate (total)'], 0) / rows.length : 0; })(),
               totalPosts: recentPosts.length,
               topPostImpressions: recentPosts.length ? Math.max(0, ...recentPosts.map(p => p['Impressions'] || 0)) : 0,
-              weekOverWeek: last2Weeks.length === 2 ? {
-                impressionsDelta: (last2Weeks[1]['Impressions (total)'] || 0) - (last2Weeks[0]['Impressions (total)'] || 0),
-                engagementDelta: (last2Weeks[1]['Engagement rate (total)'] || 0) - (last2Weeks[0]['Engagement rate (total)'] || 0),
-              } : null,
+              // Percentages PRECOMPUTED — the model quotes, never derives.
+              // Asked to divide, haiku picked the wrong denominator twice
+              // (8,564/17,620 = "48.6%" instead of /26,184 = 32.7%), and an
+              // instruction to divide by OLD didn't stop it.
+              weekOverWeek: last2Weeks.length === 2 ? (() => {
+                const impPrev = last2Weeks[0]['Impressions (total)'] || 0;
+                const impNow = last2Weeks[1]['Impressions (total)'] || 0;
+                const engPrev = last2Weeks[0]['Engagement rate (total)'] || 0;
+                const engNow = last2Weeks[1]['Engagement rate (total)'] || 0;
+                return {
+                  impressionsDelta: impNow - impPrev,
+                  impressionsPctChange: pctDeltaLabel(impNow, impPrev),
+                  engagementDelta: engNow - engPrev,
+                  engagementDeltaPoints: `${engNow >= engPrev ? '+' : '−'}${Math.abs((engNow - engPrev) * 100).toFixed(2)} points`
+                };
+              })() : null,
             } : null,
             followerSummary: followerRecent.length ? {
               newFollowers: followerRecent.reduce((s, d) => s + (d.total || 0), 0),
@@ -12363,20 +14781,82 @@ if (analyticsScreenEl) {
         } else if (type === 'instagram') {
           analysisData = buildInstagramInsightsData();
           if (!analysisData) throw new Error('No Instagram report loaded');
+          // Attach the active comparison so the AI summarises WHAT'S ON SCREEN
+          // — A vs B with the same windows the tiles show — instead of
+          // narrating the whole file.
+          const w = igActiveComparison();
+          if (w) {
+            const cmpPct = {};
+            Object.keys(w.a.totals || {}).forEach((k) => {
+              const p = pctDeltaLabel(w.a.totals[k], (w.b.totals || {})[k]);
+              if (p) cmpPct[k] = p;
+            });
+            analysisData.comparison = {
+              precomputedPct: cmpPct,
+              mode: window._igCmp.mode,
+              note: w.note || '',
+              a: { label: w.a.label, startIso: w.a.startIso, endIso: w.a.endIso, totals: w.a.totals, daily: w.a.rows },
+              b: { label: w.b.label, startIso: w.b.startIso, endIso: w.b.endIso, totals: w.b.totals, daily: w.b.rows }
+            };
+            // Post context scoped to the compared windows, not all time.
+            const inWin = (d) => d && ((d >= (w.a.startIso || '') && d <= (w.a.endIso || '')) ||
+              (w.b.startIso && d >= w.b.startIso && d <= w.b.endIso));
+            analysisData.posts = (analysisData.posts || []).filter(p => inWin(String(p.date || '').slice(0, 10)));
+          }
+        } else if (type === 'comparison-li') {
+          const reports = window._analyticsReports || {};
+          const weeklyAll = reports.content?.metrics_data || [];
+          const w = liComparisonWindows(weeklyAll, window._liCmp.mode, toISODateLocal(), window._liCmp.aKey, window._liCmp.bKey);
+          if (!w) throw new Error('No comparison selected');
+          // Audience fit (the one thing the retired Brand signal banner had):
+          // demographics plus THIS client's target persona from config — the
+          // old prompt hardcoded a pharma/biotech ICP and scored every client
+          // against it, activism nonprofits included.
+          const personas = getConfigMap('analytics_personas_by_client', ANALYTICS_PERSONAS_BY_CLIENT);
+          const clientRowLi = state.clients?.find(c => c.id === analyticsCurrentClientId);
+          const liPersona = clientRowLi?.audience_persona || personas[(clientRowLi?.name || '').toLowerCase()] || null;
+          analysisData = { channel: 'LinkedIn', comparison: {
+            aLabel: w.a.label, bLabel: w.b.label, note: w.note || '',
+            aTotals: w.a.totals, bTotals: w.b.totals,
+            precomputedDeltas: precomputeRowDeltas(w.b.totals, w.a.totals)
+          }, audience: {
+            followerDemographics: reports.followers?.demographics_data || null,
+            visitorDemographics: reports.visitors?.demographics_data || null,
+            targetPersona: liPersona
+          } };
+        } else if (type === 'comparison-cp') {
+          const sends = ((window._analyticsReports || {}).community_pulse?.metrics_data || []).slice()
+            .sort((x, y) => String(x.date).localeCompare(String(y.date)));
+          if (sends.length < 2) throw new Error('Not enough sends to compare');
+          const last = sends[sends.length - 1];
+          const base = window._cpCmp.mode === 'type'
+            ? [...sends.slice(0, -1)].reverse().find(r => r.send_type === last.send_type)
+            : sends[sends.length - 2];
+          if (!base) throw new Error('No earlier send of this type');
+          analysisData = { channel: 'Newsletter & community', comparison: {
+            aLabel: `"${last.name}" (${last.date})`, bLabel: `"${base.name}" (${base.date})`, note: '',
+            aTotals: last, bTotals: base,
+            precomputedDeltas: precomputeRowDeltas(base, last)
+          } };
         } else if (type === 'community_pulse') {
           const rep = (window._analyticsReports || {}).community_pulse;
           if (!rep) throw new Error('No community pulse report loaded');
           analysisData = { summary: rep.summary || null, sends: rep.metrics_data || [], demographics: rep.demographics_data || null };
+          const sends = analysisData.sends;
+          if (sends.length >= 2) analysisData.precomputedDeltas = precomputeRowDeltas(sends[sends.length - 2], sends[sends.length - 1]);
         } else if (type === 'monthly') {
-          analysisData = { months: aggregateWeeklyToMonthly(weekly), ...buildInsightsContext(120) };
+          const months = aggregateWeeklyToMonthly(weekly);
+          analysisData = { months, ...buildInsightsContext(120) };
+          if (months.length >= 2) analysisData.precomputedDeltas = precomputeRowDeltas(months[months.length - 2], months[months.length - 1]);
         } else {
           analysisData = { weeks: weekly, ...buildInsightsContext(35) };
+          if (weekly.length >= 2) analysisData.precomputedDeltas = precomputeRowDeltas(weekly[weekly.length - 2], weekly[weekly.length - 1]);
         }
 
-        const result = await fetchInsights(type, analysisData, clientName, { viewMode: vm });
+        const apiType = type.startsWith('comparison-') ? 'comparison' : type;
+        const result = await fetchInsights(apiType, analysisData, clientName, { viewMode: vm });
         await setDbInsightCache(cacheKey, result.insights, cacheReport);
         content.innerHTML = formatInsightsText(result.insights);
-        showInsightsCopy(banner, result.insights);
 
         // Update preview text
         const preview = banner.querySelector('.insights-banner-preview');
@@ -12400,8 +14880,11 @@ function formatInsightsText(text) {
     .map(line => {
       line = line.trim();
       if (!line) return '';
-      // Bold section headers (lines ending with :)
-      if (/^\d+\.\s/.test(line) || /^(Key Trends|Notable Changes|Recommendations|Performance|Suggestions)/i.test(line)) {
+      // Bold section headers: numbered ("1. Signal"), known section names from
+      // the prompt contracts, or a short label line ending with ':'
+      if (/^\d+\.\s/.test(line)
+          || /^(Key Trends|Notable Changes|Recommendations|Performance|Suggestions|What moved|Likely why|Do next|Signal|Audience Fit|Next Week|Trend Read|Spike Days|Participation Pulse|Community Health|What the Network Wants|What Worked)/i.test(line)
+          || (line.length < 40 && /:$/.test(line))) {
         return `<div class="insights-section-header">${escapeHtml(line)}</div>`;
       }
       if (line.startsWith('•') || line.startsWith('-')) {
@@ -12632,6 +15115,7 @@ const profileEmailInput = document.getElementById('profileEmailInput');
 const profileCapacityInput = document.getElementById('profileCapacityInput');
 const profileBirthday = document.getElementById('profileBirthday');
 const profileCity = document.getElementById('profileCity');
+profileCity?.addEventListener('change', () => renderCityTimezoneHint(profileCity.value));
 const profileEmergencyName = document.getElementById('profileEmergencyName');
 const profileEmergencyPhone = document.getElementById('profileEmergencyPhone');
 const profilePeriod = document.getElementById('profilePeriod');
@@ -12923,7 +15407,54 @@ async function loadProfileAllocationHistoryFromSupabase(targetEmployeeId = getSe
   applySelectedEmployeeAllocationSnapshot(state.profileAllocationRows);
 }
 
+// The real department list, straight from the table — never a hardcoded set.
+// The dropdown used to be six literal <option>s in index.html, which silently
+// dropped Finance (a real team with a real person in it): on load the picker
+// fell back to AM, and one Save then moved that person's team for good.
+state.departmentOptions = [];
+
+async function loadDepartmentOptions() {
+  if (!state.supabase || !state.isAuthenticated) return;
+  const res = await state.supabase.from('departments').select('id, name, sort_order');
+  if (res.error) throw res.error;
+  state.departmentOptions = (res.data || []).slice().sort((a, b) =>
+    (a.sort_order ?? 999) - (b.sort_order ?? 999) || String(a.name).localeCompare(String(b.name)));
+  renderTeamSelectOptions();
+}
+
+function departmentByExactName(name) {
+  const wanted = String(name || '').trim().toLowerCase();
+  if (!wanted) return null;
+  return state.departmentOptions.find((d) => String(d.name).trim().toLowerCase() === wanted) || null;
+}
+
+// `currentName` is the employee's stored team. If it somehow isn't in the list
+// it gets appended rather than dropped — a picker that can't show the current
+// value is how a save silently reassigns someone.
+function renderTeamSelectOptions(currentName = '') {
+  if (!profileTeamSelect) return;
+  // Fall back to whatever options are already in the markup if the fetch has
+  // not landed (or failed) — better a stale list than a one-item picker.
+  const names = state.departmentOptions.length
+    ? state.departmentOptions.map((d) => d.name)
+    : [...profileTeamSelect.options].map((o) => o.value);
+  const current = String(currentName || '').trim();
+  if (current && !names.some((n) => n.toLowerCase() === current.toLowerCase())) names.push(current);
+  if (!names.length) return;
+  const previous = profileTeamSelect.value;
+  profileTeamSelect.innerHTML = names
+    .map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  const keep = current || previous;
+  if (keep && names.some((n) => n === keep)) profileTeamSelect.value = keep;
+}
+
 async function resolveDepartmentIdByName(teamName, fallbackDepartmentId = null) {
+  // Exact name first: normalizeTeamName is a DISPLAY normalizer (it folds
+  // 'Leadership' into AM), so normalizing before the lookup resolved real
+  // teams to the wrong department id.
+  const exact = departmentByExactName(teamName);
+  if (exact) return exact.id;
+
   const selected = normalizeTeamName(teamName);
   if (!selected) return fallbackDepartmentId;
 
@@ -12973,45 +15504,86 @@ async function saveCurrentProfile() {
     return;
   }
 
-  const selectedTeam = normalizeTeamName(profileTeamSelect?.value || TEAM_AM, TEAM_AM);
-  const selectedEmploymentType = profileEmploymentType?.value === 'fractional' ? 'fractional' : 'full-time';
+  // A name that IS a department stays as typed; only unknown/legacy values
+  // get normalized (that path still folds the old AM spelling).
+  const rawSelectedTeam = String(profileTeamSelect?.value || '').trim();
+  const selectedTeam = departmentByExactName(rawSelectedTeam)
+    ? rawSelectedTeam
+    : normalizeTeamName(rawSelectedTeam || TEAM_AM, TEAM_AM);
+  // All three values are real now — coercing anything not 'fractional' to
+  // 'full-time' would silently demote a consultant on every profile save.
+  const selectedEmploymentType = EMPLOYMENT_TYPES.includes(profileEmploymentType?.value)
+    ? profileEmploymentType.value
+    : 'full-time';
   const selectedAccessLevel = normalizeAccessLevel(
     profileAccessLevel?.value || selectedDirectoryEmployee?.access_level || state.employeeProfile?.access_level || 'employee'
   );
-  const parsedCapacity = parseCapacityPercentInput(profileCapacityInput?.value);
-  if (parsedCapacity === null || parsedCapacity <= 0 || parsedCapacity > 100) {
-    setProfileSaveNotice('Capacity must be a number from 1 to 100.', 'status error');
-    return;
-  }
+  // Team, employment type and capacity are trigger-guarded columns
+  // (trg_block_employee_self_escalation): for non-leadership the DB silently
+  // reverts them, so sending them made the form LIE — an employee could pick a
+  // new team, see "saved", and nothing happened (the same defect onboarding's
+  // department had). The controls are leadership-only in the markup; the save
+  // now matches, sending those fields only when the editor can actually land
+  // them.
+  const canEditGuarded = isLeadershipRole();
 
-  let departmentId = selectedDirectoryEmployee?.department?.id || null;
-  if (!departmentId || normalizeTeamName(selectedDirectoryEmployee?.department?.name, '') !== selectedTeam) {
-    try {
-      departmentId = await resolveDepartmentIdByName(selectedTeam, departmentId);
-    } catch (error) {
-      setProfileSaveNotice(`Unable to resolve team: ${error.message}`, 'status error');
+  let parsedCapacity = null;
+  let departmentId = null;
+  if (canEditGuarded) {
+    parsedCapacity = parseCapacityPercentInput(profileCapacityInput?.value);
+    if (parsedCapacity === null || parsedCapacity <= 0 || parsedCapacity > 100) {
+      setProfileSaveNotice('Capacity must be a number from 1 to 100.', 'status error');
       return;
     }
-  }
-  if (!departmentId) {
-    setProfileSaveNotice('Department mapping missing. Select a valid team.', 'status error');
-    return;
+
+    departmentId = selectedDirectoryEmployee?.department?.id || null;
+    const storedTeamName = String(selectedDirectoryEmployee?.department?.name || '').trim();
+    const teamUnchanged = storedTeamName.toLowerCase() === selectedTeam.toLowerCase()
+      || normalizeTeamName(storedTeamName, '') === normalizeTeamName(selectedTeam, '');
+    if (!departmentId || !teamUnchanged) {
+      try {
+        departmentId = await resolveDepartmentIdByName(selectedTeam, departmentId);
+      } catch (error) {
+        setProfileSaveNotice(`Unable to resolve team: ${error.message}`, 'status error');
+        return;
+      }
+    }
+    if (!departmentId) {
+      setProfileSaveNotice('Department mapping missing. Select a valid team.', 'status error');
+      return;
+    }
   }
 
   const birthdayValue = profileBirthday?.value || null;
   const cityValue = profileCity?.value?.trim() || null;
+  // The picker is empty either because they never set a city, or because we
+  // couldn't place the one they had. Both cases get asked, not guessed: saving
+  // null here would wipe a stored city and silently default their timezone.
+  if (profileCity && !cityValue) {
+    setProfileSaveNotice('Pick your home city — it sets the timezone Colony emails you in.', 'status error');
+    return;
+  }
   const emergNameValue = profileEmergencyName?.value?.trim() || null;
   const emergPhoneValue = profileEmergencyPhone?.value?.trim() || null;
   const updatePayload = {
     full_name: updatedName,
-    department_id: departmentId,
-    employment_type: selectedEmploymentType,
-    capacity_percent: parsedCapacity,
     date_of_birth: birthdayValue,
     current_city: cityValue,
-    emergency_contact_name: emergNameValue,
-    emergency_contact_phone: emergPhoneValue
+    // Derived at write time, stored as its own column — never computed on read.
+    // A legacy off-list city resolves to the default rather than blocking the save.
+    timezone: timezoneForCity(cityValue),
   };
+  if (profilePrivateDetailsFor === targetEmployeeId) {
+    updatePayload.emergency_contact_name = emergNameValue;
+    updatePayload.emergency_contact_phone = emergPhoneValue;
+    updatePayload.personal_address = document.getElementById('profileAddress')?.value?.trim() || null;
+  }
+  if (canEditGuarded) {
+    updatePayload.job_title = document.getElementById('profileJobTitle')?.value?.trim() || null;
+    updatePayload.department_id = departmentId;
+    updatePayload.employment_type = selectedEmploymentType;
+    updatePayload.capacity_percent = parsedCapacity;
+  }
   if (canManageAccessRoles()) {
     updatePayload.access_level = selectedAccessLevel;
     updatePayload.role_title =
@@ -13067,6 +15639,48 @@ async function saveCurrentProfile() {
 function selectedEmployeeRecord() {
   const targetName = state.currentEmployee || state.employeeProfile?.full_name || DEFAULT_EMPLOYEE;
   return ensureEmployeeRecord(targetName);
+}
+
+// <optgroup>ed city options. Returns { html, value, unmatched }:
+//  * value     — what to set the <select> to: the CANONICAL city, so an alias
+//                like "gurgaon" lands on Gurugram instead of looking broken
+//  * unmatched — the stored string when nothing matched it at all
+//
+// An unmatched city is neither guessed at nor silently kept. A <select> coerces
+// to its first option when its value has no match, so doing nothing would
+// relocate people to Ahmedabad the next time they saved their profile — and
+// quietly keeping the old string just hides that we can't place them. Instead
+// the picker sits on an empty prompt and the save is blocked until they choose.
+// Their stored city stays untouched in the DB until they do.
+function cityOptionsHtml(selectedCity) {
+  const current = String(selectedCity || '').trim();
+  const entry = cityEntryFor(current);
+  const groups = [...new Set(CITY_OPTIONS.map((o) => o.group))];
+  const parts = [];
+  if (!entry) parts.push('<option value="">Select your city…</option>');
+  groups.forEach((group) => {
+    const opts = CITY_OPTIONS.filter((o) => o.group === group)
+      .map((o) => `<option value="${escapeHtml(o.city)}">${escapeHtml(o.city)}</option>`)
+      .join('');
+    parts.push(`<optgroup label="${escapeHtml(group)}">${opts}</optgroup>`);
+  });
+  return { html: parts.join(''), value: entry ? entry.city : '', unmatched: current && !entry ? current : '' };
+}
+
+// Show the derived zone next to the picker, so the timezone is never a hidden
+// consequence of a city choice — and ASK rather than assume when the stored
+// value can't be placed.
+function renderCityTimezoneHint(city, unmatched = '') {
+  const hint = document.getElementById('profileCityTzHint');
+  if (!hint) return;
+  const value = String(city || '').trim();
+  if (!value && unmatched) {
+    hint.className = 'status warn';
+    hint.textContent = `We couldn't match your saved city ("${unmatched}") — please pick the closest one.`;
+    return;
+  }
+  hint.className = 'mini-meta';
+  hint.textContent = value ? `Timezone: ${timezoneForCity(value)}` : '';
 }
 
 function renderProfileProjects() {
@@ -13141,6 +15755,26 @@ function renderProfileDailyTasks() {
   });
 }
 
+// Which employee's private details the profile form currently holds; the save
+// writes address/emergency contact only when this matches its target.
+let profilePrivateDetailsFor = null;
+async function fillProfilePrivateDetails(employeeId, isSelf) {
+  profilePrivateDetailsFor = null;
+  const fields = [
+    [profileEmergencyName, 'emergency_contact_name'],
+    [profileEmergencyPhone, 'emergency_contact_phone'],
+    [document.getElementById('profileAddress'), 'personal_address']
+  ];
+  fields.forEach(([el]) => { if (el) el.value = ''; });
+  if (!employeeId || !(isSelf || isLeadershipRole())) return;
+  const details = await loadEmployeePrivateDetails(employeeId);
+  // The person on screen may have changed while this was in flight.
+  const onScreenId = getEmployeeIdByName(state.currentEmployee) || state.currentEmployeeId;
+  if (!details || onScreenId !== employeeId) return;
+  fields.forEach(([el, key]) => { if (el) el.value = details[key] || ''; });
+  profilePrivateDetailsFor = employeeId;
+}
+
 function setSelectedEmployee(name) {
   const previousEmployee = state.currentEmployee;
   const fallbackName = state.employeeProfile?.full_name || DEFAULT_EMPLOYEE;
@@ -13176,20 +15810,22 @@ function setSelectedEmployee(name) {
   if (profileEyebrow) profileEyebrow.textContent = isSelf ? 'Self View' : 'Employee Profile';
   if (profileMainHeading) profileMainHeading.textContent = isSelf ? 'My Profile' : displayPersonName(state.currentEmployee, 'Employee');
   if (profileMetaLine) {
-    const typeLabel = profile.employmentType === 'fractional' ? 'Fractional' : 'Full-time';
+    const typeLabel = employmentTypeLabel(profile.employmentType);
     const leaveLabel = profile.leaveTrackingEnabled === false ? 'Leave Excluded' : 'Leave Enabled';
     const cityValue = selectedDirectoryEmployee?.current_city || '';
     const cityPill = cityValue ? `<span class="dot">&middot;</span><span class="profile-location-pill">📍 ${escapeHtml(cityValue)}</span>` : '';
-    profileMetaLine.innerHTML = `<span>${escapeHtml(profile.team)}</span><span class="dot">&middot;</span><span>${escapeHtml(typeLabel)}</span><span class="dot">&middot;</span><span>${escapeHtml(leaveLabel)}</span>${cityPill}`;
+    const titleLead = selectedDirectoryEmployee?.job_title ? `<span>${escapeHtml(selectedDirectoryEmployee.job_title)}</span><span class="dot">&middot;</span>` : '';
+    profileMetaLine.innerHTML = `${titleLead}<span>${escapeHtml(profile.team)}</span><span class="dot">&middot;</span><span>${escapeHtml(typeLabel)}</span><span class="dot">&middot;</span><span>${escapeHtml(leaveLabel)}</span>${cityPill}`;
   }
   refreshProfileUtilizationSummary();
 
   if (profileTeamSelect) {
-    if (![...profileTeamSelect.options].some((opt) => opt.value === profile.team)) {
-      profileTeamSelect.value = TEAM_AM;
-    } else {
-      profileTeamSelect.value = profile.team;
-    }
+    // The stored department name, not profile.team — the latter is normalized
+    // for display ('Leadership' reads as AM), which is fine on a directory row
+    // and wrong in an editor that writes what it shows.
+    const storedTeam = selectedDirectoryEmployee?.department?.name || profile.team || '';
+    renderTeamSelectOptions(storedTeam);
+    if (storedTeam) profileTeamSelect.value = storedTeam;
   }
   if (profileEmploymentType) profileEmploymentType.value = profile.employmentType;
   if (profileAccessLevel) {
@@ -13229,13 +15865,23 @@ function setSelectedEmployee(name) {
     profileBirthday.value = selectedDirectoryEmployee?.date_of_birth || '';
   }
   if (profileCity) {
-    profileCity.value = selectedDirectoryEmployee?.current_city || '';
+    const cityOpts = cityOptionsHtml(selectedDirectoryEmployee?.current_city);
+    profileCity.innerHTML = cityOpts.html;
+    profileCity.value = cityOpts.value;
+    renderCityTimezoneHint(cityOpts.value, cityOpts.unmatched);
   }
-  if (profileEmergencyName) {
-    profileEmergencyName.value = selectedDirectoryEmployee?.emergency_contact_name || '';
-  }
-  if (profileEmergencyPhone) {
-    profileEmergencyPhone.value = selectedDirectoryEmployee?.emergency_contact_phone || '';
+  // Address (seeded from the hire since 15 Sep 2026) and emergency contact are
+  // not in the directory row: they load per person from
+  // employee_private_details, which answers only for yourself or for
+  // leadership. Until they arrive the save leaves them out (see saveProfile),
+  // so a quick save can never blank them. Before 21 Sep these boxes were
+  // filled from the directory, which never carried the emergency contact, so
+  // every profile save wrote it back as empty.
+  fillProfilePrivateDetails(selectedEmployeeId || state.currentEmployeeId, isSelf);
+  const profileJobTitleEl = document.getElementById('profileJobTitle');
+  if (profileJobTitleEl) {
+    profileJobTitleEl.value = selectedDirectoryEmployee?.job_title || '';
+    profileJobTitleEl.readOnly = !isLeadershipRole();
   }
   if (saveProfileBtn) {
     const canSave = state.isAuthenticated && canEditEmployee(selectedDirectoryEmployee || { id: selectedEmployeeId, email: state.session?.user?.email });
@@ -13316,7 +15962,7 @@ async function loadProfileLeaveSummary(employeeId) {
 
 function applyFractionalVisibility() {
   const profile = selectedEmployeeRecord();
-  const isFractional = profile.employmentType === 'fractional';
+  const isFractional = employmentIsScoped(profile.employmentType);
   const leaveTrackingDisabled = profile.leaveTrackingEnabled === false;
   const employeeOnlyMode = state.role === 'employee';
 
@@ -13497,6 +16143,26 @@ function applyDealFlowVisibility() {
   if (dealScreen) dealScreen.classList.toggle('hidden', !canView);
 }
 
+// Briefs are GA-team-only (29 Jul 2026): reviewers + leadership always;
+// other employees only if they are allocated to the brief's client (12 Sep
+// 2026) or have a deliverable assigned (checked via an RLS-scoped head-count —
+// RLS is the boundary, this just hides the tab).
+function applyBriefsVisibility() {
+  if (isPartnerRole()) return; // partner branch owns partner nav
+  const briefsNav = document.getElementById('briefsNavButton');
+  const briefsScreen = document.getElementById('briefs-pipeline');
+  const show = (visible) => {
+    if (briefsNav) briefsNav.classList.toggle('hidden', !visible);
+    if (briefsScreen) briefsScreen.classList.toggle('hidden', !visible);
+  };
+  if (isBriefReviewer()) { show(true); return; }
+  show(false);
+  if (!state.supabase || !state.currentEmployeeId) return;
+  state.supabase.from('briefs').select('id', { count: 'exact', head: true })
+    .then(({ count, error }) => { if (!error && (count || 0) > 0) show(true); })
+    .catch(() => {});
+}
+
 // Invoice Center password gate — one unlock per session
 const INVOICE_PIN_HASH = 'aa645668ba1018e0a7fe1d84993cb3be3f9d01e0ee4ed959b6bc97845e340439';
 let invoiceUnlocked = false;
@@ -13509,7 +16175,7 @@ async function hashPin(pin) {
 
 async function checkInvoiceAccess() {
   if (invoiceUnlocked) return true;
-  const pin = await colonyPrompt('Enter the Invoice Center PIN to continue.', {
+  const pin = await appPrompt('Enter the Invoice Center PIN to continue.', {
     title: 'Invoice Center',
     type: 'password',
     placeholder: 'PIN',
@@ -13521,7 +16187,7 @@ async function checkInvoiceAccess() {
     invoiceUnlocked = true;
     return true;
   }
-  await colonyAlert('Incorrect PIN.', { title: 'Invoice Center' });
+  await appAlert('Incorrect PIN.', { title: 'Invoice Center' });
   return false;
 }
 
@@ -13796,7 +16462,7 @@ async function downloadInvoice(filePath) {
 }
 
 async function deleteInvoice(invoiceId, filePath) {
-  if (!await colonyConfirm('Delete this invoice? This cannot be undone.', { title: 'Delete invoice', confirmLabel: 'Delete', danger: true })) return;
+  if (!await appConfirm('Delete this invoice? This cannot be undone.', { title: 'Delete invoice', confirmLabel: 'Delete', danger: true })) return;
 
   const { error: storageErr } = await state.supabase.storage
     .from('invoices')
@@ -14023,7 +16689,7 @@ function renderDealStats() {
 }
 
 // ── POC filter ──
-const DEAL_POC_EMAILS = ['admin@youragency.com']; // POCs reassigned to the superadmin only (14 Jun)
+const DEAL_POC_EMAILS = ['admin@youragency.com']; // POCs reassigned to Alex only (14 Jun)
 
 function getDealPocEmployees() {
   return state.employeeDirectory.filter(e => DEAL_POC_EMAILS.includes(normalizeEmail(e.email)));
@@ -14126,10 +16792,6 @@ function renderDealBoard(deals) {
 }
 
 function renderDealCard(deal) {
-  const poc = lookupEmployee(deal.poc_employee_id);
-  const pocLabel = poc ? escapeHtml(poc.full_name.split(' ')[0]) : '';
-  const initials = poc ? poc.full_name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) : '';
-  const nextStep = deal.next_steps ? escapeHtml(deal.next_steps).slice(0, 60) : '';
   const deadlineClass = getDealDeadlineClass(deal.deadline);
   const deadlineLabel = deal.deadline ? formatDealDate(deal.deadline) : '';
   const engBadge = deal.engagement_type ? `<span class="deal-badge deal-badge-${deal.engagement_type.toLowerCase()}">${escapeHtml(deal.engagement_type)}</span>` : '';
@@ -14137,24 +16799,25 @@ function renderDealCard(deal) {
   return `<div class="deal-card" draggable="true" data-deal-id="${deal.id}">
     <div class="deal-card-top">
       <span class="deal-card-name">${escapeHtml(deal.deal_name)}</span>
-      ${engBadge}
     </div>
-    ${nextStep ? `<div class="deal-card-next">${nextStep}</div>` : ''}
     <div class="deal-card-bottom">
-      <span class="deal-card-poc" title="${poc ? escapeHtml(poc.full_name) : ''}">${initials}</span>
+      ${engBadge || '<span></span>'}
       ${deadlineLabel ? `<span class="deal-card-deadline ${deadlineClass}">${deadlineLabel}</span>` : ''}
     </div>
   </div>`;
 }
 
+// "Due soon" counts WORKING days, not calendar days (24 Aug 2026):
+// a deadline five days out over a long weekend is far closer than it looks,
+// and the old calendar count let weekends and holidays eat the warning window.
+const DEAL_DUE_SOON_WORKING_DAYS = 5;
+
 function getDealDeadlineClass(deadline) {
   if (!deadline) return '';
-  const now = new Date();
-  const d = new Date(deadline + 'T00:00:00');
-  const todayStr = now.toISOString().slice(0, 10);
+  const todayStr = toISODateLocal();
   if (deadline < todayStr) return 'deal-overdue';
-  const diff = (d - now) / (1000 * 60 * 60 * 24);
-  if (diff <= 7) return 'deal-due-soon';
+  const left = workingDaysBetween(todayStr, deadline, holidayDates());
+  if (left !== null && left <= DEAL_DUE_SOON_WORKING_DAYS) return 'deal-due-soon';
   return '';
 }
 
@@ -14208,7 +16871,7 @@ async function updateDealStage(dealId, newStage) {
   // If moving to a closing stage, confirm
   if (newStage === 'contracted' || newStage === 'closedlost' || newStage === 'stalled') {
     const label = DEAL_STAGE_LABEL[newStage];
-    if (!await colonyConfirm(`Move "${deal.deal_name}" to ${label}?`)) return;
+    if (!await appConfirm(`Move "${deal.deal_name}" to ${label}?`)) return;
   }
 
   const { error } = await state.supabase
@@ -14252,7 +16915,7 @@ async function updateDealStage(dealId, newStage) {
 }
 
 async function offerClientLinking(deal) {
-  const action = await colonyChoice(`"${deal.deal_name}" is now Closed Won! Add it to the client registry?`, {
+  const action = await appChoice(`"${deal.deal_name}" is now Closed Won! Add it to the client registry?`, {
     title: 'Deal won 🎉',
     choices: [
       { label: 'Create a new client entry', value: 'new', variant: 'primary' },
@@ -14275,18 +16938,18 @@ async function createClientFromDeal(deal) {
     .single();
   if (error) {
     console.error('Failed to create client:', error.message);
-    await colonyAlert('Failed to create client: ' + error.message, { title: 'Deal Flow' });
+    await appAlert('Failed to create client: ' + error.message, { title: 'Deal Flow' });
     return;
   }
   const linkRes = await state.supabase.from('deals').update({ client_id: data.id }).eq('id', deal.id);
-  if (linkRes.error) { await colonyAlert('Client created but failed to link deal: ' + linkRes.error.message, { title: 'Deal Flow' }); }
-  else { await colonyAlert(`Client "${deal.deal_name}" created and linked!`, { title: 'Deal Flow' }); }
+  if (linkRes.error) { await appAlert('Client created but failed to link deal: ' + linkRes.error.message, { title: 'Deal Flow' }); }
+  else { await appAlert(`Client "${deal.deal_name}" created and linked!`, { title: 'Deal Flow' }); }
   await loadDealsFromSupabase();
 }
 
 async function linkDealToExistingClient(deal) {
   const activeClients = state.clients.filter(c => c.is_active);
-  const chosenId = await colonyChoice('Choose the client to link this deal to:', {
+  const chosenId = await appChoice('Choose the client to link this deal to:', {
     title: 'Link deal to client',
     choices: activeClients.map(c => ({ label: c.name, value: c.id }))
   });
@@ -14294,8 +16957,8 @@ async function linkDealToExistingClient(deal) {
   const match = activeClients.find(c => c.id === chosenId);
   if (!match) return;
   const linkRes2 = await state.supabase.from('deals').update({ client_id: match.id }).eq('id', deal.id);
-  if (linkRes2.error) { await colonyAlert('Failed to link deal: ' + linkRes2.error.message, { title: 'Deal Flow' }); }
-  else { await colonyAlert(`Deal linked to "${match.name}"!`, { title: 'Deal Flow' }); }
+  if (linkRes2.error) { await appAlert('Failed to link deal: ' + linkRes2.error.message, { title: 'Deal Flow' }); }
+  else { await appAlert(`Deal linked to "${match.name}"!`, { title: 'Deal Flow' }); }
   await loadDealsFromSupabase();
 }
 
@@ -14483,7 +17146,6 @@ function openDealDetail(dealId) {
           <select class="deal-field" data-field="company"${readonlyAttr}>
             <option value="Your Agency"${(deal.company || 'Your Agency') === 'Your Agency' ? ' selected' : ''}>Your Agency</option>
             <option value="Varta"${deal.company === 'Varta' ? ' selected' : ''}>Varta</option>
-            <option value="Sample Client"${deal.company === 'Sample Client' ? ' selected' : ''}>Sample Client</option>
           </select>
         </div>
       </div>
@@ -14584,7 +17246,7 @@ async function saveDealFromPanel() {
 
   // Contracted deals MUST have a linked client — offer to create one
   if (updates.stage === 'contracted' && !updates.client_id) {
-    const create = await colonyConfirm(`No linked client. Create "${deal.deal_name}" as a new client?`);
+    const create = await appConfirm(`No linked client. Create "${deal.deal_name}" as a new client?`);
     if (!create) return;
     const ownerId = deal.poc_employee_id || state.currentEmployeeId || null;
     const { data: newClient, error: clientErr } = await state.supabase
@@ -14592,7 +17254,7 @@ async function saveDealFromPanel() {
       .insert({ name: deal.deal_name, account_owner_employee_id: ownerId, is_active: true })
       .select().single();
     if (clientErr) {
-      colonyAlert('Failed to create client: ' + clientErr.message);
+      appAlert('Failed to create client: ' + clientErr.message);
       return;
     }
     // Create default project so team can allocate to this client
@@ -14611,7 +17273,7 @@ async function saveDealFromPanel() {
   const { error } = await state.supabase.from('deals').update(updates).eq('id', dealId);
   if (error) {
     console.error('Deal save failed:', error.message);
-    colonyAlert('Save failed: ' + error.message);
+    appAlert('Save failed: ' + error.message);
     return;
   }
 
@@ -14647,7 +17309,15 @@ async function saveDealFromPanel() {
 // ── New deal ──
 function openNewDealForm() {
   if (!dealDetailPanel || !dealDetailInner) return;
-  const pocOptions = '<option value="">—</option>' + getDealPocEmployees().map(e => `<option value="${e.id}">${escapeHtml(e.full_name)}</option>`).join('');
+  // The POC is always Alex (DEAL_POC_EMAILS has exactly one entry), so the
+  // blank default made every new deal ask a question with one possible answer
+  // (9 Sep 2026). First eligible POC is preselected; the "—" option only
+  // survives when there is nobody to preselect, so a deal cannot silently be
+  // created with no owner. If a second POC is ever added the first is still the
+  // default and the dropdown becomes a real choice again.
+  const pocEmployees = getDealPocEmployees();
+  const pocOptions = (pocEmployees.length ? '' : '<option value="">—</option>')
+    + pocEmployees.map((e, i) => `<option value="${e.id}"${i === 0 ? ' selected' : ''}>${escapeHtml(e.full_name)}</option>`).join('');
 
   dealDetailInner.innerHTML = `
     <div class="deal-detail-header">
@@ -14725,7 +17395,7 @@ function openNewDealForm() {
 
 async function createNewDeal() {
   const name = document.getElementById('newDealName')?.value.trim();
-  if (!name) { colonyAlert('Deal name is required.'); return; }
+  if (!name) { appAlert('Deal name is required.'); return; }
 
   const stage = document.getElementById('newDealStage')?.value || 'qualified';
   const poc = document.getElementById('newDealPoc')?.value || null;
@@ -14758,7 +17428,7 @@ async function createNewDeal() {
 
     if (error) {
       console.error('Create deal failed:', error.message);
-      colonyAlert('Failed to create deal: ' + error.message);
+      appAlert('Failed to create deal: ' + error.message);
       return;
     }
 
@@ -14774,13 +17444,13 @@ async function createNewDeal() {
     await loadDealsFromSupabase();
   } catch (err) {
     console.error('Create deal error:', err);
-    colonyAlert('Failed to create deal: ' + err.message);
+    appAlert('Failed to create deal: ' + err.message);
   }
 }
 
 // ── Delete deal ──
 async function deleteDeal(dealId) {
-  if (!await colonyConfirm('Delete this deal permanently?', { title: 'Delete deal', confirmLabel: 'Delete', danger: true })) return;
+  if (!await appConfirm('Delete this deal permanently?', { title: 'Delete deal', confirmLabel: 'Delete', danger: true })) return;
   const { error } = await state.supabase.from('deals').delete().eq('id', dealId);
   if (error) {
     console.error('Delete failed:', error.message);
@@ -14792,7 +17462,7 @@ async function deleteDeal(dealId) {
 
 // ── Revive cold deal ──
 async function reviveDeal(dealId) {
-  const stage = await colonyChoice('Which stage should this deal move to?', {
+  const stage = await appChoice('Which stage should this deal move to?', {
     title: 'Revive deal',
     choices: DEAL_OPEN_STAGES.map(s => ({ label: DEAL_STAGE_LABEL[s] || s, value: s }))
   });
@@ -15000,7 +17670,13 @@ async function loadExecutiveDashboard() {
       .limit(2000)
   ]);
 
-  const activeEmployees = state.employeeDirectory.filter(e => e.is_active && !getHiddenEmployeeEmails().includes(normalizeEmail(e.email)));
+  // Agency-level view: exclude client-scoped people. They aren't reassignable
+  // bandwidth, so counting them as heads dragged AVG UTILIZATION down and
+  // inflated "available" with capacity nobody can actually draw on.
+  const activeEmployees = state.employeeDirectory.filter(e =>
+    e.is_active
+    && !getHiddenEmployeeEmails().includes(normalizeEmail(e.email))
+    && !isCapacityExcluded(e));
   const allocations = allocResult.data || [];
   const leaveRows = leaveResult.data || [];
   const todayTasks = tasksResult.data || [];
@@ -15494,6 +18170,7 @@ document.getElementById('savePolicyBtn')?.addEventListener('click', async () => 
   noticeEl.textContent = `Saved as version ${newVersion}.`;
   noticeEl.className = 'mini-meta';
   await loadPolicyDocuments();
+  mirrorPolicyToDrive(doc.policy_key, noticeEl).catch(console.error);
 });
 
 document.getElementById('cancelPolicyBtn')?.addEventListener('click', () => {
@@ -15595,6 +18272,9 @@ async function loadPolicyPage() {
   // Show edit button for admin and leadership
   const isAdmin = state.accessLevel === 'admin' || isLeadershipRole();
   if (editBtn) editBtn.style.display = isAdmin ? '' : 'none';
+  const driveBtn = document.getElementById('policyDriveSyncBtn');
+  if (driveBtn) driveBtn.style.display = isAdmin && state.runtimeConfig?.driveMirror ? '' : 'none';
+  if (isAdmin) showPolicyDriveLink(doc.policy_key).catch(() => {});
 
   // Show version history for admin
   if (historyWrap) {
@@ -15602,6 +18282,31 @@ async function loadPolicyPage() {
     if (isAdmin) loadPolicyVersionHistory(doc.id);
   }
 }
+
+// The Drive copy's link, from the mirror table (leadership can read it).
+async function showPolicyDriveLink(policyKey) {
+  const link = document.getElementById('policyDriveLink');
+  if (!link || !state.supabase) return;
+  const { data } = await state.supabase.from('drive_mirror').select('web_view_link').eq('key', `policy:${policyKey}`).maybeSingle();
+  link.href = data?.web_view_link || '#';
+  link.style.display = data?.web_view_link ? '' : 'none';
+}
+
+// Push the page to Drive. After every save, and on demand from the button.
+async function mirrorPolicyToDrive(policyKey, noticeEl) {
+  if (!state.runtimeConfig?.driveMirror || !state.session?.access_token) return;
+  if (noticeEl) noticeEl.textContent = 'Copying to Drive…';
+  let out = {}; let ok = false;
+  try {
+    const res = await fetch('/api/drive-mirror', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session.access_token}` }, body: JSON.stringify({ kind: 'policy', policyKey }) });
+    out = await res.json().catch(() => ({})); ok = res.ok;
+  } catch (e) { out = { error: e.message }; }
+  if (noticeEl) noticeEl.textContent = ok ? '✓ Copied to Drive.' : `Saved in Colony, but the Drive copy failed: ${out.error || 'unknown error'}`;
+  await showPolicyDriveLink(policyKey);
+}
+document.getElementById('policyDriveSyncBtn')?.addEventListener('click', () => {
+  if (_policyPageDoc) mirrorPolicyToDrive(_policyPageDoc.policy_key, document.getElementById('policyPageUpdated')).catch(console.error);
+});
 
 async function loadPolicyVersionHistory(policyDocId) {
   const listEl = document.getElementById('policyVersionList');
@@ -15722,6 +18427,7 @@ async function savePolicyAsNewVersion() {
   exitPolicyEditMode();
   loadPolicyPage();
   notice.textContent = '';
+  mirrorPolicyToDrive(_policyPageDoc.policy_key, document.getElementById('policyPageUpdated')).catch(console.error);
 }
 
 document.getElementById('policyEditBtn')?.addEventListener('click', enterPolicyEditMode);
@@ -15814,12 +18520,15 @@ function populateOnboardingProfileForm() {
     });
   }
 
-  // Department dropdown
+  // Team dropdown — the delivery teams only (ONBOARDING_DEPARTMENTS), not every
+  // department that happens to exist: Leadership, Finance and Strategy are not
+  // self-selectable. Starts on a placeholder so the required-field check can
+  // catch someone who skipped it, rather than silently taking whatever sorted
+  // first.
   const deptSelect = document.getElementById('onbProfileDept');
   if (deptSelect) {
-    deptSelect.innerHTML = '';
-    const deptNames = [...new Set(state.employeeDirectory.map(e => e.department?.name).filter(Boolean))].sort();
-    deptNames.forEach(name => {
+    deptSelect.innerHTML = '<option value="">Select your team</option>';
+    ONBOARDING_DEPARTMENTS.forEach(name => {
       const opt = document.createElement('option');
       opt.value = name;
       opt.textContent = name;
@@ -15827,14 +18536,32 @@ function populateOnboardingProfileForm() {
     });
   }
 
+  const onbCity = document.getElementById('onbProfileCity');
+  const onbCityOpts = cityOptionsHtml(state.employeeProfile?.current_city);
+  if (onbCity) {
+    onbCity.innerHTML = onbCityOpts.html;
+    onbCity.value = onbCityOpts.value; // canonical, or '' when we can't place them
+  }
+
   // Pre-fill from existing profile data
   const profile = state.employeeProfile;
+  if (profile?.full_name) document.getElementById('onbProfileFullName').value = profile.full_name;
   if (profile?.direct_manager_email && managerSelect) managerSelect.value = profile.direct_manager_email;
   if (profile?.department?.name && deptSelect) deptSelect.value = profile.department.name;
-  if (profile?.current_city) document.getElementById('onbProfileCity').value = profile.current_city;
   if (profile?.date_of_birth) document.getElementById('onbProfileBirthday').value = profile.date_of_birth;
   if (profile?.emergency_contact_name) document.getElementById('onbProfileEmergencyName').value = profile.emergency_contact_name;
-  if (profile?.emergency_contact_phone) document.getElementById('onbProfileEmergencyPhone').value = profile.emergency_contact_phone;
+  if (profile?.emergency_contact_phone) {
+    // Stored as "+CC number" — split back into the two fields.
+    const m = String(profile.emergency_contact_phone).match(/^(\+\d{1,4})\s*(.*)$/);
+    const codeEl = document.getElementById('onbProfileEmergencyCode');
+    const numEl = document.getElementById('onbProfileEmergencyNumber');
+    if (m && codeEl && [...codeEl.options].some(o => o.value === m[1])) {
+      codeEl.value = m[1];
+      if (numEl) numEl.value = m[2];
+    } else if (numEl) {
+      numEl.value = profile.emergency_contact_phone;
+    }
+  }
 }
 
 // Step navigation: Welcome -> Profile
@@ -15842,28 +18569,43 @@ document.querySelector('[data-goto="profile"]')?.addEventListener('click', () =>
 
 // Step: Save Profile
 document.getElementById('onbProfileSaveBtn')?.addEventListener('click', async () => {
+  const fullName = document.getElementById('onbProfileFullName')?.value?.trim().replace(/\s+/g, ' ');
   const manager = document.getElementById('onbProfileManager')?.value;
   const dept = document.getElementById('onbProfileDept')?.value;
+  const employmentType = document.getElementById('onbProfileEmploymentType')?.value;
   const city = document.getElementById('onbProfileCity')?.value?.trim();
   const birthday = document.getElementById('onbProfileBirthday')?.value;
   const emergName = document.getElementById('onbProfileEmergencyName')?.value?.trim();
-  const emergPhone = document.getElementById('onbProfileEmergencyPhone')?.value?.trim();
+  const emergCode = document.getElementById('onbProfileEmergencyCode')?.value || '';
+  const emergNumber = (document.getElementById('onbProfileEmergencyNumber')?.value || '').replace(/[\s-]/g, '');
   const errorEl = document.getElementById('onbProfileError');
 
   // Validate mandatory (manager optional for leadership/admin)
   const managerRequired = !isLeadershipRole();
-  if ((managerRequired && !manager) || !dept || !city || !birthday || !emergName || !emergPhone) {
+  if ((managerRequired && !manager) || !fullName || !dept || !employmentType || !city || !birthday || !emergName || !emergNumber) {
     errorEl.textContent = 'Please fill in all required fields.';
     errorEl.style.display = '';
     return;
   }
+  if (fullName.split(' ').length < 2) {
+    errorEl.textContent = 'Please enter your full name — first and last.';
+    errorEl.style.display = '';
+    return;
+  }
+  if (!/^\d{6,14}$/.test(emergNumber)) {
+    errorEl.textContent = 'Emergency contact number should be 6–14 digits (without the country code).';
+    errorEl.style.display = '';
+    return;
+  }
+  const emergPhone = `${emergCode} ${emergNumber}`;
   errorEl.style.display = 'none';
 
-  // Resolve department ID
-  const deptMatch = state.employeeDirectory.find(e => e.department?.name === dept);
-  const deptId = deptMatch?.department?.id;
+  let deptId = null;
+  try {
+    deptId = await resolveDepartmentIdByName(dept, null);
+  } catch (e) { deptId = null; }
   if (!deptId) {
-    errorEl.textContent = 'Could not resolve department. Try another.';
+    errorEl.textContent = 'Could not resolve that team. Try another.';
     errorEl.style.display = '';
     return;
   }
@@ -15872,15 +18614,26 @@ document.getElementById('onbProfileSaveBtn')?.addEventListener('click', async ()
   btn.disabled = true;
   btn.textContent = 'Saving...';
 
-  const { error } = await state.supabase.from('employees').update({
-    direct_manager_email: manager,
-    department_id: deptId,
-    current_city: city,
-    date_of_birth: birthday,
-    emergency_contact_name: emergName,
-    emergency_contact_phone: emergPhone,
-    updated_at: new Date().toISOString()
-  }).eq('id', state.currentEmployeeId);
+  // Goes through submit_onboarding_profile rather than a direct update: team and
+  // employment type are DECLARATIONS awaiting an approver, and the columns
+  // carrying them are guarded against self-writes (a project-based person who
+  // could clear their own setup_pending would fall through to "unscoped" and
+  // see every client). The RPC validates the caller, writes only their own row,
+  // and can only ever SET setup_pending — clearing it is activation's job.
+  // This also fixes the long-standing silent discard of the team choice: the
+  // old direct update wrote department_id, which the self-escalation trigger
+  // reverted, so a new joiner picked a team and nothing happened.
+  const { error } = await state.supabase.rpc('submit_onboarding_profile', {
+    p_full_name: fullName,
+    p_direct_manager_email: manager || null,
+    p_requested_department_id: deptId,
+    p_employment_type: employmentType,
+    p_current_city: city,
+    p_timezone: timezoneForCity(city),
+    p_date_of_birth: birthday,
+    p_emergency_contact_name: emergName,
+    p_emergency_contact_phone: emergPhone
+  });
 
   if (error) {
     errorEl.textContent = `Save failed: ${error.message}`;
@@ -15888,6 +18641,30 @@ document.getElementById('onbProfileSaveBtn')?.addEventListener('click', async ()
     btn.disabled = false;
     btn.textContent = 'Save & Continue';
     return;
+  }
+
+  // Reflect the confirmed name immediately (sidebar, greetings) — the DB is
+  // already updated; without this the old JWT-derived name shows until reload.
+  if (state.employeeProfile) {
+    state.employeeProfile.full_name = fullName;
+    upsertEmployeeInStore(state.employeeProfile);
+    updateSidebarIdentityLabels();
+  }
+
+  // Ping the approvers. Best-effort on purpose: the durable record is
+  // setup_pending, which the Awaiting Setup panel and the bell both compute
+  // from, so a failed email delays a nudge — it never loses the work.
+  try {
+    const token = state.session?.access_token;
+    if (token) {
+      await fetch('/.netlify/functions/setup-approval-notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: '{}'
+      });
+    }
+  } catch (notifyError) {
+    console.warn('Setup approval notify failed:', notifyError);
   }
 
   // Auto-check the "Profile completed" item on the onboarding checklist
@@ -15926,6 +18703,27 @@ document.getElementById('onbPolicyRemoteGotIt')?.addEventListener('click', async
 
 // Step: Enter Colony
 document.getElementById('onbDoneBtn')?.addEventListener('click', async () => {
+  // Belt-and-braces: Ruby finished onboarding with a single-word name and no
+  // emergency contact (5 Aug) — whatever path let that happen, completing
+  // onboarding must be impossible with an incomplete profile. Re-read the DB
+  // row (not local state) and bounce back to the profile step if gaps remain.
+  const [{ data: freshProfile }, privateDetails] = await Promise.all([
+    state.supabase
+      .from('employees')
+      .select('full_name, date_of_birth, current_city')
+      .eq('id', state.currentEmployeeId)
+      .single(),
+    loadEmployeePrivateDetails(state.currentEmployeeId)
+  ]);
+  const p = { ...(freshProfile || {}), ...(privateDetails || {}) };
+  const nameOk = String(p.full_name || '').trim().split(/\s+/).length >= 2;
+  if (!nameOk || !p.date_of_birth || !p.current_city || !p.emergency_contact_name || !p.emergency_contact_phone) {
+    appAlert('A few profile details are missing — one more look before you enter Colony.');
+    if (state.employeeProfile) Object.assign(state.employeeProfile, p);
+    showOnboardingStep('profile');
+    return;
+  }
+
   // Mark onboarding_completed
   const onbResult = await state.supabase.from('employees').update({
     onboarding_completed: true,
@@ -15934,7 +18732,7 @@ document.getElementById('onbDoneBtn')?.addEventListener('click', async () => {
 
   if (onbResult.error) {
     console.error('Failed to mark onboarding complete:', onbResult.error);
-    colonyAlert('Unable to save your onboarding status. Please try again or contact your manager.');
+    appAlert('Unable to save your onboarding status. Please try again or contact your manager.');
     return;
   }
 
@@ -16017,11 +18815,20 @@ async function loadOnboardingBadge() {
   if (!state.supabase || !isLeadershipRole()) return;
   const { data, error } = await state.supabase
     .from('onboarding_checklists')
-    .select('id')
+    .select('id, employee_id')
     .eq('status', 'active');
 
   if (error) { console.error('Onboarding badge load error:', error); return; }
   const count = data?.length || 0;
+
+  // Same signal, per person: the sidebar dot says "someone is mid-onboarding",
+  // the directory dot says who (24 Aug 2026). Without it the sidebar dot
+  // was unattributable — it looked wrong when nobody in the list was marked.
+  const ids = new Set((data || []).map((r) => r.employee_id).filter(Boolean));
+  const changed = ids.size !== (state.onboardingEmployeeIds?.size || 0)
+    || [...ids].some((id) => !state.onboardingEmployeeIds?.has(id));
+  state.onboardingEmployeeIds = ids;
+  if (changed && typeof renderPeopleDirectory === 'function') renderPeopleDirectory();
 
   // Update sidebar badge
   const navBtn = document.querySelector('[data-screen="people-directory"]');
@@ -16231,16 +19038,2479 @@ resetClientEditor();
 setClientFormNotice('');
 initializeScreenHistory();
 
-// Set footer version from git tag (version.js sets COLONY_VERSION at build time)
+// Set footer version from git tag (version.js sets APP_VERSION at build time)
 (function setFooterVersion() {
   const el = document.getElementById('footerVersion');
-  if (el) el.textContent = 'Colony ' + (window.COLONY_VERSION || 'dev') + ' \u00A9 2026';
+  if (el) el.textContent = productName(location.hostname) + ' ' + (window.APP_VERSION || 'dev') + ' \u00A9 2026';
 })();
 
 // Load changelog for home feed
-fetch('changelog.json').then(r => r.json()).then(data => { COLONY_UPDATES = data; }).catch(() => {});
+fetch('changelog.json').then(r => r.json()).then(data => { APP_UPDATES = data; }).catch(() => {});
+
+// ── Deploy watcher ──
+// Colony is an SPA with hash routing: a tab can live for DAYS without a real
+// page load, running code from whenever it was opened — Alex was told a fix
+// had shipped and couldn't see it. Worse, version.js itself is cached
+// immutable for a year on an unversioned URL, so even checking
+// window.APP_VERSION lies. The ?cb= query makes each poll a unique URL,
+// bypassing both browser and CDN caches (same trick the deploy-verify curl
+// uses). On version change: a small refresh bar, never a forced reload —
+// someone may be mid-edit in a form.
+(function watchForNewDeploys() {
+  const current = window.APP_VERSION;
+  if (!current || current === 'dev') return;
+  const check = async () => {
+    try {
+      const txt = await (await fetch(`version.js?cb=${Date.now()}`, { cache: 'no-store' })).text();
+      const m = txt.match(/'([^']+)'/);
+      if (m && m[1] !== current && !document.getElementById('deployRefreshBar')) {
+        const bar = document.createElement('div');
+        bar.id = 'deployRefreshBar';
+        bar.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:9999;background:var(--text,#333);color:var(--bg,#fff);padding:10px 18px;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,0.25);display:flex;gap:12px;align-items:center;font-size:14px;';
+        // Fires on whichever host the viewer is on, so this said "Colony has
+        // been updated" to clients after every deploy.
+        bar.innerHTML = `<span>${escapeHtml(productName(location.hostname))} has been updated.</span><button type="button" style="all:unset;cursor:pointer;font-weight:700;text-decoration:underline;">Refresh</button>`;
+        bar.querySelector('button').addEventListener('click', () => location.reload());
+        document.body.appendChild(bar);
+      }
+    } catch (e) { /* offline etc — try again next tick */ }
+  };
+  setInterval(check, 5 * 60 * 1000);
+  setTimeout(check, 20 * 1000); // catch a deploy that landed while loading
+})();
 
 initializeSupabaseAuth().catch((error) => {
   console.error(error);
   setLoginStatus(`Supabase initialization failed: ${error.message}`, 'status error');
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Brief pipeline (the client Brief Tracking) — partner surface + internal board
+// ══════════════════════════════════════════════════════════════════
+
+let briefsCache = [];
+let briefDeliverablesCache = [];
+let briefPartnersById = {};
+// One SLA, not two (24 Aug 2026): the internal and client turnaround are
+// the same number. Splitting a deliverable between writer and designer is the
+// creative team's business, not the tracker's — so app.deliverable_sla and its
+// per-discipline rows are gone, and everything reads app.client_sla.
+let activeBriefId = null;
+let briefEditingId = null;
+
+function briefById(id) { return briefsCache.find(b => b.id === id) || null; }
+
+// Fire-and-forget email per the Section 7 notification matrix. Server decides
+// recipients; failures only warn — the state change already happened.
+function notifyBriefEvent(briefEvent, briefId, extra = {}) {
+  const token = state.session?.access_token;
+  if (!token || !briefId) return;
+  fetch('/.netlify/functions/brief-notify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ event: briefEvent, briefId, ...extra })
+  }).catch((err) => console.warn('Brief notify failed:', err));
+}
+function briefDeliverablesFor(briefId) { return briefDeliverablesCache.filter(d => d.brief_id === briefId); }
+
+// Accepts a brief row OR a bare status string — history rows and deliverables
+// pass the latter, and those are never paused.
+function briefStatusChip(input) {
+  const brief = (input && typeof input === 'object') ? input : null;
+  const status = brief ? brief.status : input;
+  if (brief && isBriefPaused(brief)) {
+    return `<span class="brief-status-chip st-on_pause" title="${escapeHtml(briefPauseDetail(brief))}">On pause</span>`;
+  }
+  const label = BRIEF_STATUS_LABEL[status] || status;
+  return `<span class="brief-status-chip st-${escapeHtml(status)}">${escapeHtml(label)}</span>`;
+}
+
+function briefDateLabel(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+}
+
+function briefSubmitterName(brief) {
+  if (brief.submitted_by_partner_id) {
+    return briefPartnersById[brief.submitted_by_partner_id]?.full_name || 'Partner';
+  }
+  if (brief.submitted_by_employee_id) return getEmployeeNameById(brief.submitted_by_employee_id);
+  return '';
+}
+
+async function loadBriefsData() {
+  if (!state.supabase) return;
+  const [briefsRes, delivRes, partnersRes] = await Promise.all([
+    state.supabase.from('briefs').select('*').order('created_at', { ascending: false }),
+    state.supabase.from('brief_deliverables').select('*').order('created_at', { ascending: true }),
+    state.supabase.from('partners').select('id, full_name, email, org, partner_role')
+  ]);
+  if (briefsRes.error) throw briefsRes.error;
+  briefsCache = briefsRes.data || [];
+  briefDeliverablesCache = delivRes.data || [];
+  briefPartnersById = {};
+  (partnersRes.data || []).forEach(p => { briefPartnersById[p.id] = p; });
+}
+
+// ── Partner surface ──────────────────────────────────────────────
+
+// Client-facing SLA (app.client_sla) and the holiday calendar, both readable by
+// partners since 24 Aug 2026. the client is quoted turnaround in WORKING days, so they
+// cannot check a date without knowing which days Your Agency is closed.
+// Keyed org → deliverable_type → row. The SLA is per client since 17 Sep
+// 2026: a partner's RLS returns only their org, employees get every org, so
+// always look up by the org of the brief (or the partner) in hand.
+let clientSlaByOrg = {};
+let holidayCache = [];
+
+function slaForOrg(org) {
+  return clientSlaByOrg[org] || {};
+}
+
+async function loadSlaAndHolidays() {
+  if (!state.supabase) return;
+  const [slaRes, holRes] = await Promise.all([
+    state.supabase.from('client_sla').select('*'),
+    state.supabase.from('public_holidays').select('holiday_date, name').order('holiday_date')
+  ]);
+  clientSlaByOrg = {};
+  (slaRes.data || []).forEach((r) => {
+    (clientSlaByOrg[r.org] = clientSlaByOrg[r.org] || {})[r.deliverable_type] = r;
+  });
+  holidayCache = (holRes.data || []).map((r) => ({ date: r.holiday_date, name: r.name }));
+}
+
+// Safe to call before the holiday fetch lands: an empty list simply means
+// weekends are still skipped and holidays are not yet known.
+function holidayDates() { return (holidayCache || []).map((h) => h.date); }
+
+// IST is the agency clock the SLA's 2 PM cut-off is written against, so ask for
+// the hour in IST rather than the viewer's zone — the client sits in five timezones.
+function currentIstHour() {
+  return Number(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false
+  }).format(new Date()));
+}
+
+function renderPartnerHolidayNote() {
+  const el = document.getElementById('partnerHolidayNote');
+  if (!el) return;
+  const next = nextHoliday(toISODateLocal(), holidayCache);
+  if (!next) { el.classList.add('hidden'); return; }
+  const d = new Date(next.date + 'T00:00:00Z');
+  const label = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+  el.classList.remove('hidden');
+  el.innerHTML = `Your Agency's next public holiday is <strong>${escapeHtml(label)}</strong> (${escapeHtml(next.name)}).`;
+}
+
+// Sign-in awaits this before dismissing the splash, then opens partner-home —
+// and activating that screen calls it again, so every client sign-in fetched
+// briefs, deliverables, partners, SLA and holidays twice (~1.3s, measured 17
+// Sep 2026). A call made while one is running, or within 2s of one finishing,
+// reuses it; navigating back later still refreshes.
+let partnerDataLoad = null;
+let partnerDataLoadedAt = 0;
+function loadPartnerData() {
+  if (partnerDataLoad) return partnerDataLoad;
+  if (Date.now() - partnerDataLoadedAt < 2000) {
+    renderPartnerHome();
+    renderPartnerHolidayNote();
+    return Promise.resolve();
+  }
+  partnerDataLoad = (async () => {
+    try {
+      await Promise.all([loadBriefsData(), loadSlaAndHolidays()]);
+      partnerDataLoadedAt = Date.now();
+      renderPartnerHome();
+      renderPartnerHolidayNote();
+    } finally {
+      partnerDataLoad = null;
+    }
+  })();
+  return partnerDataLoad;
+}
+
+function renderPartnerHome() {
+  applyStaffOnCircleReadOnly();
+  const list = document.getElementById('partnerBriefList');
+  const empty = document.getElementById('partnerBriefEmpty');
+  const greeting = document.getElementById('partnerGreeting');
+  if (!list || !empty) return;
+  if (greeting && state.partnerProfile) {
+    greeting.textContent = `${displayPersonName(state.partnerProfile.full_name, 'Partner')} — ${state.partnerProfile.org}`;
+  }
+  const rows = [...briefsCache].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  empty.classList.toggle('hidden', rows.length > 0);
+  // Attention strip: briefs bounced back for more info, and fresh deliveries.
+  // Everyone in the org now SEES every request, so the attention strip has to
+  // separate "yours to act on" from "your team's, for information". Telling
+  // someone to edit and resubmit a brief they cannot write to would be an
+  // instruction they can only fail (Mira Holt's visibility ask, 10 Sep 2026).
+  const isMine = (b) => b.submitted_by_partner_id === state.partnerProfile?.id;
+  const isCoordinator = state.partnerProfile?.partner_role === 'coordinator';
+  const canActOn = (b) => isMine(b) || isCoordinator;
+  const needsInfo = rows.filter(b => b.status === 'pending_info' && canActOn(b));
+  const delivered = rows.filter(b => b.status === 'delivered');
+  const awaitingApproval = isCoordinator
+    ? rows.filter(b => b.status === 'submitted' && b.request_type === 'brief')
+    : [];
+  const attention = [
+    ...awaitingApproval.map(b => `<div class="brief-quick-card" data-open-brief="${b.id}">
+      <span style="flex:1;">📨 “${escapeHtml(b.title)}” is waiting for your approval to go to Your Agency</span>
+    </div>`),
+    ...needsInfo.map(b => `<div class="brief-quick-card" data-open-brief="${b.id}">
+      <span style="flex:1;">⚠️ The Your Agency team needs more info on “${escapeHtml(b.title)}” — open it to edit &amp; resubmit</span>
+    </div>`),
+    ...delivered.map(b => `<div class="brief-quick-card" data-open-brief="${b.id}" style="background:rgba(80,170,110,0.12);">
+      <span style="flex:1;">✅ “${escapeHtml(b.title)}” has been delivered — open to download</span>
+    </div>`)
+  ].join('');
+  list.innerHTML = (attention ? `<div class="brief-quick-lane">${attention}</div>` : '') + rows.map(b => {
+    const typeBadge = b.request_type === 'notify_only'
+      ? '<span class="brief-status-chip">Quick note</span>' : '';
+    const deliv = briefDeliverablesFor(b.id);
+    const done = deliv.filter(d => d.status === 'delivered').length;
+    const progress = deliv.length ? ` · ${done}/${deliv.length} deliverables done` : '';
+    return `<div class="feed-card" data-open-brief="${b.id}" style="cursor:pointer;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:640;">${escapeHtml(b.title)}</div>
+        <div class="mini-meta">${escapeHtml(briefDateLabel(b.created_at))} · ${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))}${progress}</div>
+      </div>
+      <div>${typeBadge} ${briefStatusChip(b)}</div>
+    </div>`;
+  }).join('');
+}
+
+// Turnaround guidance on the request form, straight from the signed SLA —
+// Rhea asked for it because the client was picking deadlines blind (24 Aug 2026).
+// The suggestion is the SLOWEST selected deliverable, since the request lands
+// as one delivery, and it is only ever a suggestion: the field stays theirs.
+function renderSlaHint() {
+  const box = document.getElementById('bfSlaHint');
+  if (!box) return;
+  const types = [...document.querySelectorAll('[data-bf-deliv]:checked')].map((el) => el.value);
+  if (!types.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+
+  const today = toISODateLocal();
+  const hols = holidayDates();
+  // The request form is partner-only (inserts stamp partnerProfile.org).
+  const slaByType = slaForOrg(state.partnerProfile?.org);
+  const lines = types.map((t) => {
+    const sla = slaByType[t];
+    const label = BRIEF_DELIVERABLE_OPTIONS.find((o) => o.type === t)?.label || t;
+    if (!sla) return `<li>${escapeHtml(label)} — timeline confirmed at briefing</li>`;
+    const scope = sla.in_scope ? '' : ' <em>(outside current scope — we\u2019ll confirm on review)</em>';
+    return `<li>${escapeHtml(label)} — <strong>${escapeHtml(formatSlaDays(sla))}</strong>${scope}</li>`;
+  });
+
+  const suggested = suggestedDeadline(types, slaByType, today, currentIstHour(), hols);
+  let footer = '';
+  if (suggested) {
+    const d = new Date(suggested + 'T00:00:00Z');
+    const nice = d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+    // Just the date and the button. The holiday note and the working-day
+    // explainer were both dropped (3 Sep 2026) — the suggestion already
+    // accounts for holidays, weekends and the 2 PM cutoff, so spelling out the
+    // arithmetic only crowded the form.
+    footer = `<p class="mini-meta" style="margin-top:8px;">Earliest realistic deadline: <strong>${escapeHtml(nice)}</strong>`
+      + `<button type="button" class="ghost small" id="bfUseSuggested" style="margin-left:8px;">Use this date</button></p>`;
+  }
+  box.classList.remove('hidden');
+  box.innerHTML = `<p class="mini-meta" style="margin:0 0 4px;">Agreed turnaround for what you\u2019ve selected:</p><ul class="mini-meta" style="margin:0;padding-left:18px;">${lines.join('')}</ul>${footer}`;
+  document.getElementById('bfUseSuggested')?.addEventListener('click', () => {
+    const el = document.getElementById('bfDeadline');
+    if (el && suggested) el.value = suggested;
+  });
+}
+
+// The approver is picked from the client's own stakeholder map
+// (app.org_contacts), not typed (3 Sep 2026): free text produced names
+// nobody could route to or chase. RLS already scopes that table to the
+// partner's own org, so a partner sees exactly their people. "Someone else"
+// keeps a one-off approver possible without reopening the field to typos.
+const BRIEF_APPROVER_OTHER = '__other';
+
+function briefApproverValue() {
+  const sel = document.getElementById('bfApprover');
+  if (!sel) return '';
+  return sel.value === BRIEF_APPROVER_OTHER
+    ? (document.getElementById('bfApproverOther')?.value || '').trim()
+    : sel.value;
+}
+
+// Show the free-text box only while "Someone else" is the selection. Kept
+// separate from setBriefApproverValue: the change handler must NOT round-trip
+// through that, because choosing "Someone else" means the text box is still
+// empty, and re-applying an empty value would bounce the select straight back
+// to the placeholder — making that option impossible to pick.
+function syncBriefApproverOther() {
+  const sel = document.getElementById('bfApprover');
+  document.getElementById('bfApproverOther')
+    ?.classList.toggle('hidden', !sel || sel.value !== BRIEF_APPROVER_OTHER);
+}
+
+function setBriefApproverValue(name) {
+  const sel = document.getElementById('bfApprover');
+  const other = document.getElementById('bfApproverOther');
+  if (!sel) return;
+  const listed = [...sel.options].some((o) => o.value && o.value !== BRIEF_APPROVER_OTHER && o.value === name);
+  // A name from before this dropdown existed (or a contact since removed) must
+  // survive an edit-and-resubmit rather than silently blanking.
+  if (name && !listed) {
+    // Assigning a value with no matching <option> is a silent no-op, so make
+    // sure the escape hatch exists before leaning on it.
+    if (![...sel.options].some((o) => o.value === BRIEF_APPROVER_OTHER)) {
+      sel.insertAdjacentHTML('beforeend', `<option value="${BRIEF_APPROVER_OTHER}">Someone else…</option>`);
+    }
+    sel.value = BRIEF_APPROVER_OTHER;
+    if (other) other.value = name;
+  } else {
+    sel.value = name || '';
+    if (other) other.value = '';
+  }
+  syncBriefApproverOther();
+}
+
+function renderBriefApproverOptions() {
+  const sel = document.getElementById('bfApprover');
+  if (!sel) return;
+  const keep = briefApproverValue();   // read BEFORE the options are replaced
+  sel.innerHTML = '<option value="">Select approver</option>'
+    + orgContactsCache
+      .filter((c) => c.full_name)
+      .map((c) => `<option value="${escapeHtml(c.full_name)}">${escapeHtml(c.team_role ? `${c.full_name} — ${c.team_role}` : c.full_name)}</option>`).join('')
+    + `<option value="${BRIEF_APPROVER_OTHER}">Someone else…</option>`;
+  setBriefApproverValue(keep);
+}
+
+// "Raising this for someone else" — Mira Holt, 10 Sep 2026. Adam briefed a
+// poster in Slack because that is where he was; retyping it made the brief look
+// like Rhea's and lost the person to go back to. Same shape as the approver
+// dropdown, including its trap: the change handler must only toggle visibility,
+// never re-apply the value, or "Someone else" bounces straight back.
+const BRIEF_ON_BEHALF_OTHER = '__other';
+
+function briefOnBehalfValue() {
+  const sel = document.getElementById('bfOnBehalf');
+  if (!sel || !sel.value) return { name: '', email: '' };
+  if (sel.value === BRIEF_ON_BEHALF_OTHER) {
+    return {
+      name: (document.getElementById('bfOnBehalfOther')?.value || '').trim(),
+      email: (document.getElementById('bfOnBehalfEmail')?.value || '').trim()
+    };
+  }
+  // A listed contact carries their own email; asking for it again would just
+  // invite a typo next to a record we already hold.
+  const contact = orgContactsCache.find((c) => c.full_name === sel.value);
+  return { name: sel.value, email: (contact?.email || '').trim() };
+}
+
+function syncBriefOnBehalfOther() {
+  const sel = document.getElementById('bfOnBehalf');
+  const other = sel && sel.value === BRIEF_ON_BEHALF_OTHER;
+  document.getElementById('bfOnBehalfOther')?.classList.toggle('hidden', !other);
+  document.getElementById('bfOnBehalfEmail')?.classList.toggle('hidden', !other);
+}
+
+function setBriefOnBehalfValue(name, email) {
+  const sel = document.getElementById('bfOnBehalf');
+  const other = document.getElementById('bfOnBehalfOther');
+  const mail = document.getElementById('bfOnBehalfEmail');
+  if (!sel) return;
+  const listed = [...sel.options].some((o) => o.value && o.value !== BRIEF_ON_BEHALF_OTHER && o.value === name);
+  if (name && !listed) {
+    // Assigning a value with no matching <option> is a silent no-op, so make
+    // sure the escape hatch exists before leaning on it.
+    if (![...sel.options].some((o) => o.value === BRIEF_ON_BEHALF_OTHER)) {
+      sel.insertAdjacentHTML('beforeend', `<option value="${BRIEF_ON_BEHALF_OTHER}">Someone else…</option>`);
+    }
+    sel.value = BRIEF_ON_BEHALF_OTHER;
+    if (other) other.value = name;
+    if (mail) mail.value = email || '';
+  } else {
+    sel.value = name || '';
+    if (other) other.value = '';
+    if (mail) mail.value = '';
+  }
+  syncBriefOnBehalfOther();
+}
+
+function renderBriefOnBehalfOptions() {
+  const sel = document.getElementById('bfOnBehalf');
+  if (!sel) return;
+  const keep = briefOnBehalfValue();   // read BEFORE the options are replaced
+  sel.innerHTML = '<option value="">No — this is my own request</option>'
+    + orgContactsCache
+      .filter((c) => c.full_name)
+      .map((c) => `<option value="${escapeHtml(c.full_name)}">${escapeHtml(c.team_role ? `${c.full_name} — ${c.team_role}` : c.full_name)}</option>`).join('')
+    + `<option value="${BRIEF_ON_BEHALF_OTHER}">Someone else…</option>`;
+  setBriefOnBehalfValue(keep.name, keep.email);
+}
+
+function renderBriefFormOptions() {
+  const delivWrap = document.getElementById('bfDeliverables');
+  const platWrap = document.getElementById('bfPlatforms');
+  const approverSel = document.getElementById('bfApprover');
+  if (approverSel && !approverSel.dataset.built) {
+    approverSel.dataset.built = '1';
+    approverSel.addEventListener('change', syncBriefApproverOther);
+    // The panel that normally loads these contacts is not on this screen.
+    if (!orgContactsCache.length) loadOrgContacts().catch(console.error);
+  }
+  const onBehalfSel = document.getElementById('bfOnBehalf');
+  if (onBehalfSel && !onBehalfSel.dataset.built) {
+    onBehalfSel.dataset.built = '1';
+    onBehalfSel.addEventListener('change', syncBriefOnBehalfOther);
+    if (!orgContactsCache.length) loadOrgContacts().catch(console.error);
+  }
+  renderBriefApproverOptions();
+  renderBriefOnBehalfOptions();
+  if (delivWrap && !delivWrap.dataset.built) {
+    delivWrap.innerHTML = BRIEF_DELIVERABLE_OPTIONS.map(o =>
+      `<label><input type="checkbox" value="${escapeHtml(o.type)}" data-bf-deliv> ${escapeHtml(o.label)}</label>`).join('');
+    delivWrap.dataset.built = '1';
+    delivWrap.addEventListener('change', renderSlaHint);
+  }
+  if (platWrap && !platWrap.dataset.built) {
+    platWrap.innerHTML = BRIEF_PLATFORM_OPTIONS.map(p =>
+      `<label><input type="checkbox" value="${escapeHtml(p)}" data-bf-plat> ${escapeHtml(p)}</label>`).join('');
+    platWrap.dataset.built = '1';
+  }
+}
+
+function setBriefFormNotice(message = '', className = 'mini-meta') {
+  const el = document.getElementById('briefFormNotice');
+  if (el) { el.textContent = message; el.className = className; }
+}
+
+function applyBriefFormTypeVisibility() {
+  const type = document.getElementById('bfRequestType')?.value || 'brief';
+  document.getElementById('bfFullFields')?.classList.toggle('hidden', type !== 'brief');
+  document.getElementById('bfNotifyFieldWrap')?.classList.toggle('hidden', type === 'brief');
+}
+
+function applyBriefFormPriorityVisibility() {
+  const p = document.getElementById('bfPriority')?.value || 'P2';
+  document.getElementById('bfUrgencyWrap')?.classList.toggle('hidden', p !== 'P0' && p !== 'P1');
+}
+
+function resetBriefForm(prefill = null) {
+  renderBriefFormOptions();
+  briefEditingId = prefill?.id || null;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+  setVal('bfRequestType', prefill?.request_type || 'brief');
+  setVal('bfTitle', prefill?.title);
+  setVal('bfObjective', prefill?.objective);
+  setVal('bfKeyMessage', prefill?.key_message);
+  setVal('bfAudience', prefill?.audience);
+  setVal('bfContent', prefill?.request_type === 'notify_only' ? '' : prefill?.content_text);
+  setVal('bfNotifyMessage', prefill?.request_type === 'notify_only' ? prefill?.content_text : '');
+  setVal('bfKeyDates', prefill?.key_dates);
+  setVal('bfLinks', prefill?.links);
+  setVal('bfPartnersTag', prefill?.partners_to_tag);
+  setVal('bfCredits', prefill?.media_credits);
+  setVal('bfPublishDate', prefill?.preferred_publish_date);
+  setVal('bfDeadline', prefill?.deadline);
+  setBriefApproverValue(prefill?.approver_name || '');
+  setBriefOnBehalfValue(prefill?.on_behalf_of_name || '', prefill?.on_behalf_of_email || '');
+  setVal('bfPriority', prefill?.priority || 'P2');
+  setVal('bfUrgencyReason', prefill?.urgency_reason);
+  setVal('bfNotes', prefill?.notes);
+  const filesEl = document.getElementById('bfFiles');
+  if (filesEl) filesEl.value = '';
+  document.querySelectorAll('[data-bf-deliv]').forEach(cb => { cb.checked = (prefill?.requested_deliverables || []).includes(cb.value); });
+  document.querySelectorAll('[data-bf-plat]').forEach(cb => { cb.checked = (prefill?.platforms || []).includes(cb.value); });
+  document.querySelectorAll('#briefFormGrid .field-missing').forEach(n => n.classList.remove('field-missing'));
+  setBriefFormNotice('');
+  applyBriefFormTypeVisibility();
+  applyBriefFormPriorityVisibility();
+}
+
+function collectBriefForm() {
+  const val = (id) => (document.getElementById(id)?.value || '').trim();
+  const type = val('bfRequestType') || 'brief';
+  return {
+    request_type: type,
+    title: val('bfTitle'),
+    objective: val('bfObjective'),
+    key_message: val('bfKeyMessage'),
+    audience: val('bfAudience'),
+    platforms: [...document.querySelectorAll('[data-bf-plat]:checked')].map(cb => cb.value),
+    requested_deliverables: [...document.querySelectorAll('[data-bf-deliv]:checked')].map(cb => cb.value),
+    content_text: type === 'notify_only' ? val('bfNotifyMessage') : val('bfContent'),
+    key_dates: val('bfKeyDates'),
+    links: val('bfLinks'),
+    partners_to_tag: val('bfPartnersTag'),
+    media_credits: val('bfCredits'),
+    preferred_publish_date: val('bfPublishDate') || null,
+    deadline: val('bfDeadline') || null,
+    approver_name: briefApproverValue(),
+    // Null, not '': the check constraint reads a blank name as absent, and an
+    // empty string here would store a name nobody typed.
+    on_behalf_of_name: briefOnBehalfValue().name || null,
+    on_behalf_of_email: (briefOnBehalfValue().name && briefOnBehalfValue().email) || null,
+    priority: val('bfPriority') || 'P2',
+    urgency_reason: val('bfUrgencyReason'),
+    notes: val('bfNotes')
+  };
+}
+
+const BRIEF_FIELD_WRAP_IDS = {
+  title: 'bfTitle', objective: 'bfObjective', key_message: 'bfKeyMessage',
+  audience: 'bfAudience', key_dates: 'bfKeyDates', approver_name: 'bfApprover',
+  platforms: 'bfPlatforms', requested_deliverables: 'bfDeliverables',
+  deadline: 'bfDeadline', content_text: 'bfNotifyMessage'
+};
+
+function markBriefFormMissing(missing, requestType = 'brief') {
+  document.querySelectorAll('#briefFormGrid .field-missing').forEach(n => n.classList.remove('field-missing'));
+  missing.forEach(({ key }) => {
+    // content_text lives in two inputs: the notify message vs the brief's copy field
+    const id = (key === 'content_text' && requestType === 'brief') ? 'bfContent' : BRIEF_FIELD_WRAP_IDS[key];
+    const el = document.getElementById(id);
+    el?.closest('.form-field')?.classList.add('field-missing');
+  });
+}
+
+async function submitPartnerBrief() {
+  if (!state.supabase || !state.partnerProfile) return;
+  const brief = collectBriefForm();
+  const missing = briefMissingFields(brief);
+  if ((brief.priority === 'P0' || brief.priority === 'P1') && !brief.urgency_reason) {
+    missing.push({ key: 'urgency_reason', label: 'Reason for urgency' });
+    document.getElementById('bfUrgencyWrap')?.classList.add('field-missing');
+  }
+  markBriefFormMissing(missing, brief.request_type);
+  if (missing.length) {
+    setBriefFormNotice(`Missing: ${missing.map(m => m.label).join(', ')}`, 'mini-meta warn');
+    return;
+  }
+  setBriefFormNotice('Submitting…');
+  // v2 the client gate: a submitter's brief starts at 'submitted' (with Grace);
+  // a coordinator's own brief goes straight to Your Agency. The DB trigger
+  // enforces this server-side regardless of what we send.
+  const isCoordinator = state.partnerProfile?.partner_role === 'coordinator';
+  const editingOld = briefEditingId ? briefById(briefEditingId) : null;
+  const targetStatus = brief.request_type !== 'brief' ? 'submitted'
+    : briefEditingId
+      ? ((editingOld?.status === 'pending_info' || isCoordinator) ? 'ready_for_review' : 'submitted')
+      : (isCoordinator ? 'ready_for_review' : 'submitted');
+  let briefId = briefEditingId;
+  if (briefEditingId) {
+    const { data, error } = await state.supabase.from('briefs')
+      .update({ ...brief, status: targetStatus })
+      .eq('id', briefEditingId).select();
+    if (error) { setBriefFormNotice('Could not update: ' + error.message, 'mini-meta warn'); return; }
+    if (!data || !data.length) { setBriefFormNotice('Nothing updated (is the brief locked?).', 'mini-meta warn'); return; }
+    if (targetStatus === 'ready_for_review' && editingOld?.status === 'pending_info') {
+      notifyBriefEvent('ga_approved', briefEditingId);
+    }
+  } else {
+    const { data, error } = await state.supabase.from('briefs')
+      .insert({
+        ...brief,
+        status: targetStatus,
+        org: state.partnerProfile.org,
+        submitted_by_partner_id: state.partnerProfile.id
+      }).select();
+    if (error) { setBriefFormNotice('Could not submit: ' + error.message, 'mini-meta warn'); return; }
+    briefId = data?.[0]?.id;
+    // Submitter → Grace gets the approval ask; coordinator's own brief is
+    // already client-approved, so Your Agency gets pinged directly.
+    notifyBriefEvent(isCoordinator ? 'ga_approved' : 'submitted', briefId);
+  }
+  // Attachments → briefs/<id>/ga/
+  const filesEl = document.getElementById('bfFiles');
+  const files = [...(filesEl?.files || [])];
+  for (const file of files) {
+    const path = `${briefId}/ga/${Date.now()}_${file.name}`;
+    const { error: upErr } = await state.supabase.storage.from('briefs').upload(path, file);
+    if (upErr) setBriefFormNotice(`Upload failed for ${file.name}: ${upErr.message}`, 'mini-meta warn');
+  }
+  briefEditingId = null;
+  await loadBriefsData();
+  if (state.partnerProfile) {
+    openPartnerBriefDetail(briefId);
+  } else {
+    renderBriefBoard();
+  }
+}
+
+function openPartnerBriefDetail(briefId) {
+  activeBriefId = briefId;
+  navigateToScreen('partner-brief-detail');
+  renderPartnerBriefDetail().catch(console.error);
+}
+
+function briefSummaryRows(brief) {
+  const delivLabels = (brief.requested_deliverables || []).map(t =>
+    BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === t)?.label || t);
+  const rows = [
+    ['Type', brief.request_type === 'notify_only' ? 'Quick notification' : 'Creative brief'],
+    ['Priority', BRIEF_PRIORITY_META[brief.priority]?.label || brief.priority],
+    ['Urgency reason', brief.urgency_reason],
+    ['Objective', brief.objective],
+    ['Key message', brief.key_message],
+    ['Audience', brief.audience],
+    ['Deliverables', delivLabels.join(', ')],
+    ['Platforms', (brief.platforms || []).join(', ')],
+    ['Content / copy', brief.content_text],
+    ['Key dates', brief.key_dates],
+    ['Links', brief.links],
+    ['Partners to tag', brief.partners_to_tag],
+    ['Media credits', brief.media_credits],
+    ['Preferred publish', brief.preferred_publish_date],
+    ['Deadline', brief.deadline],
+    ['Approver', brief.approver_name],
+    ['Notes', brief.notes],
+    ['Submitted by', briefSubmitterName(brief)],
+    // Only appears when someone logged it for another person — the row the
+    // team needs to know who to go back to with a question.
+    ['Raised for', briefOnBehalfDetail(brief)]
+  ];
+  return rows.filter(([, v]) => v && String(v).trim() !== '');
+}
+
+function renderBriefSummaryHtml(brief) {
+  return `<dl class="brief-summary-grid">${briefSummaryRows(brief)
+    .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${linkifyProse(String(v))}</dd>`).join('')}</dl>`;
+}
+
+async function loadBriefHistory(briefId) {
+  const { data } = await state.supabase.from('brief_status_history')
+    .select('status, entered_at, exited_at')
+    .eq('brief_id', briefId).order('entered_at', { ascending: true });
+  return data || [];
+}
+
+function renderBriefTimelineHtml(history) {
+  if (!history.length) return '<p class="mini-meta">No history yet.</p>';
+  return `<div class="brief-timeline">${history.map(h => {
+    const when = new Date(h.entered_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    return `<div class="brief-timeline-row"><span class="when">${escapeHtml(when)}</span>${briefStatusChip(h.status)}</div>`;
+  }).join('')}</div>`;
+}
+
+function renderBriefDeliverablesReadonlyHtml(briefId) {
+  const rows = briefDeliverablesFor(briefId);
+  if (!rows.length) return '';
+  return rows.map(d => {
+    const label = d.title || BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === d.deliverable_type)?.label || d.deliverable_type || 'Deliverable';
+    const overdue = deliverableIsOverdue(d) ? ' <span class="overdue">overdue</span>' : '';
+    const driveLink = (d.delivery_url && d.status === 'delivered')
+      ? ` <a href="${escapeHtml(d.delivery_url)}" target="_blank" rel="noopener" class="ghost small" style="text-decoration:none;">Open in Drive ↗</a>`
+      : '';
+    return `<div class="brief-deliv-row"><span style="flex:1;">${escapeHtml(label)}${d.discipline ? ` <span class="mini-meta">(${escapeHtml(d.discipline)})</span>` : ''}</span>${briefStatusChip(d.status)}${overdue}${driveLink}</div>`;
+  }).join('');
+}
+
+async function listBriefFiles(briefId, includeDelivered) {
+  const out = [];
+  const folders = ['ga'];
+  if (includeDelivered) folders.push('delivered');
+  for (const folder of folders) {
+    const { data } = await state.supabase.storage.from('briefs').list(`${briefId}/${folder}`, { limit: 100 });
+    (data || []).forEach(f => { if (f.name) out.push({ folder, name: f.name, path: `${briefId}/${folder}/${f.name}` }); });
+  }
+  return out;
+}
+
+function renderBriefFilesHtml(files) {
+  if (!files.length) return '<p class="mini-meta">No files yet.</p>';
+  return files.map(f => `<div class="brief-deliv-row">
+    <span style="flex:1;">${f.folder === 'delivered' ? '📦 ' : ''}${escapeHtml(f.name.replace(/^\d+_/, ''))}</span>
+    <button class="ghost small" data-brief-file="${escapeHtml(f.path)}" type="button">Download</button>
+  </div>`).join('');
+}
+
+async function openBriefFile(path) {
+  const { data, error } = await state.supabase.storage.from('briefs').createSignedUrl(path, 300);
+  if (error || !data?.signedUrl) return;
+  window.open(data.signedUrl, '_blank', 'noopener');
+}
+
+async function loadBriefComments(briefId) {
+  const { data } = await state.supabase.from('brief_comments')
+    .select('*').eq('brief_id', briefId).order('created_at', { ascending: true });
+  return data || [];
+}
+
+function renderBriefCommentsHtml(comments) {
+  if (!comments.length) return '<p class="mini-meta">No comments yet.</p>';
+  return comments.map(c => {
+    const who = c.author_name || (c.author_partner_id ? (briefPartnersById[c.author_partner_id]?.full_name || 'Partner') : getEmployeeNameById(c.author_employee_id));
+    const when = new Date(c.created_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const internal = c.visibility === 'internal';
+    return `<div class="brief-comment${internal ? ' internal' : ''}">
+      <div class="who">${escapeHtml(who)} · ${escapeHtml(when)}${internal ? ' · internal' : ''}</div>
+      <div class="body">${linkifyProse(unwrapHardBreaks(c.body))}</div>
+    </div>`;
+  }).join('');
+}
+
+async function renderPartnerBriefDetail() {
+  const brief = briefById(activeBriefId);
+  if (!brief) return;
+  const titleEl = document.getElementById('pbdTitle');
+  const statusLine = document.getElementById('pbdStatusLine');
+  if (titleEl) titleEl.textContent = brief.title;
+  if (statusLine) statusLine.innerHTML = `${briefStatusChip(brief)} · submitted ${escapeHtml(briefDateLabel(brief.created_at))}`;
+  // Staff on Circle read the client's brief but act on it only from Colony.
+  // Without this, `partnerProfile?.partner_role !== 'client_viewer'` is true
+  // for a reviewer (no partner profile at all), so the edit bar, the revision
+  // button and the upload box all showed on clients.youragency.com (audit 17 Sep).
+  const staffView = Boolean(state.staffOnCircle) && !state.partnerProfile;
+  const editable = !staffView && ['submitted', 'pending_info'].includes(brief.status)
+    && state.partnerProfile?.partner_role !== 'client_viewer';
+  document.getElementById('pbdEditBar')?.classList.toggle('hidden', !editable);
+  const approveBtn = document.getElementById('pbdApproveBtn');
+  if (approveBtn) {
+    approveBtn.classList.toggle('hidden',
+      !(brief.status === 'submitted' && state.partnerProfile?.partner_role === 'coordinator'));
+  }
+  const revisionBtn = document.getElementById('pbdRevisionBtn');
+  if (revisionBtn) {
+    revisionBtn.classList.toggle('hidden',
+      !(!staffView && brief.status === 'delivered' && state.partnerProfile?.partner_role !== 'client_viewer'));
+  }
+  ['pbdUploadInput', 'pbdCommentInput'].forEach((id) => {
+    document.getElementById(id)?.closest('.action-row')?.classList.toggle('hidden', staffView);
+  });
+  const summaryEl = document.getElementById('pbdSummary');
+  if (summaryEl) summaryEl.innerHTML = renderBriefSummaryHtml(brief);
+  const delivEl = document.getElementById('pbdDeliverables');
+  if (delivEl) delivEl.innerHTML = renderBriefDeliverablesReadonlyHtml(brief.id);
+  const [history, comments, files] = await Promise.all([
+    loadBriefHistory(brief.id),
+    loadBriefComments(brief.id),
+    listBriefFiles(brief.id, ['delivered', 'completed'].includes(brief.status))
+  ]);
+  const tlEl = document.getElementById('pbdTimeline');
+  if (tlEl) tlEl.innerHTML = renderBriefTimelineHtml(history);
+  const cEl = document.getElementById('pbdComments');
+  if (cEl) cEl.innerHTML = renderBriefCommentsHtml(comments);
+  const fEl = document.getElementById('pbdFiles');
+  if (fEl) fEl.innerHTML = renderBriefFilesHtml(files);
+}
+
+async function submitPartnerComment() {
+  const input = document.getElementById('pbdCommentInput');
+  const notice = document.getElementById('pbdCommentNotice');
+  const body = (input?.value || '').trim();
+  if (!body || !activeBriefId || !state.partnerProfile) return;
+  const { error } = await state.supabase.from('brief_comments').insert({
+    brief_id: activeBriefId,
+    body,
+    visibility: 'shared',
+    author_partner_id: state.partnerProfile.id,
+    author_name: state.partnerProfile.full_name
+  });
+  if (error) { if (notice) notice.textContent = 'Could not send: ' + error.message; return; }
+  if (input) input.value = '';
+  if (notice) notice.textContent = '';
+  renderPartnerBriefDetail().catch(console.error);
+}
+
+async function uploadPartnerBriefFiles() {
+  const input = document.getElementById('pbdUploadInput');
+  const notice = document.getElementById('pbdFilesNotice');
+  const files = [...(input?.files || [])];
+  if (!files.length || !activeBriefId || !state.partnerProfile) return;
+  if (notice) notice.textContent = 'Uploading…';
+  for (const file of files) {
+    const path = `${activeBriefId}/ga/${Date.now()}_${file.name}`;
+    const { error } = await state.supabase.storage.from('briefs').upload(path, file);
+    if (error) { if (notice) notice.textContent = `Failed for ${file.name}: ${error.message}`; return; }
+  }
+  if (input) input.value = '';
+  if (notice) notice.textContent = '✓ Uploaded.';
+  renderPartnerBriefDetail().catch(console.error);
+}
+
+// ── Internal board ───────────────────────────────────────────────
+
+async function loadBriefsBoard() {
+  await Promise.all([loadBriefsData(), loadSlaAndHolidays()]);
+  renderBriefBoard();
+  // Partner management lives here, with the account leads (brief reviewers).
+  const partnersPanel = document.getElementById('partnersAdminPanel');
+  if (partnersPanel) {
+    const canManage = isBriefReviewer();
+    partnersPanel.classList.toggle('hidden', !canManage);
+    if (canManage) loadPartnersAdmin().catch(console.error);
+  }
+  // the client stakeholder map (shared with partners; node returns home from the
+  // partner slot if an employee session follows a partner one).
+  placeOrgContactsPanel('internal');
+  loadOrgContacts().catch(console.error);
+}
+
+function renderBriefBoard() {
+  const board = document.getElementById('briefBoard');
+  const quickLane = document.getElementById('briefQuickLane');
+  const meta = document.getElementById('briefBoardMeta');
+  const waitingBanner = document.getElementById('briefWaitingBanner');
+  if (!board) return;
+  const assignedOnly = document.getElementById('briefAssignedToMe')?.checked;
+  const myId = state.currentEmployeeId;
+  // Briefs a partner has sent but the client has not approved are not ours yet. They
+  // stay off the board rather than sitting in a column inviting someone to
+  // start — the count below keeps them visible without making them actionable.
+  const awaitingClient = briefsCache.filter(briefAwaitsClientApproval);
+  const fullBriefs = briefsCache.filter(b => b.request_type === 'brief')
+    .filter(b => !briefAwaitsClientApproval(b))
+    .filter(b => !assignedOnly || briefDeliverablesFor(b.id).some(d => d.assignee_employee_id === myId));
+  const quick = briefsCache.filter(b => b.request_type === 'notify_only' && b.status !== 'closed');
+
+  if (quickLane) {
+    quickLane.innerHTML = quick.length ? `<div class="brief-quick-lane">
+      <p class="feed-section-heading">Quick requests</p>
+      ${quick.map(b => `<div class="brief-quick-card" data-open-brief-drawer="${b.id}">
+        <span style="flex:1;">${escapeHtml(b.title)} <span class="mini-meta">· ${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))} · ${escapeHtml(briefDateLabel(b.created_at))}</span></span>
+        ${briefStatusChip(b)}
+      </div>`).join('')}
+    </div>` : '';
+  }
+
+  // This used to be one line of grey small print, which is exactly why Alice's
+  // brief sat unapproved for 36 hours with a Friday deadline. Each one now gets
+  // its own row saying how long it has waited and how much runway is left, and
+  // the whole block turns red when any deadline is inside three working days.
+  const waits = awaitingClient
+    .map(b => briefApprovalWait(b, istToday(), holidayDates()))
+    .filter(Boolean)
+    .sort((a, b) => Number(b.urgent) - Number(a.urgent) || (a.due || '9999').localeCompare(b.due || '9999'));
+  const anyUrgent = waits.some(w => w.urgent);
+  const waitingHtml = waits.length ? `<div class="brief-waiting-banner${anyUrgent ? ' brief-waiting-banner-urgent' : ''}">
+      <p class="brief-waiting-title">
+        ${waits.length === 1 ? 'A brief is' : `${waits.length} briefs are`} waiting on the client to approve
+        ${anyUrgent ? '<span class="brief-waiting-flag">Deadline at risk</span>' : ''}
+      </p>
+      ${waits.map(w => `<div class="brief-waiting-row${w.urgent ? ' is-urgent' : ''}" data-open-brief-drawer="${w.id}">
+        <span class="brief-waiting-name">${escapeHtml(w.title)}</span>
+        <span class="brief-waiting-detail">${escapeHtml(briefApprovalWaitLabel(w))}</span>
+      </div>`).join('')}
+      <p class="brief-waiting-foot">We cannot start on these until their coordinator approves them.
+        Colony chases them by email every working morning.</p>
+    </div>` : '';
+  if (waitingBanner) waitingBanner.innerHTML = waitingHtml;
+  let html = '';
+  BRIEF_BOARD_COLUMNS.forEach(status => {
+    // Paused work leaves its stage column so nobody counts it as in flight.
+    const cards = fullBriefs.filter(b => briefBoardColumn(b) === status);
+    // An empty pause column is noise on a board that usually has none.
+    if (status === BRIEF_PAUSED_COLUMN && !cards.length) return;
+    html += `<div class="deal-col" data-brief-status="${status}">
+      <div class="deal-col-header">
+        <span class="deal-col-title">${escapeHtml(status === BRIEF_PAUSED_COLUMN ? 'On pause' : BRIEF_STATUS_LABEL[status])}</span>
+        <span class="deal-col-count">${cards.length}</span>
+      </div>
+      <div class="deal-col-body">`;
+    cards.forEach(b => {
+      const urgent = (b.priority === 'P0' || b.priority === 'P1')
+        ? `<span class="deal-badge deal-badge-project">${escapeHtml(b.priority)}</span>` : '';
+      const deadlineClass = getDealDeadlineClass(b.deadline);
+      const deadlineLabel = b.deadline ? formatDealDate(b.deadline) : '';
+      const deliv = briefDeliverablesFor(b.id);
+      const overdueCount = deliv.filter(d => deliverableIsOverdue(d)).length;
+      html += `<div class="deal-card" data-open-brief-drawer="${b.id}">
+        <div class="deal-card-top"><span class="deal-card-name">${escapeHtml(b.title)}</span>${urgent}</div>
+        <div class="deal-card-bottom">
+          <span class="mini-meta">${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))}</span>
+          ${overdueCount ? `<span class="deal-card-deadline deal-overdue">${overdueCount} overdue</span>` : ''}
+          ${deadlineLabel ? `<span class="deal-card-deadline ${deadlineClass}">${deadlineLabel}</span>` : ''}
+        </div>
+      </div>`;
+    });
+    html += `</div></div>`;
+  });
+  board.innerHTML = html;
+  if (meta) meta.textContent = `${fullBriefs.length} brief${fullBriefs.length === 1 ? '' : 's'}${quick.length ? ` · ${quick.length} quick request${quick.length === 1 ? '' : 's'}` : ''}`;
+}
+
+const BRIEF_ACTION_LABEL = {
+  pending_info: 'Request changes',
+  ready_for_review: 'Mark client-approved',
+  in_creative: 'Start creative',
+  delivered: 'Mark delivered',
+  under_revision: 'Send for revision',
+  completed: 'Complete',
+  submitted: 'Back to submitted',
+  acknowledged: 'Acknowledge',
+  closed: 'Close'
+};
+// Transitions only reviewers/leadership may perform (UX gate; internal trust in DB).
+const BRIEF_REVIEWER_ACTIONS = ['in_creative', 'completed', 'ready_for_review', 'under_revision'];
+
+async function updateBriefStatus(briefId, toStatus) {
+  const brief = briefById(briefId);
+  if (!brief || !isValidBriefTransition(brief.status, toStatus, brief.request_type)) return;
+  const fromStatus = brief.status;
+  const patch = { status: toStatus };
+  if (toStatus === 'in_creative') {
+    // Entering creative freezes the client edits (guard is stage-bound); stamp who/when.
+    patch.locked_at = new Date().toISOString();
+    patch.locked_by_employee_id = state.currentEmployeeId;
+  }
+  const { data, error } = await state.supabase.from('briefs').update(patch).eq('id', briefId).select();
+  if (error || !data?.length) { console.error('Brief status update failed', error); return; }
+  // Notification matrix (v2): each handoff pings whoever's turn is next.
+  if (toStatus === 'pending_info') notifyBriefEvent('changes_requested', briefId);
+  else if (toStatus === 'ready_for_review') notifyBriefEvent('ga_approved', briefId);
+  else if (toStatus === 'delivered') notifyBriefEvent('delivered', briefId);
+  else if (toStatus === 'under_revision') notifyBriefEvent('revision_requested', briefId);
+  // Starting creative: start the SLA clock on queued deliverables.
+  if (toStatus === 'in_creative') {
+    const now = new Date().toISOString();
+    for (const d of briefDeliverablesFor(briefId).filter(x => !x.started_at)) {
+      await state.supabase.from('brief_deliverables').update({
+        started_at: now,
+        status: d.status === 'queued' ? 'in_progress' : d.status,
+        due_at: deliverableDueAt(now, d.sla_days, brief.priority)
+      }).eq('id', d.id);
+    }
+  }
+  await loadBriefsData();
+  renderBriefBoard();
+  renderBriefDrawer(briefId).catch(console.error);
+}
+
+function closeBriefDrawer() {
+  const drawer = document.getElementById('briefDrawer');
+  if (drawer) { drawer.className = 'hidden'; drawer.innerHTML = ''; }
+  activeBriefId = null;
+}
+
+async function renderBriefDrawer(briefId) {
+  const drawer = document.getElementById('briefDrawer');
+  const brief = briefById(briefId);
+  if (!drawer || !brief) return;
+  activeBriefId = briefId;
+  const reviewer = isBriefReviewer();
+  const transitions = (brief.request_type === 'notify_only'
+    ? { submitted: ['acknowledged', 'closed'], acknowledged: ['closed'], closed: [] }
+    : null);
+  const allowedTargets = (isBriefPaused(brief) ? [] : (transitions
+    ? (transitions[brief.status] || [])
+    : (BRIEF_TRANSITIONS.brief[brief.status] || [])))
+    .filter(t => reviewer || !BRIEF_REVIEWER_ACTIONS.includes(t));
+
+  const [history, comments, files] = await Promise.all([
+    loadBriefHistory(briefId), loadBriefComments(briefId), listBriefFiles(briefId, true)
+  ]);
+  const { data: creativeRows } = await state.supabase.from('creative_briefs').select('*').eq('brief_id', briefId);
+  const creative = creativeRows?.[0] || null;
+  const delivRows = briefDeliverablesFor(briefId);
+  const employeeOptions = state.employeeDirectory
+    .map(e => `<option value="${e.id}">${escapeHtml(displayPersonName(e.full_name, 'Employee'))}</option>`).join('');
+  const slaOptions = Object.values(slaForOrg(brief.org))
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map(s => {
+      const days = Number.isFinite(s.max_days) ? ` (${formatSlaDays(s)})` : ' (scoped per project)';
+      return `<option value="${escapeHtml(s.deliverable_type)}">${escapeHtml(s.label)}${escapeHtml(days)}</option>`;
+    }).join('');
+  const suggested = (brief.requested_deliverables || [])
+    .map(t => BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === t)?.label || t).join(', ');
+
+  drawer.className = '';
+  drawer.innerHTML = `
+    <div class="brief-drawer-backdrop" data-close-brief-drawer></div>
+    <div class="brief-drawer">
+      <div class="drawer-head">
+        <div>
+          <h2 style="margin:0;">${escapeHtml(brief.title)}</h2>
+          <p class="mini-meta" style="margin:4px 0 0;">${briefStatusChip(brief)} · ${escapeHtml(BRIEF_PRIORITY_META[brief.priority]?.short || brief.priority)} · ${escapeHtml(briefRequesterLine(brief, briefSubmitterName(brief)))} · ${escapeHtml(briefDateLabel(brief.created_at))}</p>
+        </div>
+        <button class="ghost small" data-close-brief-drawer type="button">✕ Close</button>
+      </div>
+      <div class="action-row" style="margin-top:12px;flex-wrap:wrap;">
+        ${allowedTargets.map(t => `<button class="ghost small" data-brief-action="${t}" type="button">${escapeHtml(BRIEF_ACTION_LABEL[t] || t)}</button>`).join('')}
+        ${reviewer && canPauseBrief(brief) ? '<button class="ghost small" data-brief-pause type="button">Pause</button>' : ''}
+        ${reviewer && isBriefPaused(brief) ? `<button class="ghost small" data-brief-resume type="button">Resume ${escapeHtml(BRIEF_STATUS_LABEL[brief.status] || brief.status)}</button>` : ''}
+        ${isBriefPaused(brief) ? `<span class="mini-meta" style="align-self:center;">${escapeHtml(briefPauseDetail(brief))}</span>` : ''}
+      </div>
+      <h3>Brief summary</h3>
+      ${renderBriefSummaryHtml(brief)}
+      ${brief.request_type === 'brief' ? `
+      <h3>Creative brief <span class="mini-meta">(internal)</span></h3>
+      <div class="form-grid">
+        <label class="form-field"><span>Internal notes</span>
+          <textarea id="bdCreativeNotes" rows="3">${escapeHtml(creative?.internal_notes || '')}</textarea></label>
+        <label class="form-field"><span>Internal deadline</span>
+          <input type="date" id="bdCreativeDeadline" value="${escapeHtml(creative?.internal_deadline || '')}"></label>
+        <div class="action-row"><button class="ghost small" id="bdSaveCreativeBtn" type="button">Save creative brief</button></div>
+      </div>
+      <h3>Deliverables</h3>
+      ${suggested ? `<p class="mini-meta">Requested by the client: ${escapeHtml(suggested)}</p>` : ''}
+      <div id="bdDeliverableRows">
+        ${delivRows.map(d => {
+          const label = d.title || BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === d.deliverable_type)?.label || d.deliverable_type || 'Deliverable';
+          const due = d.due_at ? `due ${briefDateLabel(d.due_at)}` : '';
+          const overdue = deliverableIsOverdue(d) ? ' <span class="overdue">OVERDUE</span>' : '';
+          return `<div class="brief-deliv-row" data-deliv-id="${d.id}">
+            <span style="flex:1;min-width:140px;">${escapeHtml(label)} <span class="mini-meta">${escapeHtml(d.discipline || '')} ${due}</span>${overdue}</span>
+            <select data-deliv-status style="width:auto;">
+              ${['queued','in_progress','in_review','ready_to_share','delivered'].map(s => `<option value="${s}"${d.status === s ? ' selected' : ''}>${s.replace(/_/g, ' ')}</option>`).join('')}
+            </select>
+            <select data-deliv-assignee style="width:auto;">
+              <option value="">Unassigned</option>${employeeOptions}
+            </select>
+            <input type="url" data-deliv-url placeholder="Google Drive link" value="${escapeHtml(d.delivery_url || '')}" style="flex:1;min-width:160px;">
+          </div>`;
+        }).join('') || '<p class="mini-meta">None yet — add from the requested list below.</p>'}
+      </div>
+      <div class="action-row" style="flex-wrap:wrap;">
+        <select id="bdNewDelivSla" style="width:auto;"><option value="">Add deliverable…</option>${slaOptions}</select>
+        <button class="ghost small" id="bdAddDelivBtn" type="button">Add</button>
+      </div>` : ''}
+      <h3>Files</h3>
+      <div id="bdFiles">${renderBriefFilesHtml(files)}</div>
+      <div class="action-row" style="flex-wrap:wrap;">
+        <input type="file" id="bdUploadInput" multiple style="width:auto;">
+        <select id="bdUploadFolder" style="width:auto;">
+          <option value="ga">Working file (the client can see)</option>
+          <option value="delivered">Deliverable (visible to the client once Delivered)</option>
+        </select>
+        <button class="ghost small" id="bdUploadBtn" type="button">Upload</button>
+      </div>
+      <h3>Comments</h3>
+      <div id="bdComments">${renderBriefCommentsHtml(comments)}</div>
+      <div class="action-row" style="flex-wrap:wrap;">
+        <textarea id="bdCommentInput" rows="2" placeholder="Write a comment…" style="flex:1;min-width:200px;"></textarea>
+        <select id="bdCommentVisibility" style="width:auto;">
+          <option value="shared">Shared with the client</option>
+          <option value="internal">Internal only</option>
+        </select>
+        <button class="primary" id="bdCommentBtn" type="button">Send</button>
+      </div>
+      <h3>Timeline</h3>
+      ${renderBriefTimelineHtml(history)}
+    </div>`;
+
+  // set current assignee selections
+  delivRows.forEach(d => {
+    const sel = drawer.querySelector(`[data-deliv-id="${d.id}"] [data-deliv-assignee]`);
+    if (sel) sel.value = d.assignee_employee_id || '';
+  });
+}
+
+async function bdSaveCreativeBrief() {
+  const notes = document.getElementById('bdCreativeNotes')?.value || '';
+  const deadline = document.getElementById('bdCreativeDeadline')?.value || null;
+  if (!activeBriefId) return;
+  await state.supabase.from('creative_briefs').upsert({
+    brief_id: activeBriefId,
+    internal_notes: notes,
+    internal_deadline: deadline,
+    created_by: state.currentEmployeeId
+  }, { onConflict: 'brief_id' });
+  renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+async function bdAddDeliverable() {
+  const type = document.getElementById('bdNewDelivSla')?.value;
+  const brief = briefById(activeBriefId);
+  const sla = slaForOrg(brief?.org)[type];
+  if (!sla || !activeBriefId) return;
+  // The client-facing turnaround IS the internal one. Ranges commit to the
+  // slower end — it is the date the client was given.
+  const slaDays = Number.isFinite(sla.max_days) ? sla.max_days : null;
+  const patch = {
+    brief_id: activeBriefId,
+    deliverable_type: sla.deliverable_type,
+    title: sla.label,
+    sla_days: slaDays
+  };
+  // If creative already started, start this one's clock immediately.
+  if (brief && brief.status === 'in_creative') {
+    const now = new Date().toISOString();
+    patch.started_at = now;
+    patch.status = 'in_progress';
+    patch.due_at = deliverableDueAt(now, slaDays, brief.priority, holidayDates());
+  }
+  await state.supabase.from('brief_deliverables').insert(patch);
+  await loadBriefsData();
+  renderBriefBoard();
+  renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+async function bdUpdateDeliverable(delivId, patch) {
+  if (patch.status === 'delivered') patch.delivered_at = new Date().toISOString();
+  await state.supabase.from('brief_deliverables').update(patch).eq('id', delivId);
+  const deliv = briefDeliverablesCache.find(d => d.id === delivId);
+  if (deliv) {
+    if (patch.assignee_employee_id) {
+      notifyBriefEvent('deliverable_assigned', deliv.brief_id, { assigneeEmployeeId: patch.assignee_employee_id });
+    }
+    if (patch.status === 'ready_to_share') {
+      notifyBriefEvent('deliverable_ready', deliv.brief_id);
+    }
+  }
+  await loadBriefsData();
+  renderBriefBoard();
+  if (activeBriefId) renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+async function bdSubmitComment() {
+  const input = document.getElementById('bdCommentInput');
+  const visibility = document.getElementById('bdCommentVisibility')?.value || 'shared';
+  const body = (input?.value || '').trim();
+  if (!body || !activeBriefId) return;
+  await state.supabase.from('brief_comments').insert({
+    brief_id: activeBriefId,
+    body,
+    visibility,
+    author_employee_id: state.currentEmployeeId,
+    author_name: state.employeeProfile?.full_name || 'Your Agency'
+  });
+  renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+async function bdUploadFiles() {
+  const input = document.getElementById('bdUploadInput');
+  const folder = document.getElementById('bdUploadFolder')?.value || 'ga';
+  const files = [...(input?.files || [])];
+  if (!files.length || !activeBriefId) return;
+  for (const file of files) {
+    await state.supabase.storage.from('briefs').upload(`${activeBriefId}/${folder}/${Date.now()}_${file.name}`, file);
+  }
+  renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+// ── Wiring ───────────────────────────────────────────────────────
+
+document.getElementById('newBriefBtn')?.addEventListener('click', () => {
+  resetBriefForm();
+  navigateToScreen('partner-brief-form');
+});
+document.getElementById('briefFormBackBtn')?.addEventListener('click', () => navigateToScreen('partner-home'));
+document.getElementById('pbdBackBtn')?.addEventListener('click', () => navigateToScreen('partner-home'));
+document.getElementById('bfRequestType')?.addEventListener('change', applyBriefFormTypeVisibility);
+document.getElementById('bfPriority')?.addEventListener('change', applyBriefFormPriorityVisibility);
+document.getElementById('submitBriefBtn')?.addEventListener('click', () => submitPartnerBrief().catch(console.error));
+document.getElementById('pbdCommentBtn')?.addEventListener('click', () => submitPartnerComment().catch(console.error));
+document.getElementById('pbdUploadBtn')?.addEventListener('click', () => uploadPartnerBriefFiles().catch(console.error));
+document.getElementById('pbdEditBtn')?.addEventListener('click', () => {
+  const brief = briefById(activeBriefId);
+  if (!brief) return;
+  resetBriefForm(brief);
+  navigateToScreen('partner-brief-form');
+});
+document.getElementById('pbdApproveBtn')?.addEventListener('click', async () => {
+  const brief = briefById(activeBriefId);
+  if (!brief || brief.status !== 'submitted' || !state.partnerProfile) return;
+  const { data, error } = await state.supabase.from('briefs')
+    .update({ status: 'ready_for_review' }).eq('id', brief.id).select();
+  if (error || !data?.length) { console.error(error); return; }
+  brief.status = 'ready_for_review';
+  notifyBriefEvent('ga_approved', brief.id);
+  renderPartnerBriefDetail().catch(console.error);
+});
+document.getElementById('pbdRevisionBtn')?.addEventListener('click', async () => {
+  const brief = briefById(activeBriefId);
+  if (!brief || brief.status !== 'delivered' || !state.partnerProfile) return;
+  if (!await appConfirm('Send this back to Your Agency for revision? Describe what needs changing in a comment.', { title: 'Request revision', confirmLabel: 'Request revision' })) return;
+  const { data, error } = await state.supabase.from('briefs')
+    .update({ status: 'under_revision' }).eq('id', brief.id).select();
+  if (error || !data?.length) { console.error(error); return; }
+  brief.status = 'under_revision';
+  notifyBriefEvent('revision_requested', brief.id);
+  renderPartnerBriefDetail().catch(console.error);
+  document.getElementById('pbdCommentInput')?.focus();
+});
+document.getElementById('partnerBriefList')?.addEventListener('click', (e) => {
+  const card = e.target.closest('[data-open-brief]');
+  if (card) openPartnerBriefDetail(card.dataset.openBrief);
+});
+document.getElementById('briefAssignedToMe')?.addEventListener('change', renderBriefBoard);
+
+const briefsScreenEl = document.getElementById('briefs-pipeline');
+briefsScreenEl?.addEventListener('click', (e) => {
+  const opener = e.target.closest('[data-open-brief-drawer]');
+  if (opener) { renderBriefDrawer(opener.dataset.openBriefDrawer).catch(console.error); return; }
+  if (e.target.closest('[data-close-brief-drawer]')) { closeBriefDrawer(); return; }
+  const action = e.target.closest('[data-brief-action]');
+  if (action && activeBriefId) { updateBriefStatus(activeBriefId, action.dataset.briefAction).catch(console.error); return; }
+  if (e.target.closest('[data-brief-pause]') && activeBriefId) { pauseBrief(activeBriefId).catch(console.error); return; }
+  if (e.target.closest('[data-brief-resume]') && activeBriefId) { resumeBrief(activeBriefId).catch(console.error); return; }
+  const file = e.target.closest('[data-brief-file]');
+  if (file) { openBriefFile(file.dataset.briefFile).catch(console.error); return; }
+  if (e.target.id === 'bdSaveCreativeBtn') { bdSaveCreativeBrief().catch(console.error); return; }
+  if (e.target.id === 'bdAddDelivBtn') { bdAddDeliverable().catch(console.error); return; }
+  if (e.target.id === 'bdCommentBtn') { bdSubmitComment().catch(console.error); return; }
+  if (e.target.id === 'bdUploadBtn') { bdUploadFiles().catch(console.error); return; }
+});
+// ── Pause / resume ───────────────────────────────────────────────────────
+// The status column is never touched: it holds the stage the brief returns
+// to, which is the whole reason pause is a flag and not a status.
+async function pauseBrief(briefId) {
+  const brief = briefById(briefId);
+  if (!canPauseBrief(brief)) return;
+  const why = await appPrompt('Why is this paused? (optional)', {
+    title: 'Pause brief', okLabel: 'Pause', placeholder: 'e.g. on hold from client'
+  });
+  if (why === null) return;   // cancelled — an empty string is a valid reason
+  const { data, error } = await state.supabase.from('briefs').update({
+    paused_at: new Date().toISOString(),
+    pause_reason: why.trim() || null,
+    paused_by: state.currentEmployeeId
+  }).eq('id', briefId).select();
+  if (error || !data?.length) { console.error('Brief pause failed', error); return; }
+  await loadBriefsData();
+  renderBriefBoard();
+  renderBriefDrawer(briefId).catch(console.error);
+}
+
+async function resumeBrief(briefId) {
+  const brief = briefById(briefId);
+  if (!isBriefPaused(brief)) return;
+  const stage = BRIEF_STATUS_LABEL[brief.status] || brief.status;
+  if (!await appConfirm(`Put this back into ${stage}?`, { title: 'Resume brief', confirmLabel: 'Resume' })) return;
+  const { data, error } = await state.supabase.from('briefs')
+    .update({ paused_at: null, pause_reason: null, paused_by: null })
+    .eq('id', briefId).select();
+  if (error || !data?.length) { console.error('Brief resume failed', error); return; }
+  await loadBriefsData();
+  renderBriefBoard();
+  renderBriefDrawer(briefId).catch(console.error);
+}
+
+briefsScreenEl?.addEventListener('change', (e) => {
+  const row = e.target.closest('[data-deliv-id]');
+  if (!row) return;
+  if (e.target.matches('[data-deliv-status]')) {
+    bdUpdateDeliverable(row.dataset.delivId, { status: e.target.value }).catch(console.error);
+  } else if (e.target.matches('[data-deliv-assignee]')) {
+    bdUpdateDeliverable(row.dataset.delivId, { assignee_employee_id: e.target.value || null }).catch(console.error);
+  } else if (e.target.matches('[data-deliv-url]')) {
+    bdUpdateDeliverable(row.dataset.delivId, { delivery_url: e.target.value.trim() || null }).catch(console.error);
+  }
+});
+// Partner detail: file downloads
+document.getElementById('pbdFiles')?.addEventListener('click', (e) => {
+  const file = e.target.closest('[data-brief-file]');
+  if (file) openBriefFile(file.dataset.briefFile).catch(console.error);
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Hiring pipeline — candidate checklist + crew panel (Team Directory)
+// ══════════════════════════════════════════════════════════════════
+
+let hiresCache = [];
+
+function notifyHireEvent(hireEvent, hireId) {
+  const token = state.session?.access_token;
+  if (!token || !hireId) return;
+  fetch('/.netlify/functions/hire-notify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ event: hireEvent, hireId })
+  }).catch((err) => console.warn('Hire notify failed:', err));
+}
+
+// ── Candidate surface ────────────────────────────────────────────
+
+function setHireFormNotice(message = '', className = 'mini-meta') {
+  const el = document.getElementById('hireFormNotice');
+  if (el) { el.textContent = message; el.className = className; }
+}
+
+async function listHireSlips(hireId) {
+  const { data } = await state.supabase.storage.from('hires').list(`${hireId}/slips`, { limit: 30 });
+  return (data || []).filter(f => f.name).map(f => ({ name: f.name, path: `${hireId}/slips/${f.name}` }));
+}
+
+async function renderHireChecklist() {
+  const hire = state.hireProfile;
+  if (!hire) return;
+  const greeting = document.getElementById('hireGreeting');
+  const statusLine = document.getElementById('hireStatusLine');
+  const formPanel = document.getElementById('hireFormPanel');
+  const donePanel = document.getElementById('hireDonePanel');
+  if (greeting) greeting.textContent = `Welcome to Your Agency, ${displayPersonName(hire.full_name, 'there').split(' ')[0]}`;
+
+  const editable = ['invited', 'details_submitted'].includes(hire.stage);
+  if (formPanel) formPanel.classList.toggle('hidden', !editable);
+  if (donePanel) donePanel.classList.toggle('hidden', editable);
+
+  if (editable) {
+    if (statusLine) {
+      statusLine.textContent = hire.stage === 'invited'
+        ? 'One form and you\'re done — the team takes it from there.'
+        : 'Details received ✓ — you can still edit them until our team picks this up.';
+    }
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+    setVal('hfFullName', hire.full_name);
+    setVal('hfDob', hire.date_of_birth);
+    setVal('hfPhone', hire.phone);
+    setVal('hfPan', hire.pan);
+    setVal('hfAddress', hire.address);
+    setVal('hfBankName', hire.bank_account_name);
+    setVal('hfBankNumber', hire.bank_account_number);
+    setVal('hfIfsc', hire.bank_ifsc);
+    setVal('hfStartDate', hire.start_date);
+    setVal('hfPermanentAddress', hire.permanent_address);
+    setVal('hfSlipsNote', hire.salary_slips_note);
+    setVal('hfTaxRegime', hire.tax_regime);
+    setVal('hfTaxDecl', hire.tax_declarations_note);
+    const noSlipsEl = document.getElementById('hfNoSlips');
+    if (noSlipsEl) noSlipsEl.checked = hire.no_salary_slips === true;
+    document.getElementById('hfTaxDeclWrap')?.classList.toggle('hidden', hire.tax_regime !== 'old');
+    const slipsLabel = document.getElementById('hfSlipsLabel');
+    if (slipsLabel) slipsLabel.innerHTML = `Salary slips — ${escapeHtml(fiscalYearStartLabel(toISODateLocal()))} to now`;
+    const listEl = document.getElementById('hfSlipsList');
+    if (listEl) {
+      const slips = await listHireSlips(hire.id).catch(() => []);
+      listEl.innerHTML = slips.length
+        ? slips.map(s => `<p class="mini-meta">📎 ${escapeHtml(s.name.replace(/^\d+_/, ''))}</p>`).join('')
+        : '';
+    }
+  } else if (statusLine && donePanel) {
+    const doneText = document.getElementById('hireDoneText');
+    const stageCopy = {
+      contract_uploaded: 'Your contract is being prepared and reviewed.',
+      reviewed: 'Your contract is with Your Agency for signature.',
+      signed: 'Contract signed — payroll setup is underway.',
+      payroll_done: 'All done! You\'ll hear from the team about your first day and your Your Agency account.',
+      cancelled: 'This process was closed. Contact your Your Agency point person with any questions.'
+    };
+    statusLine.textContent = '';
+    if (doneText) doneText.textContent = stageCopy[hire.stage] || 'The Your Agency team is on it — we\'ll email you at each step.';
+    await renderHireSwitchCard(hire, doneText);
+  }
+}
+
+// Once the hire's @youragency.com account exists, the Gmail they are signed in
+// with is the wrong door — and "All done!" above used to let them stop there
+// (10 Sep 2026). The RPC is scoped to the caller's own hire row.
+async function renderHireSwitchCard(hire, doneText) {
+  const card = document.getElementById('hireSwitchCard');
+  if (!card || !state.supabase) return;
+  let status = null;
+  try {
+    const { data } = await state.supabase.rpc('hire_work_account_status');
+    status = Array.isArray(data) ? data[0] : data;
+  } catch (e) { status = null; }
+  const prompt = hireSignInPrompt(hire, status);
+  card.classList.toggle('hidden', !prompt);
+  if (!prompt) return;
+  const title = document.getElementById('hireSwitchTitle');
+  const text = document.getElementById('hireSwitchText');
+  if (prompt.kind === 'joined') {
+    // Nothing else to read: the only correct action is to leave.
+    if (doneText) doneText.textContent = '';
+    if (title) title.textContent = 'You already have an Your Agency account — this is the wrong sign-in.';
+    if (text) text.textContent = `Everything from here on lives under ${prompt.workEmail}. Sign out and sign back in with that account, not this Gmail.`;
+  } else {
+    if (title) title.textContent = `Your account is ready: ${prompt.workEmail}`;
+    if (text) text.textContent = `From now on, sign in to Colony with ${prompt.workEmail}, not this Gmail. Your temporary password comes from your Your Agency point person by email; if you have not received it, ask them. First sign-in creates your profile and opens the onboarding form.`;
+  }
+}
+
+// Sign out, then straight back to Google's account picker with the youragency
+// domain hinted — one click, no "now go to the login page" instruction.
+document.getElementById('hireSwitchAccountBtn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('hireSwitchAccountBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing out…'; }
+  try { await state.supabase?.auth.signOut(); } catch (e) { /* proceed to sign-in regardless */ }
+  await startGoogleSignIn('signin');
+});
+
+async function submitHireDetails() {
+  const hire = state.hireProfile;
+  if (!hire || !state.supabase) return;
+  const val = (id) => (document.getElementById(id)?.value || '').trim();
+  const details = {
+    full_name: val('hfFullName').replace(/\s+/g, ' '),
+    date_of_birth: val('hfDob') || null,
+    phone: val('hfPhone'),
+    pan: val('hfPan').toUpperCase(),
+    address: val('hfAddress'),
+    permanent_address: document.getElementById('hfSameAddress')?.checked
+      ? val('hfAddress')
+      : val('hfPermanentAddress'),
+    bank_account_name: val('hfBankName'),
+    bank_account_number: val('hfBankNumber').replace(/\s/g, ''),
+    bank_ifsc: val('hfIfsc').toUpperCase(),
+    start_date: val('hfStartDate') || null,
+    salary_slips_note: val('hfSlipsNote'),
+    no_salary_slips: document.getElementById('hfNoSlips')?.checked === true,
+    tax_regime: val('hfTaxRegime'),
+    tax_declarations_note: val('hfTaxDecl')
+  };
+  const files = [...(document.getElementById('hfSlips')?.files || [])];
+  const existingSlips = await listHireSlips(hire.id).catch(() => []);
+  const hasSlips = files.length > 0 || existingSlips.length > 0;
+
+  const missing = hireMissingDetails(details, hasSlips);
+  if (missing.length) {
+    setHireFormNotice(`Missing: ${missing.map(m => m.label).join(', ')}`, 'mini-meta warn');
+    return;
+  }
+  if (!isValidPan(details.pan)) {
+    setHireFormNotice('That PAN doesn\'t look right — format is ABCDE1234F.', 'mini-meta warn');
+    return;
+  }
+  if (!isValidIfsc(details.bank_ifsc)) {
+    setHireFormNotice('That IFSC doesn\'t look right — format is HDFC0000123.', 'mini-meta warn');
+    return;
+  }
+
+  setHireFormNotice('Saving…');
+  for (const file of files) {
+    const path = `${hire.id}/slips/${Date.now()}_${file.name}`;
+    const { error: upErr } = await state.supabase.storage.from('hires').upload(path, file);
+    if (upErr) { setHireFormNotice(`Upload failed for ${file.name}: ${upErr.message}`, 'mini-meta warn'); return; }
+  }
+  const wasFirstSubmit = state.hireProfile.stage === 'invited';
+  const { error } = await state.supabase.rpc('submit_hire_details', {
+    p_full_name: details.full_name,
+    p_date_of_birth: details.date_of_birth,
+    p_pan: details.pan,
+    p_address: details.address,
+    p_bank_account_name: details.bank_account_name,
+    p_bank_account_number: details.bank_account_number,
+    p_bank_ifsc: details.bank_ifsc,
+    p_salary_slips_note: details.salary_slips_note,
+    p_no_salary_slips: details.no_salary_slips,
+    p_start_date: details.start_date,
+    p_permanent_address: details.permanent_address,
+    p_tax_regime: details.tax_regime,
+    p_tax_declarations_note: details.tax_declarations_note
+  });
+  if (error) { setHireFormNotice('Could not save: ' + error.message, 'mini-meta warn'); return; }
+  Object.assign(state.hireProfile, details, { stage: 'details_submitted' });
+  const slipsInput = document.getElementById('hfSlips');
+  if (slipsInput) slipsInput.value = '';
+  if (wasFirstSubmit) notifyHireEvent('details_submitted', hire.id);
+  setHireFormNotice('✓ Saved. The Your Agency team has been notified.');
+  renderHireChecklist().catch(console.error);
+}
+
+document.getElementById('hireSubmitBtn')?.addEventListener('click', () => submitHireDetails().catch(console.error));
+// "Same as current" is the common case; mirroring saves retyping and stops the
+// two addresses drifting apart.
+function syncPermanentAddress() {
+  const same = document.getElementById('hfSameAddress')?.checked;
+  const perm = document.getElementById('hfPermanentAddress');
+  if (!perm) return;
+  perm.disabled = Boolean(same);
+  if (same) perm.value = document.getElementById('hfAddress')?.value || '';
+}
+document.getElementById('hfSameAddress')?.addEventListener('change', syncPermanentAddress);
+document.getElementById('hfAddress')?.addEventListener('input', () => {
+  if (document.getElementById('hfSameAddress')?.checked) syncPermanentAddress();
+});
+
+document.getElementById('hfTaxRegime')?.addEventListener('change', (e) => {
+  document.getElementById('hfTaxDeclWrap')?.classList.toggle('hidden', e.target.value !== 'old');
+});
+
+// ── Crew panel (Team Directory / hiring-only screen) ─────────────
+
+// Proof a hire actually signed in. Matched on name because the two records
+// share no key: a hire is keyed by personal Gmail, an employee by their work
+// address (same bridge app.hire_type_for_new_employee uses).
+function hireHasEmployeeRow(hire) {
+  const name = String(hire?.full_name || '').trim().toLowerCase();
+  if (!name) return false;
+  return (state.employeeDirectory || []).some(
+    (e) => String(e.full_name || '').trim().toLowerCase() === name
+  );
+}
+
+function setHiringNotice(message = '', className = 'mini-meta') {
+  const el = document.getElementById('hiringNotice');
+  if (el) { el.textContent = message; el.className = className; }
+}
+
+// Status for ONE hire, rendered in that hire's own row. #hiringNotice sits
+// above the whole list, under the "Start hire" form, so "Contract uploaded"
+// for the fifth row appeared nowhere near it (8 Sep 2026).
+// `busy` adds the animated ellipsis: an upload gives no other sign it started.
+function setHireRowStatus(hireId, message = '', { busy = false, warn = false } = {}) {
+  const el = document.querySelector(`[data-hire-status="${hireId}"]`);
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle('is-busy', Boolean(message) && busy);
+  el.classList.toggle('warn', Boolean(message) && warn);
+}
+
+// The checklist on a hire card. Pure rows from hireChecklist(); this only
+// draws them. "activated" is an employee row that is no longer setup_pending.
+function renderHireChecklistHtml(h) {
+  const rows = renderHireChecklistHtml.rowsFor(h);
+  const mark = (st) => st === 'done' ? '✓' : st === 'current' ? '●' : st === 'cancelled' ? '×' : '○';
+  return `<ol class="hire-checklist">${rows.map((r) => `<li class="${r.state}">
+      <span class="hc-mark">${mark(r.state)}</span>
+      <span class="hc-owner">${escapeHtml(HIRE_OWNER_LABEL[r.owner] || r.owner)}</span>
+      <span><span class="hc-label">${escapeHtml(r.label)}</span>${r.detail ? `<span class="hc-detail">${escapeHtml(r.detail)}</span>` : ''}</span>
+    </li>`).join('')}</ol>`;
+}
+
+// Rows for a hire, with the two facts the stage cannot tell: whether the
+// youragency account has been used (an employee row exists) and whether that
+// row has been activated.
+renderHireChecklistHtml.rowsFor = function (h) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const emp = (state.employeeDirectory || []).find((e) => (h.work_email && norm(e.email) === norm(h.work_email)) || norm(e.full_name) === norm(h.full_name));
+  return hireChecklist(h, offerTermsByHireId[h.id] || {}, { hasEmployeeRow: Boolean(emp), activated: Boolean(emp && emp.setup_pending === false) });
+};
+
+// The open-hire form follows the type: CTC for employees, a monthly fee for
+// anyone who invoices, and a client picker only for fractionals.
+function syncNewHireForm() {
+  const type = document.getElementById('nhType')?.value || 'full-time';
+  const spec = hireCompensationSpec(type);
+  const label = document.getElementById('nhCompLabel');
+  const input = document.getElementById('nhComp');
+  if (label) label.textContent = spec.label;
+  if (input) input.placeholder = spec.placeholder;
+  const wrap = document.getElementById('nhClientsWrap');
+  const box = document.getElementById('nhClients');
+  if (wrap) wrap.classList.toggle('hidden', type !== 'fractional');
+  if (box && !box.children.length) box.innerHTML = clientCheckboxes([], 'nh');
+}
+
+// Tick-any client list, shared by the open form and the offer-terms editor.
+function clientCheckboxes(selectedIds, ns) {
+  const chosen = new Set((selectedIds || []).map(String));
+  return (state.clients || []).filter((c) => c.is_active !== false)
+    .map((c) => `<label><input type="checkbox" value="${escapeHtml(c.id)}" data-client-pick="${ns}"${chosen.has(String(c.id)) ? ' checked' : ''}> ${escapeHtml(c.name)}</label>`).join('');
+}
+document.getElementById('nhType')?.addEventListener('change', syncNewHireForm);
+
+async function loadHiringPanel() {
+  const panel = document.getElementById('hiringPanel');
+  if (!panel || !state.supabase) return;
+  const crew = state.hiringOnlyMode || isHiringCrew();
+  panel.classList.toggle('hidden', !crew);
+  if (!crew) return;
+  const reportsTo = document.getElementById('nhReportsTo');
+  if (reportsTo) { const keep = reportsTo.value; reportsTo.innerHTML = `<option value="">— Select —</option>${reportsToOptions(keep)}`; }
+  const [hiresRes, termsRes] = await Promise.all([
+    state.supabase.from('hires').select('*').order('created_at', { ascending: false }),
+    // Crew-only table: a candidate or ordinary employee simply gets nothing.
+    state.supabase.from('hire_offer_terms').select('*')
+  ]);
+  const { data, error } = hiresRes;
+  if (error) { setHiringNotice('Could not load hires: ' + error.message, 'mini-meta warn'); return; }
+  hiresCache = data || [];
+  offerTermsByHireId = {};
+  (termsRes.data || []).forEach((t) => { offerTermsByHireId[t.hire_id] = t; });
+  // Only setup approvers create hires.
+  // Leadership opens hires now, not only setup approvers (11 Sep 2026).
+  document.getElementById('hiringCreateBar')?.classList.toggle('hidden', !(state.hiringOnlyMode ? false : (isSetupApprover() || isLeadershipRole())));
+  syncNewHireForm();
+  renderHiringList();
+}
+
+// Offer terms, keyed by hire. Separate from hiresCache because they live in a
+// separate, crew-only table (compensation must stay off the candidate's row).
+let offerTermsByHireId = {};
+
+function hireStageChip(stage) {
+  return `<span class="brief-status-chip">${escapeHtml(HIRE_STAGE_LABEL[stage] || stage)}</span>`;
+}
+
+// The terms Your Agency agrees at offer, which Legal needs to draft the agreement
+// (Leo's checklist, 24 Aug 2026). We fill these — the candidate never sees
+// them, and the CTC breakup deliberately is not here: Blake works it out per
+// hire and it travels in the stage email.
+// "Reports to": who the hire will report to, picked from leadership rather
+// than typed (25 Aug 2026; renamed from "hiring manager" 11 Sep — only
+// Alex or Nadia ever hire, so the useful fact is the reporting line). The
+// column is still hire_offer_terms.hiring_manager_email. A stored value not in
+// the list is kept as an option so nothing is silently dropped; a hiring-only
+// session has no directory, so it falls back to a plain field.
+function reportsToOptions(currentEmail) {
+  const current = normalizeEmail(currentEmail || '');
+  const people = (state.employeeDirectory || [])
+    .filter((e) => e.is_active !== false && e.email)
+    .filter((e) => ['leadership', 'admin'].includes(normalizeAccessLevel(e.access_level)))
+    .filter((e) => !getHiddenEmployeeEmails().includes(normalizeEmail(e.email)))
+    .map((e) => ({ email: normalizeEmail(e.email), name: displayPersonName(e.full_name, 'Employee') }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (current && !people.some((p) => p.email === current)) {
+    people.push({ email: current, name: `${currentEmail} (no longer listed)` });
+  }
+  return people.map((p) =>
+    `<option value="${escapeHtml(p.email)}"${p.email === current ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
+}
+function reportsToField(currentEmail) {
+  const options = reportsToOptions(currentEmail);
+  if (!options) {
+    return `<input type="email" data-ot="hiring_manager_email" value="${escapeHtml(currentEmail || '')}" placeholder="name@youragency.com">`;
+  }
+  return `<select data-ot="hiring_manager_email"><option value="">— Select —</option>${options}</select>`;
+}
+
+function renderOfferTermsEditor(h) {
+  const t = offerTermsByHireId[h.id] || {};
+  const deptOptions = (state.departmentOptions || []).map((d) =>
+    `<option value="${escapeHtml(d.name)}"${t.department === d.name ? ' selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
+  const notice = Number(t.notice_period_days) || '';
+  // Save sits in the HEADING row, not at the bottom: six stacked full-width
+  // fields pushed it past the fold and it looked like there was no way to save
+  // at all (25 Aug 2026). The grid is two-column on any reasonable width
+  // for the same reason — the form should fit on screen.
+  return `
+    <div class="offer-terms" data-offer-terms="${h.id}">
+      <div class="offer-terms-head">
+        <p class="hire-list-heading" style="margin:0;">Offer terms — for the employment agreement</p>
+        <span class="mini-meta" data-offer-terms-notice="${h.id}"></span>
+        <button class="ghost small" data-save-offer-terms="${h.id}" type="button">Save offer terms</button>
+      </div>
+      <div class="form-grid offer-terms-grid">
+        <label class="form-field"><span>Designation</span>
+          <input type="text" data-ot="designation" value="${escapeHtml(t.designation || '')}" placeholder="e.g. Copywriter"></label>
+        <label class="form-field"><span>Department</span>
+          <select data-ot="department"><option value="">— Select —</option>${deptOptions}</select></label>
+        ${h.hire_type === 'full-time'
+          ? `<label class="form-field"><span>CTC (annual, ₹)</span>
+          <input type="number" data-ot="ctc_annual" min="0" step="1000" value="${t.ctc_annual != null ? escapeHtml(String(t.ctc_annual)) : ''}" placeholder="e.g. 1200000"></label>`
+          : `<label class="form-field"><span>Monthly fee (₹)</span>
+          <input type="number" data-ot="monthly_fee" min="0" step="1000" value="${t.monthly_fee != null ? escapeHtml(String(t.monthly_fee)) : ''}" placeholder="e.g. 60000"></label>`}
+        <label class="form-field"><span>Notice period</span>
+          <select data-ot="notice_period_days">
+            <option value="">— Select —</option>
+            <option value="30"${notice === 30 ? ' selected' : ''}>30 days</option>
+            <option value="60"${notice === 60 ? ' selected' : ''}>60 days</option>
+          </select></label>
+        <label class="form-field"><span>Reports to</span>
+          ${reportsToField(t.hiring_manager_email)}</label>
+        <!-- Start date lives on the hire, not on offer terms, but it belongs in
+             this form: dates move, and it was only editable by the candidate
+             (25 Aug 2026). Saved back to app.hires. -->
+        <label class="form-field"><span>Start date</span>
+          <input type="date" data-ot-hire="start_date" value="${escapeHtml(h.start_date || '')}"></label>
+      </div>
+      <label class="form-field" style="margin-top:12px;"><span>Scope of work</span>
+        <textarea data-ot="scope_of_work" rows="3" placeholder="What this role covers — goes into the agreement.">${escapeHtml(t.scope_of_work || '')}</textarea></label>
+      ${h.hire_type === 'fractional' ? `<div class="form-field" style="margin-top:12px;"><span>Clients they cover <span class="mini-meta">(add more any time — this is what activation scopes them to)</span></span>
+        <div class="check-grid" data-ot-clients="${h.id}">${clientCheckboxes(t.scoped_client_ids || [], 'ot')}</div></div>` : ''}
+    </div>`;
+}
+
+async function saveOfferTerms(hireId) {
+  const wrap = document.querySelector(`[data-offer-terms="${hireId}"]`);
+  const notice = document.querySelector(`[data-offer-terms-notice="${hireId}"]`);
+  if (!wrap || !state.supabase) return;
+  const val = (name) => wrap.querySelector(`[data-ot="${name}"]`)?.value?.trim() || '';
+  const payload = {
+    hire_id: hireId,
+    designation: val('designation') || null,
+    department: val('department') || null,
+    ctc_annual: val('ctc_annual') ? Number(val('ctc_annual')) : null,
+    notice_period_days: val('notice_period_days') ? Number(val('notice_period_days')) : null,
+    scope_of_work: val('scope_of_work') || null,
+    hiring_manager_email: val('hiring_manager_email') || null,
+    updated_by_employee_id: state.currentEmployeeId || null
+  };
+  // Monthly fee sits in the same editor for people who invoice; the CTC field
+  // is what the form shows for employees. Whichever is absent stays as it was.
+  const feeEl = wrap.querySelector('[data-ot="monthly_fee"]');
+  if (feeEl) payload.monthly_fee = feeEl.value ? Number(feeEl.value) : null;
+  const clientBox = wrap.querySelector(`[data-ot-clients="${hireId}"]`);
+  if (clientBox) payload.scoped_client_ids = [...clientBox.querySelectorAll('input:checked')].map((cb) => cb.value);
+  if (notice) notice.textContent = 'Saving…';
+  const { error } = await state.supabase.from('hire_offer_terms').upsert(payload, { onConflict: 'hire_id' });
+  if (error) { if (notice) notice.textContent = 'Could not save: ' + error.message; return; }
+  offerTermsByHireId[hireId] = { ...(offerTermsByHireId[hireId] || {}), ...payload };
+
+  // Start date is a column on app.hires, so it saves separately.
+  const startDate = wrap.querySelector('[data-ot-hire="start_date"]')?.value || null;
+  const hire = hiresCache.find((x) => x.id === hireId);
+  if (hire && (hire.start_date || null) !== startDate) {
+    const { error: hireErr } = await state.supabase.from('hires').update({ start_date: startDate }).eq('id', hireId);
+    if (hireErr) { if (notice) notice.textContent = 'Terms saved, but start date failed: ' + hireErr.message; return; }
+    hire.start_date = startDate;
+    renderHiringList();
+    // Re-rendering replaces this drawer, so reopen it and report there.
+    const detail = document.querySelector(`[data-hire-detail="${hireId}"]`);
+    detail?.classList.remove('hidden');
+    const freshNotice = document.querySelector(`[data-offer-terms-notice="${hireId}"]`);
+    if (freshNotice) freshNotice.textContent = '✓ Saved';
+    return;
+  }
+  if (notice) notice.textContent = '✓ Saved';
+}
+
+async function renderHiringList() {
+  const listEl = document.getElementById('hiringList');
+  if (!listEl) return;
+  const showDone = document.getElementById('hiringShowDone')?.checked;
+  // "Done" means the checklist is done, not that payroll is: a hire at
+  // payroll_done with no account yet, or not signed in, or not activated, is
+  // the one most in need of showing (Asha sat there for three days).
+  const isFinished = (h) => {
+    if (h.stage === 'cancelled') return true;
+    return renderHireChecklistHtml.rowsFor(h).every((r) => r.state === 'done');
+  };
+  const rows = hiresCache.filter(h => showDone || !isFinished(h));
+  if (!rows.length) {
+    // No empty-state copy: the create row above already says what this is for.
+    listEl.innerHTML = '';
+    return;
+  }
+  const isApprover = !state.hiringOnlyMode && isSetupApprover();
+  const mySignerTurn = isSuperadminUser();
+  listEl.innerHTML = rows.map(h => {
+    const details = [
+      ['Type', HIRE_TYPE_LABEL[h.hire_type] || h.hire_type],
+      ['Start date', h.start_date],
+      ['Personal email', h.personal_email],
+      ['Mobile', h.phone],
+      ['DOB', h.date_of_birth],
+      ['PAN', h.pan],
+      ['Address', h.address],
+      ['Bank', h.bank_account_name ? `${h.bank_account_name} · ${h.bank_account_number} · ${h.bank_ifsc}` : ''],
+      ['Slips', h.no_salary_slips ? 'Candidate did not have salary slips' : ''],
+      ['Slips note', h.salary_slips_note],
+      ['Tax regime', h.tax_regime ? (h.tax_regime === 'old' ? 'Old' : 'New') : ''],
+      ['HRA/80C/80D', h.tax_declarations_note]
+    ].filter(([, v]) => v && String(v).trim() !== '');
+    // Everything for one person on one line: stage, the step they are waiting
+    // on, Details, then Cancel last (24 Aug 2026 — he asked for Cancel
+    // beside Details rather than on its own row). Cancel keeps its red
+    // treatment and stays last, so it is never adjacent to the button someone
+    // actually came here to click.
+    const actions = [];
+    if (h.stage === 'details_submitted') {
+      actions.push(`<label class="ghost small" style="cursor:pointer;">Upload contract draft<input type="file" data-hire-contract="${h.id}" accept=".pdf,.doc,.docx" style="display:none;"></label>`);
+    }
+    if (h.stage === 'contract_uploaded' && isApprover) {
+      actions.push(`<button class="ghost small" data-hire-action="reviewed" data-hire-id="${h.id}" type="button">Approve draft</button>`);
+      actions.push(`<button class="ghost small" data-hire-action="details_submitted" data-hire-id="${h.id}" type="button">Send back</button>`);
+    }
+    // Legal can correct a draft at ANY point before signature. Previously the
+    // upload control existed only at 'details_submitted', so a typo spotted
+    // after approval had no route back at all — not even for an approver
+    // (Maya's contract, 25 Aug 2026). Replacing an APPROVED draft returns it
+    // to review: the thing that was approved no longer exists.
+    const viaPapersign = Boolean(state.runtimeConfig?.papersign);
+    const terms = offerTermsByHireId[h.id] || {};
+    if (viaPapersign) {
+      // Contracts through Papersign (11 Sep 2026): draft from the template,
+      // Leo reviews it there, an approver sends it, the webhook files it.
+      if (h.stage === 'details_submitted' && !terms.papersign_draft_id) {
+        actions.push(`<button class="ghost small" data-hire-ps-draft="${h.id}" type="button">Draft agreement in Papersign</button>`);
+      }
+      if (terms.papersign_draft_id && !terms.papersign_sent_at) {
+        actions.push(`<a class="ghost small" href="https://paperform.co/sign" target="_blank" rel="noopener">Review draft ↗</a>`);
+        if (isApprover) actions.push(`<button class="ghost small" data-hire-ps-send="${h.id}" type="button">Approve &amp; send for signing</button>`);
+      }
+      if (terms.papersign_sent_at && !terms.papersign_completed_at) {
+        actions.push(`<span class="mini-meta">Out for signature since ${escapeHtml(briefDateLabel(terms.papersign_sent_at))}</span>`);
+      }
+    } else {
+      if (['contract_uploaded', 'reviewed'].includes(h.stage)) {
+        actions.push(`<label class="ghost small" style="cursor:pointer;">Replace draft<input type="file" data-hire-contract="${h.id}" accept=".pdf,.doc,.docx" style="display:none;"></label>`);
+      }
+      if (h.stage === 'reviewed' && mySignerTurn) {
+        actions.push(`<label class="ghost small" style="cursor:pointer;">Upload signed contract<input type="file" data-hire-signed="${h.id}" accept=".pdf" style="display:none;"></label>`);
+      }
+    }
+    if (h.stage === 'signed') {
+      actions.push(`<button class="ghost small" data-hire-action="payroll_done" data-hire-id="${h.id}" type="button">Payroll started ✓</button>`);
+    }
+    // Payroll done is not the end: they cannot appear in Colony until their
+    // @youragency.com account exists, and nothing else in the app asks for it.
+    const workspace = hireWorkspaceState(h, hireHasEmployeeRow(h));
+    const checklistHtml = renderHireChecklistHtml(h);
+    if (workspace === 'needed' && isApprover) {
+      actions.push(`<button class="ghost small" data-hire-workspace="${h.id}" type="button">${state.runtimeConfig?.workspaceProvisioning ? 'Create' : 'Request'} @youragency.com account</button>`);
+    }
+    const canCancel = isApprover && !['payroll_done', 'cancelled'].includes(h.stage);
+    return `<div class="hire-row" data-hire-row="${h.id}">
+      <div class="hire-row-head">
+        <span class="hire-row-name">${escapeHtml(h.full_name)}</span>
+        ${hireStageChip(h.stage)}
+        ${actions.join('')}
+        <span class="hire-row-now">${(() => { const cur = renderHireChecklistHtml.rowsFor(h).find((r) => r.state === 'current'); return cur ? `now: <b>${escapeHtml(cur.label)}</b> · ${escapeHtml(HIRE_OWNER_LABEL[cur.owner] || cur.owner)}` : ''; })()}</span>
+        <button class="ghost small" data-hire-checklist-toggle="${h.id}" type="button">Checklist</button>
+        <button class="ghost small" data-hire-toggle="${h.id}" type="button">Details</button>
+        ${canCancel ? `<button class="ghost small danger-text" data-hire-action="cancelled" data-hire-id="${h.id}" type="button">Cancel</button>` : ''}
+        ${isApprover && canSkipHireStage(h.stage) ? `<button class="ghost small" data-hire-skip="${h.id}" type="button" title="This step happened outside Colony">Skip</button>` : ''}
+        <span class="hire-row-status mini-meta" data-hire-status="${h.id}"></span>
+      </div>
+      <!-- Collapsed by default (11 Sep 2026): the header says what is
+           happening now; the full checklist is one click away. -->
+      <div class="hidden" data-hire-checklist="${h.id}">
+        ${(h.skipped_stages || []).length ? `<p class="mini-meta hire-skipped-note">Skipped (done outside Colony): ${escapeHtml(skippedHireStageLabels(h).join(', '))}</p>` : ''}
+        ${workspace === 'needed' ? '<p class="mini-meta hire-next-step">Waiting on their @youragency.com account — they cannot sign in until it exists.</p>' : ''}
+        ${checklistHtml}
+        ${workspace === 'requested' ? `<p class="mini-meta hire-next-step">Account requested ${escapeHtml(briefDateLabel(h.workspace_requested_at))} — waiting for their first sign-in.</p>` : ''}
+      </div>
+      <div class="hidden" data-hire-detail="${h.id}">
+        <dl class="brief-summary-grid">${details.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
+        ${renderOfferTermsEditor(h)}
+        <div data-hire-files="${h.id}"><p class="mini-meta">Loading files…</p></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // A heading so the list reads as a list of people, not as stray text under
+  // the form — 'Maya Rao' on its own did not announce itself as a name.
+  listEl.innerHTML = `<p class="hire-list-heading">${showDone ? 'Hires' : 'Active hires'}</p>` + listEl.innerHTML;
+}
+
+async function renderHireFiles(hireId) {
+  const wrap = document.querySelector(`[data-hire-files="${hireId}"]`);
+  if (!wrap) return;
+  const out = [];
+  for (const folder of ['slips', 'contract']) {
+    const { data } = await state.supabase.storage.from('hires').list(`${hireId}/${folder}`, { limit: 30 });
+    (data || []).filter(f => f.name).forEach(f => out.push({ folder, name: f.name, path: `${hireId}/${folder}/${f.name}` }));
+  }
+  // Uploads are timestamped rather than overwritten, so a replaced draft leaves
+  // the old one sitting beside it. Newest first, and say plainly which one is
+  // live — an ambiguous folder is how the wrong PDF gets signed.
+  const stamp = (f) => Number((f.name.match(/^(\d+)_/) || [])[1] || 0);
+  out.sort((a, b) => stamp(b) - stamp(a));
+  const newestDraft = out.find((f) => f.folder === 'contract' && /_draft_/.test(f.name));
+  const newestSigned = out.find((f) => f.folder === 'contract' && /_signed_/.test(f.name));
+  const tagFor = (f) => {
+    if (f === newestSigned) return '<span class="brief-status-chip">Signed</span>';
+    if (f === newestDraft) return '<span class="brief-status-chip">Current draft</span>';
+    if (f.folder === 'contract') return '<span class="mini-meta">superseded</span>';
+    return '';
+  };
+  wrap.innerHTML = out.length
+    ? out.map(f => `<div class="brief-deliv-row"><span style="flex:1;">${f.folder === 'contract' ? '📄' : '📎'} ${escapeHtml(f.name.replace(/^\d+_(draft|signed)_/, '').replace(/^\d+_/, ''))}</span>${tagFor(f)}<button class="ghost small" data-hire-file="${escapeHtml(f.path)}" type="button">Download</button></div>`).join('')
+    : '<p class="mini-meta">No files yet.</p>';
+}
+
+async function startHire() {
+  const val = (id) => (document.getElementById(id)?.value || '').trim();
+  const full_name = val('nhName');
+  const personal_email = normalizeEmail(val('nhEmail'));
+  const start_date = val('nhStartDate') || null;
+  const hire_type = val('nhType') || 'full-time';
+  const compensation = Number(val('nhComp')) || 0;
+  const scope_of_work = val('nhScope');
+  const scopedClients = [...document.querySelectorAll('#nhClients input:checked')].map((o) => o.value).filter(Boolean);
+  const notice_period_days = Number(val('nhNotice')) || 0;
+  const reports_to = normalizeEmail(val('nhReportsTo'));
+  const designation = val('nhDesignation');
+  if (!full_name || !personal_email.includes('@')) {
+    setHiringNotice('Enter the candidate\'s name and personal email.', 'mini-meta warn');
+    return;
+  }
+  // Everything the rest of the checklist works from is set here, once
+  // (11 Sep 2026): the date activation fires on, the number Finance
+  // and Legal use, and the scope Leo writes into the agreement.
+  if (!start_date) { setHiringNotice('Set the start date — activation happens on it.', 'mini-meta warn'); return; }
+  if (!compensation) { setHiringNotice(`Enter the ${hireCompensationSpec(hire_type).label.toLowerCase()} — Finance and Legal work from it.`, 'mini-meta warn'); return; }
+  if (!scope_of_work) { setHiringNotice('Write a line of scope — it goes into the agreement.', 'mini-meta warn'); return; }
+  if (![30, 60].includes(notice_period_days)) { setHiringNotice('Pick the notice period — 30 or 60 days.', 'mini-meta warn'); return; }
+  if (!reports_to) { setHiringNotice('Pick who they report to — it becomes their manager in Colony.', 'mini-meta warn'); return; }
+  if (!designation) { setHiringNotice('Give the role a designation — it goes into the agreement and onto their profile.', 'mini-meta warn'); return; }
+  if (personal_email.endsWith(ANT_DOMAIN)) {
+    setHiringNotice('Use their personal email — the youragency.com account comes later.', 'mini-meta warn');
+    return;
+  }
+  setHiringNotice('Creating…');
+  const { data, error } = await state.supabase.from('hires')
+    .insert({ full_name, personal_email, start_date, hire_type, created_by: state.currentEmployeeId })
+    .select();
+  if (error) { setHiringNotice('Could not create: ' + error.message, 'mini-meta warn'); return; }
+  // Offer terms are a crew-only table; the candidate never sees them.
+  const spec = hireCompensationSpec(hire_type);
+  const terms = { hire_id: data[0].id, [spec.key]: compensation, scope_of_work, notice_period_days, hiring_manager_email: reports_to, designation, scoped_client_ids: scopedClients, updated_by_employee_id: state.currentEmployeeId || null };
+  const { error: termsErr } = await state.supabase.from('hire_offer_terms').upsert(terms, { onConflict: 'hire_id' });
+  if (termsErr) { setHiringNotice(`${full_name} created, but the terms did not save: ${termsErr.message}`, 'mini-meta warn'); }
+  ['nhName', 'nhEmail', 'nhStartDate', 'nhComp', 'nhScope', 'nhNotice', 'nhReportsTo', 'nhDesignation'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  document.querySelectorAll('#nhClients input:checked').forEach((cb) => { cb.checked = false; });
+  notifyHireEvent('invited', data?.[0]?.id);
+  setHiringNotice(`✓ ${full_name} invited — they've been emailed instructions.`);
+  await loadHiringPanel();
+}
+
+async function updateHireStage(hireId, toStage) {
+  const hire = hiresCache.find(h => h.id === hireId);
+  if (!hire || !isValidHireTransition(hire.stage, toStage)) return;
+  if (toStage === 'cancelled' && !await appConfirm(`Cancel the hire for ${hire.full_name}?`, { title: 'Cancel hire', confirmLabel: 'Cancel hire', danger: true })) return;
+  const { data, error } = await state.supabase.from('hires').update({ stage: toStage }).eq('id', hireId).select();
+  if (error || !data?.length) { setHiringNotice('Could not update: ' + (error?.message || 'permission?'), 'mini-meta warn'); return; }
+  if (toStage !== 'cancelled') notifyHireEvent(toStage, hireId);
+  await loadHiringPanel();
+}
+
+async function uploadHireContract(hireId, file, signed) {
+  if (!file) return;
+  const hire = hiresCache.find(h => h.id === hireId);
+  if (!hire) return;
+  // Status goes on the row, not the panel header, and animates: a file upload
+  // otherwise gives no sign at all that anything started (8 Sep 2026).
+  setHireRowStatus(hireId, `Uploading ${file.name}`, { busy: true });
+  const prefix = signed ? 'signed' : 'draft';
+  const path = `${hireId}/contract/${Date.now()}_${prefix}_${file.name}`;
+  const { error } = await state.supabase.storage.from('hires').upload(path, file);
+  if (error) { setHireRowStatus(hireId, 'Upload failed: ' + error.message, { warn: true }); return; }
+
+  if (signed) {
+    await updateHireStage(hireId, 'signed');
+    setHireRowStatus(hireId, '✓ Signed contract uploaded — finance notified.');
+    return;
+  }
+  // A replacement draft always needs review again, whether it is arriving for
+  // the first time, replacing an unreviewed draft, or replacing one already
+  // approved. Same-stage replacement is not a transition, so update directly.
+  if (hire.stage === 'contract_uploaded') {
+    await state.supabase.from('hires').update({ updated_at: new Date().toISOString() }).eq('id', hireId);
+    notifyHireEvent('contract_uploaded', hireId);
+    await loadHiringPanel();
+    setHireRowStatus(hireId, '✓ New draft uploaded — review requested again.');
+    return;
+  }
+  const wasApproved = hire.stage === 'reviewed';
+  await updateHireStage(hireId, 'contract_uploaded');
+  setHireRowStatus(hireId, wasApproved
+    ? '✓ New draft uploaded — back to review, since the approved version changed.'
+    : '✓ Contract uploaded — sent for review.');
+}
+
+// Skip a stage whose work happened outside Colony. It advances ONE stage along
+// a transition the flow already allows, and records the stage as skipped —
+// walking a hire forward silently would assert that a contract was drafted and
+// reviewed here when no document exists, which is a worse record than an
+// obviously incomplete one.
+//
+// Mostly no stage email: they describe work that did not happen ("the contract
+// draft is uploaded and waiting for review"), so sending one would put the
+// untruth in an inbox as well as the database. The exception is a stage that
+// announces where you have ARRIVED and hands the next person a real job —
+// see SKIP_STILL_NOTIFIES.
+async function skipHireStage(hireId) {
+  const hire = hiresCache.find(h => h.id === hireId);
+  const toStage = hire && nextHireStage(hire.stage);
+  if (!hire || !toStage) return;
+  const from = HIRE_STAGE_LABEL[hire.stage] || hire.stage;
+  const to = HIRE_STAGE_LABEL[toStage] || toStage;
+  if (!await appConfirm(
+    `Skip "${from}" for ${hire.full_name}? Use this when it was handled outside Colony. It moves to "${to}", records the step as skipped, and sends no email.`,
+    { title: 'Skip this step', confirmLabel: 'Skip' }
+  )) return;
+  setHireRowStatus(hireId, `Skipping ${from}`, { busy: true });
+  const skipped = Array.from(new Set([...(hire.skipped_stages || []), hire.stage]));
+  const { data, error } = await state.supabase.from('hires')
+    .update({ stage: toStage, skipped_stages: skipped }).eq('id', hireId).select();
+  if (error || !data?.length) {
+    setHireRowStatus(hireId, 'Could not skip: ' + (error?.message || 'permission?'), { warn: true });
+    return;
+  }
+  // Arriving at signed or payroll_done still tells whoever must act next.
+  if (skipShouldNotify(toStage)) notifyHireEvent(toStage, hireId);
+  await loadHiringPanel();
+  setHireRowStatus(hireId, `✓ ${from} skipped — now at ${to}.`
+    + (skipShouldNotify(toStage) ? ' Finance notified.' : ''));
+}
+
+// Opens the reseller request in whatever mail client the user has, prefilled.
+// Deliberately NOT sent by Colony: the reply carries a plaintext password, and
+// that exchange belongs in a human's inbox, not in an automated path.
+async function requestWorkspaceAccount(hireId) {
+  const hire = hiresCache.find(h => h.id === hireId);
+  if (!hire) return;
+  // When the service account is configured, Colony creates the account itself
+  // (11 Sep 2026) — no reseller, no forwarded password. The old mailto
+  // path stays as the fallback so a half-configured deploy degrades to the
+  // process that worked, not to a button that errors.
+  const canProvision = Boolean(state.runtimeConfig?.workspaceProvisioning);
+  const address = await appPrompt(
+    canProvision
+      ? `Create which @youragency.com address for ${hire.full_name}? They'll be emailed a one-time password at ${hire.personal_email}.`
+      : `Which address should Example Reseller create for ${hire.full_name}?`,
+    { title: canProvision ? 'Create @youragency.com account' : 'Request @youragency.com account',
+      okLabel: canProvision ? 'Create account' : 'Open request', placeholder: suggestWorkEmail(hire.full_name) }
+  );
+  if (address === null) return;
+  const workEmail = (address || '').trim() || suggestWorkEmail(hire.full_name);
+  if (canProvision) { await provisionWorkspaceAccount(hireId, hire, workEmail); return; }
+  const { subject, body } = workspaceRequestEmail(hire, workEmail);
+  const href = `mailto:${encodeURIComponent(WORKSPACE_VENDOR_TO)}`
+    + `?cc=${encodeURIComponent(WORKSPACE_VENDOR_CC.join(','))}`
+    + `&subject=${encodeURIComponent(subject)}`
+    + `&body=${encodeURIComponent(body)}`;
+  window.open(href, '_blank');
+  // Only stamped once the person says they sent it — a draft that was opened
+  // and abandoned must not read as done.
+  if (!await appConfirm(
+    `Opened the request for ${workEmail}. Mark it as requested once you have sent it?`,
+    { title: 'Account requested?', confirmLabel: 'Yes, sent' }
+  )) return;
+  setHireRowStatus(hireId, 'Saving', { busy: true });
+  const { data, error } = await state.supabase.from('hires')
+    .update({ workspace_requested_at: new Date().toISOString() }).eq('id', hireId).select();
+  if (error || !data?.length) {
+    setHireRowStatus(hireId, 'Could not save: ' + (error?.message || 'permission?'), { warn: true });
+    return;
+  }
+  await loadHiringPanel();
+  setHireRowStatus(hireId, `✓ Requested — forward the credentials to ${hire.full_name} when they arrive.`);
+}
+
+// The automated path. The function does the work and holds the password for
+// one request; this side only reports what happened.
+async function provisionWorkspaceAccount(hireId, hire, workEmail) {
+  setHireRowStatus(hireId, 'Creating account', { busy: true });
+  let result = {};
+  let ok = false;
+  try {
+    const res = await fetch('/api/workspace-provision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session.access_token}` },
+      body: JSON.stringify({ hireId, workEmail })
+    });
+    result = await res.json().catch(() => ({}));
+    ok = res.ok || res.status === 207;
+  } catch (e) { result = { error: e.message }; }
+  if (!ok) { setHireRowStatus(hireId, `Could not create the account: ${result.error || 'unknown error'}`, { warn: true }); return; }
+  await loadHiringPanel();
+  if (result.warning) { setHireRowStatus(hireId, result.warning, { warn: true }); return; }
+  setHireRowStatus(hireId, `✓ ${result.workEmail} created — sign-in details emailed to ${hire.personal_email}.`);
+}
+
+document.getElementById('startHireBtn')?.addEventListener('click', () => startHire().catch(console.error));
+document.getElementById('hiringShowDone')?.addEventListener('change', () => renderHiringList());
+document.getElementById('hiringList')?.addEventListener('click', (e) => {
+  const skip = e.target.closest('[data-hire-skip]');
+  if (skip) { skipHireStage(skip.dataset.hireSkip).catch(console.error); return; }
+  const ws = e.target.closest('[data-hire-workspace]');
+  if (ws) { requestWorkspaceAccount(ws.dataset.hireWorkspace).catch(console.error); return; }
+  const saveTerms = e.target.closest('[data-save-offer-terms]');
+  if (saveTerms) {
+    saveOfferTerms(saveTerms.dataset.saveOfferTerms).catch(console.error);
+    return;
+  }
+  const toggle = e.target.closest('[data-hire-toggle]');
+  if (toggle) {
+    const detail = document.querySelector(`[data-hire-detail="${toggle.dataset.hireToggle}"]`);
+    if (detail) {
+      detail.classList.toggle('hidden');
+      if (!detail.classList.contains('hidden')) renderHireFiles(toggle.dataset.hireToggle).catch(console.error);
+    }
+    return;
+  }
+  const action = e.target.closest('[data-hire-action]');
+  if (action) { updateHireStage(action.dataset.hireId, action.dataset.hireAction).catch(console.error); return; }
+  const file = e.target.closest('[data-hire-file]');
+  if (file) {
+    state.supabase.storage.from('hires').createSignedUrl(file.dataset.hireFile, 300)
+      .then(({ data }) => { if (data?.signedUrl) window.open(data.signedUrl, '_blank', 'noopener'); });
+  }
+});
+// Papersign: draft, then send. Both are functions; the panel only reports.
+async function papersignAction(kind, hireId) {
+  const hire = hiresCache.find((h) => h.id === hireId);
+  if (!hire) return;
+  if (kind === 'send' && !await appConfirm(`Send ${hire.full_name}'s agreement for signature? It goes to them and to Alex through Papersign.`, { title: 'Send for signing', confirmLabel: 'Send' })) return;
+  setHireRowStatus(hireId, kind === 'draft' ? 'Drafting in Papersign' : 'Sending', { busy: true });
+  let out = {}; let ok = false;
+  try {
+    const res = await fetch(`/api/papersign-${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session.access_token}` }, body: JSON.stringify({ hireId }) });
+    out = await res.json().catch(() => ({})); ok = res.ok;
+  } catch (e) { out = { error: e.message }; }
+  if (!ok) { setHireRowStatus(hireId, out.error || 'Papersign failed', { warn: true }); return; }
+  await loadHiringPanel();
+  setHireRowStatus(hireId, kind === 'draft' ? `✓ Draft created in Papersign — Leo can review it there.` : `✓ Sent for signature.`);
+  if (kind === 'draft') notifyHireEvent('contract_uploaded', hireId);
+}
+document.getElementById('hiringList')?.addEventListener('click', (e) => {
+  const d = e.target.closest('[data-hire-ps-draft]'); if (d) { papersignAction('draft', d.dataset.hirePsDraft).catch(console.error); return; }
+  const s2 = e.target.closest('[data-hire-ps-send]'); if (s2) { papersignAction('send', s2.dataset.hirePsSend).catch(console.error); }
+});
+document.getElementById('hiringList')?.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-hire-checklist-toggle]');
+  if (!t) return;
+  document.querySelector(`[data-hire-checklist="${t.dataset.hireChecklistToggle}"]`)?.classList.toggle('hidden');
+});
+document.getElementById('hiringList')?.addEventListener('change', (e) => {
+  if (e.target.matches('[data-hire-contract]')) {
+    uploadHireContract(e.target.dataset.hireContract, e.target.files?.[0], false).catch(console.error);
+  } else if (e.target.matches('[data-hire-signed]')) {
+    uploadHireContract(e.target.dataset.hireSigned, e.target.files?.[0], true).catch(console.error);
+  }
+});
+
+// ── Partner feedback (own bugs/ideas + Your Agency replies; never the internal board) ──
+
+let partnerFeedbackCache = [];
+
+async function loadPartnerFeedback() {
+  // Two readers now: the client team, and an Your Agency reviewer signed in on
+  // Circle to answer them.
+  if (!state.supabase) return;
+  if (!state.partnerProfile && !state.staffOnCircle) return;
+  const [postsRes, repliesRes] = await Promise.all([
+    state.supabase.from('feature_requests')
+      .select('id, request_text, request_type, status, created_at, author_name, author_partner_id')
+      .order('created_at', { ascending: false }),
+    state.supabase.from('feature_request_replies')
+      .select('id, feature_request_id, reply_text, created_at, author_name, author_partner_id')
+      .order('created_at', { ascending: true })
+  ]);
+  // RLS scopes both queries to this partner's ORG — the wall shows what the
+  // client team has raised, not just what this one person raised (Alex,
+  // 10 Sep 2026). Your Agency's own internal requests have no author_partner_id
+  // and are excluded by the policy, so the two boards stay separate.
+  const replies = repliesRes.data || [];
+  // A reviewer's token returns EVERY request, Your Agency's fifty-three internal
+  // ones included. Circle shows client posts only — the whole point of the two
+  // boards being separate is that the internal one does not appear here.
+  const posts = (postsRes.data || [])
+    .filter(p => !state.staffOnCircle || p.author_partner_id);
+  partnerFeedbackCache = posts.map(p => ({
+    ...p,
+    replies: replies.filter(r => r.feature_request_id === p.id)
+  }));
+  renderPartnerFeedback();
+}
+
+// A reviewer on Circle is looking at the client's workspace, not using it.
+// Every control that would WRITE as the client is hidden; replying to feedback
+// is the one thing they are here to do, and that posts as Your Agency.
+//
+// This is presentation, not protection. The protection is that an employee has
+// no partner id, so app.briefs_insert_partner and every sibling policy refuse
+// them at the database. Hiding the buttons stops someone hitting an error they
+// cannot explain.
+function applyStaffOnCircleReadOnly() {
+  const readOnly = Boolean(state.staffOnCircle);
+  const note = document.getElementById('staffCircleNote');
+  if (note) note.classList.toggle('hidden', !readOnly);
+  // Only ever HIDES, and only for staff. It used toggle('hidden', readOnly),
+  // which for a real client UN-hid the notify bell and the Remote Work Policy
+  // link that the partner sign-in path and applyFooterLinkAccess() had just
+  // hidden — every client saw both from 10 to 17 Sep 2026 (found signed in as
+  // the Your Agency QA test client). A client's own controls are theirs to gate.
+  if (!readOnly) return;
+  ['newBriefBtn', 'submitBriefBtn', 'pfComposePanel', 'orgContactsForm',
+    // Employee chrome that followed the session onto the client's domain: the
+    // notify bell is fed by internal signals, and the Remote Work Policy link
+    // points at a screen the Circle bundle does not even contain.
+    'notifyBellBtn', 'footerPolicyRemoteWork', 'footerPolicySep'].forEach((id) => {
+    document.getElementById(id)?.classList.add('hidden');
+  });
+}
+
+// A reply pasted or scripted with hard line breaks every ~40 characters read
+// as a narrow column inside a full-width bubble (17 Sep 2026). Single
+// newlines become spaces; blank lines stay as paragraph breaks.
+function unwrapHardBreaks(text) {
+  return String(text || '').replace(/\r\n?/g, '\n').replace(/([^\n])\n(?!\n)/g, '$1 ').replace(/[ \t]{2,}/g, ' ');
+}
+
+function renderPartnerFeedback() {
+  const ideas = document.getElementById('pfIdeas');
+  const bugs = document.getElementById('pfBugs');
+  const empty = document.getElementById('pfEmpty');
+  if (!ideas || !bugs || !empty) return;
+  // Your Agency raises its own work elsewhere; on Circle a reviewer only answers.
+  applyStaffOnCircleReadOnly();
+  empty.classList.toggle('hidden', partnerFeedbackCache.length > 0);
+  const replyWho = (r) => {
+    if (!r.author_partner_id) return r.author_name || 'Your Agency';
+    if (r.author_partner_id === state.partnerProfile?.id) return 'You';
+    return r.author_name || 'A teammate';
+  };
+  const card = (p) => {
+    const isBug = p.request_type === 'bug';
+    const status = p.status === 'done'
+      ? '<span class="fr-status done">Done</span>'
+      : p.status === 'in_progress'
+        ? '<span class="fr-status in-progress">In progress</span>'
+        : '<span class="fr-status requested">Received</span>';
+    // "You" must mean this viewer specifically — the wall carries the whole
+    // team's posts. A reviewer owns none of them but answers all of them.
+    const mine = Boolean(state.partnerProfile) && p.author_partner_id === state.partnerProfile.id;
+    const canReply = mine || state.staffOnCircle;
+    const author = mine ? 'You' : (p.author_name || (state.staffOnCircle ? 'A client' : 'A teammate'));
+    const replies = (p.replies || []).map((r) => `<div class="brief-comment${r.author_partner_id ? '' : ' internal'}">
+      <div class="who">${escapeHtml(replyWho(r))} · ${escapeHtml(briefDateLabel(r.created_at))}</div>
+      <div class="body">${linkifyProse(unwrapHardBreaks(r.reply_text))}</div>
+    </div>`).join('');
+    return `<div class="fr-card${isBug ? ' fr-card-bug' : ''}${p.status === 'done' ? ' pf-card-done' : ''}" data-pf-id="${p.id}">
+      <div class="fr-card-head">
+        <span class="fr-type-chip ${isBug ? 'fr-type-bug' : 'fr-type-feature'}">${isBug ? 'Bug' : 'Idea'}</span>
+        <strong>${escapeHtml(author)}</strong>
+        <span>${escapeHtml(briefDateLabel(p.created_at))}</span>
+      </div>
+      <div class="fr-card-body">${linkifyProse(p.request_text)}</div>
+      <div class="fr-card-foot">${status}</div>
+      ${replies ? `<div class="pf-replies">${replies}</div>` : ''}
+      ${canReply ? `<div class="action-row pf-reply-row">
+        <input type="text" data-pf-reply-input="${p.id}" placeholder="Reply…">
+        <button class="ghost small" data-pf-reply="${p.id}" type="button">Reply</button>
+      </div>` : ''}
+    </div>`;
+  };
+  const byRecency = (a, b) => String(b.created_at).localeCompare(String(a.created_at));
+  const order = (list) => [...list.filter((p) => p.status !== 'done').sort(byRecency), ...list.filter((p) => p.status === 'done').sort(byRecency)];
+  const ideaList = order(partnerFeedbackCache.filter((p) => p.request_type !== 'bug'));
+  const bugList = order(partnerFeedbackCache.filter((p) => p.request_type === 'bug'));
+  ideas.innerHTML = ideaList.length ? ideaList.map(card).join('') : '<p class="mini-meta">No ideas yet.</p>';
+  bugs.innerHTML = bugList.length ? bugList.map(card).join('') : '<p class="mini-meta">No bugs reported.</p>';
+}
+
+async function submitPartnerFeedback() {
+  const notice = document.getElementById('pfNotice');
+  const textEl = document.getElementById('pfText');
+  const type = document.getElementById('pfType')?.value === 'feature' ? 'feature' : 'bug';
+  const text = (textEl?.value || '').trim();
+  if (!text || !state.partnerProfile) {
+    if (notice) notice.textContent = 'Write a line or two first.';
+    return;
+  }
+  if (notice) notice.textContent = 'Sending…';
+  const { data, error } = await state.supabase.from('feature_requests').insert({
+    author_partner_id: state.partnerProfile.id,
+    author_name: `${state.partnerProfile.full_name} (${state.partnerProfile.org})`,
+    request_text: text,
+    request_type: type
+  }).select();
+  if (error) { if (notice) notice.textContent = 'Could not send: ' + error.message; return; }
+  if (textEl) textEl.value = '';
+  if (notice) notice.textContent = '✓ Sent to the team.';
+  // Alert the admin like internal posts do (best-effort).
+  const token = state.session?.access_token;
+  if (token && data?.[0]?.id) {
+    fetch('/api/feature-request-notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ type: 'new_bug', featureRequestId: data[0].id, actorName: state.partnerProfile.full_name })
+    }).catch(() => {});
+  }
+  loadPartnerFeedback().catch(console.error);
+}
+
+async function submitPartnerFeedbackReply(frId) {
+  const input = document.querySelector(`[data-pf-reply-input="${frId}"]`);
+  const text = (input?.value || '').trim();
+  if (!text) return;
+  // Same box, two authors. A reviewer's reply is stamped employee_id — the
+  // insert policy requires it to match them — and reads as Your Agency on the
+  // client's wall, exactly as a reply posted from Colony does.
+  const asStaff = state.staffOnCircle && !state.partnerProfile;
+  if (!asStaff && !state.partnerProfile) return;
+  const row = asStaff
+    ? {
+      feature_request_id: frId,
+      employee_id: state.currentEmployeeId,
+      author_name: displayPersonName(state.employeeProfile?.full_name, 'Your Agency'),
+      reply_text: text
+    }
+    : {
+      feature_request_id: frId,
+      author_partner_id: state.partnerProfile.id,
+      author_name: `${state.partnerProfile.full_name} (${state.partnerProfile.org})`,
+      reply_text: text
+    };
+  const { error } = await state.supabase.from('feature_request_replies').insert(row);
+  if (error) { console.error(error); return; }
+  loadPartnerFeedback().catch(console.error);
+}
+
+document.getElementById('pfSubmitBtn')?.addEventListener('click', () => submitPartnerFeedback().catch(console.error));
+document.getElementById('pfList')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-pf-reply]');
+  if (btn) submitPartnerFeedbackReply(btn.dataset.pfReply).catch(console.error);
+});
+
+
+// ── Partner timeline: every brief as a stage progression ──────────
+
+async function loadPartnerTimeline() {
+  await loadBriefsData();
+  renderPartnerTimeline();
+}
+
+function renderPartnerTimeline() {
+  const wrap = document.getElementById('ptList');
+  const empty = document.getElementById('ptEmpty');
+  if (!wrap || !empty) return;
+  const rows = briefsCache.filter(b => b.request_type === 'brief')
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  empty.classList.toggle('hidden', rows.length > 0);
+  // Grouped by stage instead of a stepper per brief (7 Sep 2026):
+  // "list the briefs under With Your Agency" rather than a circle to decode.
+  wrap.innerHTML = groupBriefsByTimelineStage(rows).map(group => `
+    <div class="panel"><div>
+      <p class="feed-section-heading" style="margin:0 0 8px;">${escapeHtml(group.label)}
+        <span class="mini-meta">(${group.briefs.length})</span></p>
+      <div class="pt-table">
+        ${group.briefs.map(b => {
+          const badge = isBriefPaused(b)
+            ? `<span class="brief-status-chip st-on_pause" title="${escapeHtml(briefPauseDetail(b))}">On pause</span>`
+            : (briefTimelinePosition(b.status).badge
+                ? `<span class="brief-status-chip st-pending_info">${escapeHtml(briefTimelinePosition(b.status).badge)}</span>`
+                : '');
+          const due = b.deadline ? `<span class="mini-meta pt-row-due">${escapeHtml(formatDealDate(b.deadline))}</span>` : '';
+          return `<div class="pt-row" data-open-brief="${b.id}">
+            <span class="pt-row-title">${escapeHtml(b.title)}</span>
+            ${badge}${due}
+          </div>`;
+        }).join('')}
+      </div>
+    </div></div>`).join('');
+}
+
+document.getElementById('ptList')?.addEventListener('click', (e) => {
+  const card = e.target.closest('[data-open-brief]');
+  if (card) openPartnerBriefDetail(card.dataset.openBrief);
+});
+
+// ── the client stakeholder map (org_contacts) — shared internal + partner panel ──
+
+let orgContactsCache = [];
+let orgContactEditingId = null;
+let orgContactsPanelHome = null;
+
+function placeOrgContactsPanel(mode) {
+  const panel = document.getElementById('orgContactsPanel');
+  if (!panel) return;
+  if (!orgContactsPanelHome) orgContactsPanelHome = { parent: panel.parentElement, next: panel.nextElementSibling };
+  if (mode === 'partner') {
+    document.getElementById('orgContactsPanelSlotPartner')?.appendChild(panel);
+  } else if (orgContactsPanelHome.parent && panel.parentElement?.id === 'orgContactsPanelSlotPartner') {
+    orgContactsPanelHome.parent.insertBefore(panel, orgContactsPanelHome.next);
+  }
+}
+
+function setOrgContactsNotice(message = '', className = 'mini-meta') {
+  const el = document.getElementById('orgContactsNotice');
+  if (el) { el.textContent = message; el.className = className; }
+}
+
+function canEditOrgContacts() {
+  // Staff on Circle are read-only there; reviewers edit the list from Colony.
+  if (state.staffOnCircle) return false;
+  if (isPartnerRole()) return state.partnerProfile?.partner_role !== 'client_viewer';
+  return isBriefReviewer();
+}
+
+async function loadOrgContacts() {
+  if (!state.supabase) return;
+  const { data, error } = await state.supabase
+    .from('org_contacts')
+    .select('*')
+    .order('full_name');
+  if (error) { setOrgContactsNotice('Could not load: ' + error.message, 'mini-meta warn'); return; }
+  orgContactsCache = data || [];
+  // Used to bail before the query when #orgContactsPanel was absent, which made
+  // the cache a side effect of that panel being on screen — the brief form's
+  // approver dropdown needs the same contacts with no panel in sight.
+  const panel = document.getElementById('orgContactsPanel');
+  if (panel) { panel.classList.remove('hidden'); renderOrgContacts(); }
+  renderBriefApproverOptions();
+}
+
+function renderOrgContacts() {
+  // Clients see their own org named; Colony keeps the neutral title.
+  const orgName = state.partnerProfile?.org;
+  const titleEl = document.getElementById('orgContactsTitle');
+  if (titleEl) titleEl.textContent = orgName ? `${orgName} stakeholders` : 'Client stakeholders';
+  const list = document.getElementById('orgContactsList');
+  const form = document.getElementById('orgContactsForm');
+  if (!list) return;
+  const canEdit = canEditOrgContacts();
+  if (form) form.classList.toggle('hidden', !canEdit);
+
+  // Simple oversight tree: roots (no reports_to) first, reports nested under.
+  const byId = Object.fromEntries(orgContactsCache.map(c => [c.id, c]));
+  const children = {};
+  const roots = [];
+  for (const c of orgContactsCache) {
+    if (c.reports_to && byId[c.reports_to]) {
+      (children[c.reports_to] = children[c.reports_to] || []).push(c);
+    } else {
+      roots.push(c);
+    }
+  }
+  const rowHtml = (c, depth) => `<div class="brief-deliv-row" style="padding-left:${depth * 22}px;">
+    <span style="flex:1;min-width:180px;">
+      ${depth ? '<span class="mini-meta">↳</span> ' : ''}<strong>${escapeHtml(c.full_name)}</strong>
+      ${c.team_role ? ` <span class="mini-meta">· ${escapeHtml(c.team_role)}</span>` : ''}
+      ${c.email ? ` <span class="mini-meta">· ${escapeHtml(c.email)}</span>` : ''}
+      ${c.oversees ? `<br><span class="mini-meta">Oversees: ${escapeHtml(c.oversees)}</span>` : ''}
+      ${c.backup_contact ? `<br><span class="mini-meta">In their absence: ${escapeHtml(c.backup_contact)}</span>` : ''}
+    </span>
+    ${canEdit ? `<button class="ghost small" data-oc-edit="${c.id}" type="button">Edit</button>
+    <button class="ghost small danger-text" data-oc-remove="${c.id}" type="button">Remove</button>` : ''}
+  </div>`;
+  const renderBranch = (c, depth) => rowHtml(c, depth)
+    + (children[c.id] || []).map(k => renderBranch(k, depth + 1)).join('');
+  list.innerHTML = roots.map(r => renderBranch(r, 0)).join('')
+    || '<p class="mini-meta">No contacts yet — add the first one below.</p>';
+
+  const reportsSel = document.getElementById('ocReportsTo');
+  if (reportsSel) {
+    const current = reportsSel.value;
+    reportsSel.innerHTML = '<option value="">Reports to…</option>'
+      + orgContactsCache.filter(c => c.id !== orgContactEditingId)
+        .map(c => `<option value="${c.id}">${escapeHtml(c.full_name)}</option>`).join('');
+    reportsSel.value = current;
+  }
+}
+
+async function saveOrgContact() {
+  const val = (id) => (document.getElementById(id)?.value || '').trim();
+  const row = {
+    full_name: val('ocName'),
+    team_role: val('ocRole') || null,
+    email: normalizeEmail(val('ocEmail')) || null,
+    oversees: val('ocOversees') || null,
+    backup_contact: val('ocBackup') || null,
+    reports_to: val('ocReportsTo') || null
+  };
+  // A client's contact belongs to the client's org. The column defaults to
+  // 'Example Collective', so without this any other client's save was filed under
+  // the client (and refused by RLS). The DB forces the same for partner inserts.
+  if (!orgContactEditingId && state.partnerProfile?.org) row.org = state.partnerProfile.org;
+  if (!row.full_name) { setOrgContactsNotice('A name is the one thing we need.', 'mini-meta warn'); return; }
+  setOrgContactsNotice('Saving…');
+  const q = orgContactEditingId
+    ? state.supabase.from('org_contacts').update({ ...row, updated_at: new Date().toISOString() }).eq('id', orgContactEditingId).select()
+    : state.supabase.from('org_contacts').insert(row).select();
+  const { data, error } = await q;
+  if (error) { setOrgContactsNotice('Could not save: ' + error.message, 'mini-meta warn'); return; }
+  if (!data?.length) { setOrgContactsNotice('Nothing saved (permission?).', 'mini-meta warn'); return; }
+  resetOrgContactForm();
+  setOrgContactsNotice('✓ Saved.');
+  await loadOrgContacts();
+}
+
+function resetOrgContactForm(prefill = null) {
+  orgContactEditingId = prefill?.id || null;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+  setVal('ocName', prefill?.full_name);
+  setVal('ocRole', prefill?.team_role);
+  setVal('ocEmail', prefill?.email);
+  setVal('ocOversees', prefill?.oversees);
+  setVal('ocBackup', prefill?.backup_contact);
+  setVal('ocReportsTo', prefill?.reports_to);
+  const saveBtn = document.getElementById('ocSaveBtn');
+  if (saveBtn) saveBtn.textContent = prefill ? 'Save changes' : 'Add';
+  document.getElementById('ocCancelBtn')?.classList.toggle('hidden', !prefill);
+}
+
+document.getElementById('ocSaveBtn')?.addEventListener('click', () => saveOrgContact().catch(console.error));
+document.getElementById('ocCancelBtn')?.addEventListener('click', () => resetOrgContactForm());
+document.getElementById('orgContactsList')?.addEventListener('click', async (e) => {
+  const editBtn = e.target.closest('[data-oc-edit]');
+  if (editBtn) {
+    resetOrgContactForm(orgContactsCache.find(c => c.id === editBtn.dataset.ocEdit));
+    return;
+  }
+  const removeBtn = e.target.closest('[data-oc-remove]');
+  if (removeBtn) {
+    const c = orgContactsCache.find(x => x.id === removeBtn.dataset.ocRemove);
+    if (!c || !await appConfirm(`Remove ${c.full_name} from the team map?`, { title: 'Remove contact', confirmLabel: 'Remove', danger: true })) return;
+    const { error } = await state.supabase.from('org_contacts').delete().eq('id', c.id);
+    if (error) { setOrgContactsNotice('Could not remove: ' + error.message, 'mini-meta warn'); return; }
+    await loadOrgContacts();
+  }
 });

@@ -90,7 +90,7 @@ test('escapeHtml escapes all five dangerous chars', () => {
 
 // ── normalizeEmail ──
 test('normalizeEmail trims and lowercases', () => {
-  assert.equal(u('normalizeEmail')('  Admin@YourAgency.COM '), 'admin@youragency.com');
+  assert.equal(u('normalizeEmail')('  admin@youragency.com '), 'admin@youragency.com');
 });
 
 // ── config sanity ──
@@ -105,10 +105,10 @@ test('PUBLIC_HOLIDAYS entries are well-formed and sorted', () => {
   assert.deepEqual(dates, [...dates].sort(), 'holidays must stay sorted by date');
 });
 
-test('every enforced-access email is on the configured domain', () => {
+test('every enforced-access email is on the youragency domain', () => {
   const map = u('ENFORCED_ACCESS_BY_EMAIL');
   for (const [email, role] of Object.entries(map)) {
-    assert.ok(email.endsWith(u('ANT_DOMAIN')), email);
+    assert.ok(email.endsWith('@youragency.com'), email);
     assert.ok(['admin', 'leadership', 'employee'].includes(role), role);
   }
 });
@@ -156,6 +156,92 @@ test('taskLinkParts + taskTitleHtml: URL in description makes the TITLE clickabl
   assert.match(linked, /Edit &lt;b&gt;deck&lt;\/b&gt; ↗/);  // title still escaped
 });
 
+// June 2026: inline-linkified task descriptions were replaced by "a URL in
+// the description makes the task TITLE the link" (taskTitleHtml), and Alex
+// restated that preference on 20 Sep. This keeps the old approach from
+// creeping back. `linkifyProse` (brief fields, comments, feedback posts) is a
+// DIFFERENT, sanctioned helper — prose has no title to carry the link.
 test('OLD linkify removed', () => {
   assert.equal(vm.runInContext('typeof linkifyText', ctx), 'undefined');
+  assert.equal(vm.runInContext('typeof linkifyProse', ctx), 'function');
+});
+
+// ── timezoneForCity — the city picker IS the city→timezone mapping ──
+test('timezoneForCity maps canonical cities to their IANA zone', () => {
+  const f = u('timezoneForCity');
+  assert.equal(f('Mumbai'), 'Asia/Kolkata');
+  assert.equal(f('Tokyo'), 'Asia/Tokyo');
+  assert.equal(f('Lisbon'), 'Europe/Lisbon');
+  assert.equal(f('New York'), 'America/New_York');
+});
+
+test('timezoneForCity matches case- and whitespace-insensitively', () => {
+  const f = u('timezoneForCity');
+  // Genuine matches against CITY_OPTIONS, just sloppily cased/padded — these
+  // must resolve via the list, not via the fallback. Asserted against a
+  // non-default zone so a silent fall-through to Asia/Kolkata cannot pass.
+  assert.equal(f('tokyo'), 'Asia/Tokyo');
+  assert.equal(f('  TOKYO  '), 'Asia/Tokyo');
+  assert.equal(f('lIsBoN'), 'Europe/Lisbon');
+});
+
+test('cityEntryFor resolves aliases to the canonical city', () => {
+  const f = u('cityEntryFor');
+  // Renames must not nag someone who was never wrong.
+  assert.equal(f('Gurgaon').city, 'Gurugram');
+  assert.equal(f('gurgaon').city, 'Gurugram');
+  assert.equal(f('Calicut, Kerala').city, 'Kozhikode');
+  assert.equal(f('Bombay').city, 'Mumbai');
+  assert.equal(f('Bangalore').city, 'Bengaluru');
+  assert.equal(f('New Delhi').city, 'Delhi');
+});
+
+test('cityEntryFor returns null for a city it cannot place — it must ask, not guess', () => {
+  const f = u('cityEntryFor');
+  assert.equal(f('Atlantis'), null);
+  assert.equal(f(''), null);
+  assert.equal(f(null), null);
+  assert.equal(f(undefined), null);
+});
+
+test('timezoneForCity floors to the default but never throws', () => {
+  const f = u('timezoneForCity');
+  // The UI prompts instead of trusting this; it exists so an unplaceable city
+  // can never stop a profile saving or crash a cron.
+  assert.equal(f('Atlantis'), 'Asia/Kolkata');
+  assert.equal(f(''), 'Asia/Kolkata');
+  assert.equal(f(null), 'Asia/Kolkata');
+});
+
+test('every city on the live roster resolves — nobody gets prompted needlessly', () => {
+  // The actual current_city values in prod as of 17 Jul 2026. If a future edit
+  // to CITY_OPTIONS drops one of these, a real person gets asked to re-pick a
+  // city they already answered correctly.
+  const roster = ['Benaulim', 'Calicut, Kerala', 'Delhi', 'Ghaziabad', 'Goa',
+    'gurgaon', 'Kochi', 'Kolkata', 'Lucknow', 'Mumbai', 'Sikar', 'Tokyo', 'Tura'];
+  const f = u('cityEntryFor');
+  for (const city of roster) {
+    assert.ok(f(city), `roster city no longer resolves: ${city}`);
+  }
+  // ...and each lands on the zone that person is actually in.
+  assert.equal(u('timezoneForCity')('Tokyo'), 'Asia/Tokyo');
+  for (const city of roster.filter((c) => c !== 'Tokyo')) {
+    assert.equal(u('timezoneForCity')(city), 'Asia/Kolkata', city);
+  }
+});
+
+test('every CITY_OPTIONS entry carries a zone the runtime accepts', () => {
+  const cities = vm.runInContext('CITY_OPTIONS', ctx);
+  assert.ok(cities.length > 20);
+  for (const { city, tz, group } of cities) {
+    assert.ok(city && tz && group, `incomplete entry: ${JSON.stringify({ city, tz, group })}`);
+    // Would throw RangeError on a typo'd zone — which is exactly what would
+    // crash the nudge loop in production.
+    assert.doesNotThrow(() => new Intl.DateTimeFormat('en-CA', { timeZone: tz }), `bad zone: ${tz}`);
+  }
+});
+
+test('CITY_OPTIONS has no duplicate cities', () => {
+  const cities = vm.runInContext('CITY_OPTIONS', ctx).map((o) => o.city.toLowerCase());
+  assert.equal(new Set(cities).size, cities.length);
 });

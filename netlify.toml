@@ -1,7 +1,17 @@
 [build]
-  command = "HASH=$(git describe --tags --always) && echo \"var COLONY_VERSION = '${HASH}';\" > version.js && sed -i -E \"s/\\?v=[a-zA-Z0-9._-]+/?v=${HASH}/g\" index.html"
+  # Version string = BASE-YYYYMMDD-g<short sha>. Deliberately NOT `git describe`:
+  # Netlify builds from a shallow clone, so describe can't see the v2.3.0 tag
+  # (275 commits back) and silently degraded to a bare sha — which is what
+  # shipped on 24 Aug 2026. `rev-list --count` is no substitute: in a shallow
+  # clone it returns 1. Date + sha needs no history, so it can't regress.
+  # Bump the base by hand when the version changes.
+  command = "VER=\"v2.3.0-$(date -u +%Y%m%d)-g$(git rev-parse --short HEAD)\" && echo \"var APP_VERSION = '${VER}';\" > version.js && sed -i -E \"s/\\?v=[a-zA-Z0-9._-]+/?v=${VER}/g\" index.html"
   publish = "."
   functions = "netlify/functions"
+  # TRAP (11 Sep 2026): this ignore rule also cancels a MANUAL "Trigger deploy"
+  # when nothing has been committed — so adding an env var and pressing the
+  # button in the dashboard builds nothing. To pick up new env vars, push a
+  # commit that touches a non-markdown file (this comment was one).
   ignore = "if [ -z \"$CACHED_COMMIT\" ]; then exit 1; fi; git diff --quiet $CACHED_COMMIT HEAD -- . ':!*.md' ':!.claude'"
 
 # Deploy previews ENABLED (PR-based) for pre-live testing. They inherit the
@@ -19,6 +29,21 @@
   for = "/*"
   [headers.values]
     X-Robots-Tag = "noindex, nofollow, noarchive, nosnippet"
+    # Nothing may frame Colony or Circle (audit 16 Sep 2026). Every destructive
+    # control here is one click for a signed-in person — approve a hire, archive
+    # a client, send an agreement — so a hostile page that frames the app and
+    # dresses the click up as its own is the whole clickjacking attack. Nothing
+    # in this codebase frames or is framed (no <iframe>, no window.top), so DENY
+    # costs nothing. X-Frame-Options for old browsers, frame-ancestors for the
+    # rest; frame-ancestors is the ONLY CSP directive set — an unlisted
+    # directive is unrestricted, so this cannot break inline scripts or styles.
+    X-Frame-Options = "DENY"
+    Content-Security-Policy = "frame-ancestors 'none'"
+    X-Content-Type-Options = "nosniff"
+    # Colony deep links carry record ids (?open=hire:<uuid>). Without this, a
+    # click on any outbound link — a Drive doc, a client's site — hands that
+    # full URL to the other site as the Referer.
+    Referrer-Policy = "strict-origin-when-cross-origin"
 
 # HTML must always be revalidated so new ?v= cache-bust strings take effect
 [[headers]]
@@ -60,9 +85,37 @@
 [functions."daily-reminders"]
   schedule = "30 4 * * *"
 
-# 11:00 IST weekday task nudge (only for people who have not touched tasks)
+# 11:00 LOCAL weekday task nudge (only for people who have not touched tasks).
+# Every 30 minutes, not once a day: the function emails whoever is currently at
+# their own local 11, so it has to be awake for every zone. Half-hourly rather
+# than hourly because India is UTC+5:30 — an on-the-hour cron would never land
+# on 11:00 IST and would therefore never nudge anyone. The weekday filter is
+# per-person too (a Monday in Tokyo is still Sunday in Los Angeles), so the
+# cron itself stays 7-day. task-nudge returns `quiet` on the ~45 runs a day
+# that are nobody's 11 AM, so those write no heartbeat.
 [functions."task-nudge"]
-  schedule = "30 5 * * 1-5"
+  schedule = "0,30 * * * *"
+
+# 10:00 IST every day. The function itself refuses to send on weekends and
+# public holidays — the working-day countdown is happy to say "one day left"
+# on a Saturday, so the guard is what keeps it off people's weekends.
+# 09:30 IST, half an hour before the other crons: a joiner activated on their
+# start date should be set up BEFORE the 10:00 task nudge decides whether to
+# chase them.
+[functions."scheduled-activation"]
+  schedule = "0 4 * * *"
+
+[functions."brief-deadline-reminder"]
+  schedule = "30 4 * * *"
+
+# 10:30 IST, half an hour after the deadline reminders, so a coordinator who is
+# cc'd on both does not get two Colony emails in the same second.
+[functions."brief-approval-nudge"]
+  schedule = "0 5 * * *"
+
+# 10:45 IST — the Your Agency-side mirror of the approval nudge.
+[functions."brief-pickup-nudge"]
+  schedule = "15 5 * * *"
 
 [functions."invoice-reminder"]
   schedule = "30 4 * * *"
