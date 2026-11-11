@@ -1,5 +1,26 @@
 # Setup Guide
 
+**Most people don't need this page.** Press the Deploy to Netlify button in the [README](README.md), open your new site, and follow the setup page. To add a feature later, open `/install.html` on your site.
+
+The easy route covers this list. A tool you don't tick is left out, and Colony carries on without it:
+
+| Tool | Needed? | What you do | If you skip it |
+|---|---|---|---|
+| Netlify | Yes | Paste a token | |
+| Supabase | Yes | Paste a token | |
+| Sign-in | One of the two | Email link, or a Google client ID and secret | |
+| Email (Resend) | Only for email links | Paste a key | Colony sends no email |
+| AI summaries (Anthropic) | No | Paste a key | No AI summaries |
+| Slack | No | Paste a token | Joiners aren't checked against Slack |
+| Papersign | No | Paste a token, then pick templates in Colony | You handle agreements yourself |
+| Google Workspace | No, Workspace companies only | A super-admin approves access once, then upload a key file | You create accounts yourself |
+
+Your email must be on your company's own domain, because everyone at that domain can ask to join. Free addresses such as Gmail are refused.
+
+The rest of this guide is the manual route, for developers.
+
+---
+
 Everything needed to run your own Agency Colony instance.
 
 > Most operational settings live in the **database** and are editable in the app (Admin Settings → Operational Config). You only edit code for the initial bootstrap. See [Configuration](#6-configuration).
@@ -145,6 +166,7 @@ Update the page title and splash text in `index.html`.
 | `daily-reminders` | 04:30 daily | pending-leave digest, birthdays, leave cycle rollover |
 | `task-nudge` | every 30 min | nudges people at 11am *their* time, only if they haven't touched their tasks |
 | `scheduled-activation` | 04:00 daily | switches on new joiners whose start date has arrived |
+| `workspace-group-sync` | 03:45 daily | adds accounts Colony created to your all-staff Google Group if that failed at creation, and names any active employee not on it |
 | `brief-deadline-reminder` | 04:30 daily | reminders before brief deliverables are due |
 | `brief-approval-nudge` | 05:00 daily | chases briefs waiting on the client's approval |
 | `brief-pickup-nudge` | 05:15 daily | chases approved briefs nobody has picked up |
@@ -184,8 +206,10 @@ Set-up:
 3. In the Google Admin console → **Security → API controls → Domain-wide delegation**, add the service account's client ID with these scopes, one per line:
    ```
    https://www.googleapis.com/auth/admin.directory.user
+   https://www.googleapis.com/auth/admin.directory.group.member
    https://www.googleapis.com/auth/drive
    ```
+   The group scope lets Colony add each new account to your all-staff Google Group (set `WORKSPACE_ALL_GROUP`, e.g. `all@youragency.com`). Leave it out and accounts are still created; Colony just says the group add was not allowed.
 4. Set two environment variables. **Store only the two fields below** — a full key file is over Netlify's 4KB limit and will fail the deploy:
    ```
    GOOGLE_SA_JSON={"client_email":"colony@your-project.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----\n…"}
@@ -205,7 +229,9 @@ Employment and consulting agreements go from draft to signed PDF through [Papers
 
 1. **Templates.** Upload each agreement to Papersign as a template, and mark the fill-in spots with these variable keys:
 
-   `hire_name` · `start_date` · `notice_period_days` · `compensation` · `compensation_label` · `scope_of_work` · `designation` · `current_address` · `permanent_address` · `pan`
+   `hire_name` · `hire_email` · `start_date` · `notice_period_days` · `notice_period_words` · `compensation` · `compensation_label` · `ctc_amount` · `ctc_words` · `ctc_breakup_1` … `ctc_breakup_10` · `fee_amount` · `fee_words` · `scope_of_work` · `designation` · `department` · `current_address` · `permanent_address` · `pan`
+
+   `compensation` reads "₹60,000 per month" and suits a consulting agreement. An employment agreement usually prints its own "Rs." and words, so it takes `ctc_amount` ("15,00,000"), `ctc_words` ("Fifteen Lakh") and `notice_period_words` ("sixty") instead; `ctc_breakup_1` … `ctc_breakup_10` are the pay breakup finance enters, one component per variable with the total last, for a salary annexure — stack the ten under each other in the template (Papersign drops line breaks inside a single variable). Up to nine components fit. A full-time draft is refused until the breakup adds up to the CTC. A consulting agreement that prints its own "Rs." takes `fee_amount` ("60,000") and `fee_words` ("Sixty Thousand"); `hire_email` is the person's own email, for a notice clause.
 
    Give each template two signer roles: the hire, and your agency's signer.
 

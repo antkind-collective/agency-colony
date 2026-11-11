@@ -1646,30 +1646,6 @@
     "confirmed": true
   },
   {
-    "id": "global-solar-indore-2026",
-    "name": "Global Solar Expo — Indore",
-    "emoji": "☀️",
-    "start_date": "2026-09-30",
-    "end_date": "2026-10-01",
-    "duration_type": "event",
-    "category": "conference",
-    "themes": [
-      "renewables",
-      "solar"
-    ],
-    "region": "india",
-    "region_detail": "Indore, Sheraton Grand Palace",
-    "organiser": "EQ International",
-    "description": "Central India solar EPC and distributor audience.",
-    "content_hook": "Regional reach into the MP/Central India installer base.",
-    "relevance_tags": [
-      "solar",
-      "madhya_pradesh"
-    ],
-    "url": "https://globalsolarexpo.com/indore-expo-30-sep-1-oct-2026/",
-    "confirmed": true
-  },
-  {
     "id": "unblocktober-2026",
     "name": "Unblocktober",
     "emoji": "🚰",
@@ -1718,32 +1694,6 @@
       "moefcc"
     ],
     "url": "https://www.pib.gov.in/PressReleasePage.aspx?PRID=2175490",
-    "confirmed": true
-  },
-  {
-    "id": "brazil-presidential-election-2026",
-    "name": "Brazil Presidential Election (Round 1)",
-    "emoji": "🇧🇷",
-    "start_date": "2026-10-04",
-    "end_date": "2026-10-04",
-    "duration_type": "day",
-    "category": "policy_regulatory",
-    "themes": [
-      "policy",
-      "deforestation",
-      "latam_climate"
-    ],
-    "region": "latam",
-    "region_detail": "Brazil",
-    "organiser": "Government of Brazil",
-    "description": "Could determine the future of Amazon deforestation policy and Brazil's climate leadership post-COP30. Lula is current favourite.",
-    "content_hook": "LATAM climate policy implications. Content hook around how elections shape climate futures and deforestation trajectories.",
-    "relevance_tags": [
-      "brazil_elections",
-      "amazon",
-      "deforestation_policy"
-    ],
-    "url": null,
     "confirmed": true
   },
   {

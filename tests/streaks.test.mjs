@@ -91,3 +91,45 @@ test('day 1 says four working days to one week', () => {
   assert.equal(p.remaining, 4);
   assert.equal(u('milestoneLabel')(p.next), 'one week');
 });
+
+// ── Streak freeze by choice, from 1 Oct 2026 ──────────────────────────────
+// Oct 2026: 2nd (Fri) Gandhi Jayanti; 5 Mon … 9 Fri; 12 Mon … 16 Fri.
+const OCT = ['2026-10-02'];
+const freezeCase = (dates, today, freezes = []) =>
+  u('computeStreak')(new Set(dates), today, OCT, new Set(), new Set(freezes));
+
+test('a miss from 1 Oct is pending the next day: streak holds, freeze offered', () => {
+  const r = freezeCase(['2026-10-05', '2026-10-06'], '2026-10-08');
+  assert.equal(r.count, 2);
+  assert.equal(r.pendingMiss, '2026-10-07');
+});
+
+test('the offer stays up for two working days, then the miss breaks the streak', () => {
+  const held = freezeCase(['2026-10-05', '2026-10-06', '2026-10-08', '2026-10-09'], '2026-10-09');
+  assert.deepEqual([held.count, held.pendingMiss], [4, '2026-10-07']);
+  const lapsed = freezeCase(['2026-10-05', '2026-10-06', '2026-10-08', '2026-10-09', '2026-10-12'], '2026-10-12');
+  assert.deepEqual([lapsed.count, lapsed.pendingMiss], [3, null]);
+});
+
+test('a used freeze covers the day for good', () => {
+  const r = freezeCase(['2026-10-05', '2026-10-06', '2026-10-08', '2026-10-09', '2026-10-12'], '2026-10-12', ['2026-10-07']);
+  assert.deepEqual([r.count, r.pendingMiss], [5, null]);
+});
+
+test('one freeze a month: a second miss after using it ends the streak, no offer', () => {
+  const r = freezeCase(['2026-10-05', '2026-10-06', '2026-10-08', '2026-10-09', '2026-10-12'], '2026-10-14', ['2026-10-07']);
+  assert.deepEqual([r.count, r.pendingMiss], [0, null]);
+});
+
+test('no offer when a freeze could not save anything', () => {
+  // Two misses in a row: the freeze could cover only one.
+  assert.equal(freezeCase(['2026-10-05', '2026-10-06'], '2026-10-09').pendingMiss, null);
+  // Nothing before the miss.
+  assert.equal(freezeCase([], '2026-10-08').pendingMiss, null);
+});
+
+test('misses up to 30 Sep keep the automatic grace day (no one changed on switch-over)', () => {
+  const r = compute(['2026-09-21', '2026-09-22', '2026-09-24', '2026-09-25', '2026-09-28'], '2026-09-28');
+  assert.equal(r.count, 5);
+  assert.equal(r.pendingMiss, null);
+});

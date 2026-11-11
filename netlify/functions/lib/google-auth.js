@@ -7,6 +7,11 @@
 // Each scope also has to be listed against the service account's client ID
 // under Admin console → Security → API controls → Domain-wide delegation, or
 // the token exchange fails with "unauthorized_client".
+//
+// { asSelf: true } signs in as the service account itself, impersonating no
+// one (26 Oct 2026, Google Analytics): access then comes from wherever the
+// account's own address was added (a the client property's Viewers), not from
+// domain-wide delegation, so no Admin console scope is needed.
 
 const { createSign } = require('node:crypto');
 
@@ -14,17 +19,17 @@ function b64url(input) {
   return Buffer.from(typeof input === 'string' ? input : JSON.stringify(input)).toString('base64url');
 }
 
-async function googleAccessToken(scope) {
+async function googleAccessToken(scope, { asSelf = false } = {}) {
   const raw = process.env.GOOGLE_SA_JSON;
   const subject = process.env.GOOGLE_ADMIN_IMPERSONATE;
-  if (!raw || !subject) throw new Error('Google service account is not configured (GOOGLE_SA_JSON / GOOGLE_ADMIN_IMPERSONATE).');
+  if (!raw || (!subject && !asSelf)) throw new Error('Google service account is not configured (GOOGLE_SA_JSON / GOOGLE_ADMIN_IMPERSONATE).');
   let sa;
   try { sa = JSON.parse(raw); } catch (e) { throw new Error('GOOGLE_SA_JSON is not valid JSON.'); }
   if (!sa.client_email || !sa.private_key) throw new Error('GOOGLE_SA_JSON is missing client_email or private_key.');
 
   const now = Math.floor(Date.now() / 1000);
   const unsigned = `${b64url({ alg: 'RS256', typ: 'JWT' })}.${b64url({
-    iss: sa.client_email, sub: subject, scope,
+    iss: sa.client_email, ...(asSelf ? {} : { sub: subject }), scope,
     aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 300
   })}`;
   const signer = createSign('RSA-SHA256');

@@ -23,7 +23,18 @@ scripts/sql.sh
 
 # Other Claude sessions keep working files in this folder — never commit them.
 THREAD_REGISTRY.json
+THREAD_REGISTRY.json.bak_*
 COLONY_PIPELINE_AUDIT_*.md
+Morning_Briefing_*.md
+*.json.bak
+*.bak_*
+
+# Rows lifted out of the live DB before a delete — real people and clients,
+# kept locally as a safety net. Never commit them.
+_deleted_rows/
+
+# Client data pulled for one-off analysis.
+*.xlsx
 
 # Generated per deploy by _build/build-circle.mjs — never committed.
 circle/

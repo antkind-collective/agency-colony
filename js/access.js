@@ -66,6 +66,7 @@ function getConfigMap(key, fallback) {
 }
 function getInvoiceExcludedEmails(){ return getConfigList('invoice_excluded_emails', INVOICE_EXCLUDED_EMAILS); }
 function getHiddenEmployeeEmails() { return getConfigList('hidden_employee_emails',  HIDDEN_EMPLOYEE_EMAILS); }
+function getAllGroupExemptEmails() { return getConfigList('all_group_exempt_emails', ALL_GROUP_EXEMPT_EMAILS); }
 // Dedicated to specific clients (app.employee_client_scope → state.clientScopeByEmployee).
 // Mirrors app.is_client_scoped(): only a FRACTIONAL person is scoped. Rows left
 // behind on someone who has since moved to full-time or consultant are inert —
@@ -106,6 +107,15 @@ function isHiringCrew() {
 // still employee-wide at the DB (internal trust), this gates the buttons.
 function isBriefReviewer() {
   if (isLeadershipRole()) return true;
+  const email = normalizeEmail(state.employeeProfile?.email || state.session?.user?.email || '');
+  return getBriefReviewerEmails().includes(email);
+}
+
+// Sets a new date on a brief for the client: the three brief reviewers and
+// Alex, not all leadership (21 Oct 2026). Mirrors
+// app_private.can_set_client_date(), which is the real boundary.
+function canSetClientDate() {
+  if (isSuperadminUser()) return true;
   const email = normalizeEmail(state.employeeProfile?.email || state.session?.user?.email || '');
   return getBriefReviewerEmails().includes(email);
 }

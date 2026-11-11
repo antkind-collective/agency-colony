@@ -3,15 +3,32 @@ const { getConfig } = require('./config');
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FETCH_TIMEOUT_MS = 15000;
 
-async function sendEmail({ to, cc, subject, html, text, audience = 'team' }) {
-  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+// Anything that goes to Finance also copies the head of finance: Blake is
+// the accounting team, Ari heads finance internally (16 Oct 2026).
+// Done here, once, so every finance email (hiring, payroll, invoices, and any
+// added later) carries it without each sender remembering.
+const ALWAYS_COPY = { 'finance@youragency.com': ['ari@youragency.com'] };
+
+function withStandingCopies(recipients, cc) {
+  const all = [...recipients, ...cc].map((e) => String(e).toLowerCase());
+  const extra = all.flatMap((e) => ALWAYS_COPY[e] || []);
+  return [...cc, ...extra.filter((e, i) => !all.includes(e) && extra.indexOf(e) === i)];
+}
+
+// `private: true` sends to the named recipients only, with no standing copies:
+// for mail that must reach one person and nobody else, like a sign-in code
+// (28 Oct 2026: Finance's Invoices code would otherwise have copied Ari).
+async function sendEmail({ to, cc, subject, html, text, audience = 'team', replyTo = null, private: onlyThem = false }) {
+  const unclaimed = (e) => /^unassigned-/i.test(String(e));
+  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean).filter((e) => !unclaimed(e));
   // Copies belong in CC, not in separate sends: three people who each received
   // their own private copy of the same handoff cannot see each other, cannot
   // reply-all, and cannot tell whether anyone else knows (24 Aug 2026).
-  const ccRecipients = (Array.isArray(cc) ? cc : [cc])
-    .filter(Boolean)
+  const ccRecipients = (onlyThem ? (Array.isArray(cc) ? cc : [cc]).filter(Boolean) : withStandingCopies(recipients, (Array.isArray(cc) ? cc : [cc]).filter(Boolean)))
+    .filter((e) => !unclaimed(e))
     .filter((e) => !recipients.some((r) => String(r).toLowerCase() === String(e).toLowerCase()));
 
+  if (!recipients.length && (Array.isArray(to) ? to : [to]).some(unclaimed)) return { skipped: true, reason: 'Only unclaimed role addresses.', recipients: [], ccRecipients: [] };
   if (!recipients.length) {
     throw new Error('At least one recipient email is required.');
   }
@@ -67,6 +84,8 @@ async function sendEmail({ to, cc, subject, html, text, audience = 'team' }) {
         from: fromHeader,
         to: recipients,
         ...(ccRecipients.length ? { cc: ccRecipients } : {}),
+        // A vendor answering a Colony email should reach a person, not noreply.
+        ...(replyTo ? { reply_to: replyTo } : {}),
         subject,
         html,
         text
@@ -97,5 +116,6 @@ async function sendEmail({ to, cc, subject, html, text, audience = 'team' }) {
 }
 
 module.exports = {
-  sendEmail
+  sendEmail,
+  withStandingCopies
 };

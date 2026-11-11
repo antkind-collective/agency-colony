@@ -17,6 +17,11 @@ async function configList(supabase, key, fallback) {
 // Employees who still upload invoices but don't receive reminder emails
 const INVOICE_REMINDER_SKIP_EMAILS = ['ops-lead@youragency.com', 'finance@youragency.com', 'am-lead@youragency.com'];
 
+// Copied on every "please send your invoice" reminder (30 Sep 2026),
+// so Finance sees who is being chased. app_config.invoice_reminder_cc_emails
+// overrides this list from Admin Settings.
+const INVOICE_REMINDER_CC_EMAILS = ['finance@youragency.com', 'ari@youragency.com'];
+
 // Email to notify when all invoices are received
 const INVOICE_COMPLETION_EMAIL = 'finance@youragency.com';
 
@@ -27,6 +32,88 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// Who owes an invoice for `invoiceMonth` (YYYY-MM) and who has not uploaded.
+// Only people who actually raise an invoice: fractional and consultant
+// (28 and 31 Aug 2026). A consultant is an employee in every other
+// respect — leave, nudges, client access — but is paid against an invoice.
+// The old rule keyed off the DEPARTMENT leave flag, which only excludes
+// Finance — so eleven salaried staff and the studio@ service account were
+// being chased monthly for invoices they never submit.
+async function invoiceStatusFor(supabase, invoiceMonth) {
+  const employeesResponse = await supabase
+    .from('employees')
+    .select('id, full_name, email, is_active, employment_type, department:departments!employees_department_id_fkey(leave_tracking_enabled)')
+    .eq('is_active', true)
+    .in('employment_type', ['fractional', 'consultant'])
+    .order('full_name', { ascending: true });
+  if (employeesResponse.error) throw new Error(`Employee query failed: ${employeesResponse.error.message}`);
+
+  // Finance still never invoices, and the exclusion list is honoured on top.
+  const excluded = await configList(supabase, 'invoice_excluded_emails', INVOICE_EXCLUDED_EMAILS);
+  const employees = (employeesResponse.data || []).filter(
+    e => e.department?.leave_tracking_enabled !== false &&
+      !excluded.includes((e.email || '').toLowerCase().trim())
+  );
+
+  const invoicesResponse = await supabase
+    .from('invoices')
+    .select('employee_id')
+    .eq('invoice_month', invoiceMonth);
+  if (invoicesResponse.error) throw new Error(`Invoice query failed: ${invoicesResponse.error.message}`);
+  const uploadedEmployeeIds = new Set((invoicesResponse.data || []).map(row => row.employee_id));
+
+  const monthLabel = new Date(invoiceMonth + '-15').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  return { employees, pendingEmployees: employees.filter(e => !uploadedEmployeeIds.has(e.id)), monthLabel };
+}
+
+async function alreadyLogged(supabase, kind, invoiceMonth) {
+  const { data } = await supabase.from('notification_log').select('id')
+    .eq('kind', kind).contains('payload', { invoice_month: invoiceMonth }).limit(1);
+  return (data || []).length > 0;
+}
+
+// Missed list (30 Sep 2026): on the 1st-3rd, Blake gets who did not
+// upload last month's invoice. Reminders stop when the month turns, so
+// without this nobody was told who missed the deadline. Days 1-3 rather than
+// only the 1st so one failed run can't lose it; the log makes it once only.
+// Nothing is sent when nobody missed (he already had "All invoices received").
+async function sendMissedDigest(supabase, invoiceMonth, summary, appBaseUrl) {
+  if (await alreadyLogged(supabase, 'invoice_missed_digest', invoiceMonth)) return;
+  const { pendingEmployees, monthLabel } = await invoiceStatusFor(supabase, invoiceMonth);
+  summary.missedLastMonth = pendingEmployees.map((e) => e.full_name);
+  if (!pendingEmployees.length) return;
+  const names = pendingEmployees.map((e) => e.full_name || e.email);
+  const subject = `Invoices not received for ${monthLabel} (${names.length})`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5">
+      <p>Hi Blake,</p>
+      <p>These invoices for <strong>${escapeHtml(monthLabel)}</strong> were not uploaded by the end of the month:</p>
+      <ul>${names.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
+      <p>They were reminded daily from the 25th. Colony has stopped reminding them now that the month is over.</p>
+      <p><a href="${appBaseUrl}#invoice-center">Open the invoice centre</a></p>
+    </div>`;
+  const text = [
+    'Hi Blake,',
+    `These invoices for ${monthLabel} were not uploaded by the end of the month:`,
+    ...names.map((n) => `- ${n}`),
+    'They were reminded daily from the 25th. Colony has stopped reminding them now that the month is over.',
+    `${appBaseUrl}#invoice-center`
+  ].join('\n');
+  try {
+    const emailResult = await sendEmail({ to: INVOICE_COMPLETION_EMAIL, subject, html, text });
+    await logNotification({
+      kind: 'invoice_missed_digest',
+      recipientEmail: INVOICE_COMPLETION_EMAIL,
+      subject,
+      payload: { invoice_month: invoiceMonth, missed: pendingEmployees.map((e) => e.id) },
+      status: emailResult.skipped ? 'skipped' : 'sent'
+    });
+    summary.missedDigestSent = !emailResult.skipped;
+  } catch (error) {
+    summary.errors.push(`Missed-invoice digest failed: ${error.message}`);
+  }
 }
 
 const run = async (event) => {
@@ -60,11 +147,17 @@ const run = async (event) => {
     errors: []
   };
 
+  if (dayOfMonth <= 3) {
+    const prev = istMonth === 1 ? `${istYear - 1}-12` : `${istYear}-${String(istMonth - 1).padStart(2, '0')}`;
+    try { await sendMissedDigest(supabase, prev, summary, appBaseUrl); }
+    catch (error) { summary.errors.push(error.message); }
+  }
+
   // Only send reminders from the 25th onwards
   if (dayOfMonth < 25) {
     summary.skippedBeforeDeadline = true;
     return {
-      statusCode: 200,
+      statusCode: summary.errors.length ? 207 : 200,
       body: JSON.stringify(summary)
     };
   }
@@ -72,67 +165,21 @@ const run = async (event) => {
   // Determine invoice month: current month in YYYY-MM format (IST)
   const invoiceMonth = `${istYear}-${String(istMonth).padStart(2, '0')}`;
 
-  // Only people who actually raise an invoice: fractional and consultant
-  // (28 and 31 Aug 2026). A consultant is an employee in every other
-  // respect — leave, nudges, client access — but is paid against an invoice.
-  // The old rule keyed
-  // off the DEPARTMENT leave flag, which only excludes Finance — so eleven
-  // salaried staff and the studio@ service account were being chased monthly
-  // for invoices they never submit.
-  const employeesResponse = await supabase
-    .from('employees')
-    .select('id, full_name, email, is_active, employment_type, department:departments!employees_department_id_fkey(leave_tracking_enabled)')
-    .eq('is_active', true)
-    .in('employment_type', ['fractional', 'consultant'])
-    .order('full_name', { ascending: true });
-
-  if (employeesResponse.error) {
-    summary.errors.push(`Employee query failed: ${employeesResponse.error.message}`);
+  let status;
+  try { status = await invoiceStatusFor(supabase, invoiceMonth); }
+  catch (error) {
+    summary.errors.push(error.message);
     return { statusCode: 500, body: JSON.stringify(summary) };
   }
-
-  // Finance still never invoices, and the exclusion list is honoured on top.
-  const excluded = await configList(supabase, 'invoice_excluded_emails', INVOICE_EXCLUDED_EMAILS);
-  const employees = (employeesResponse.data || []).filter(
-    e => e.department?.leave_tracking_enabled !== false &&
-      !excluded.includes((e.email || '').toLowerCase().trim())
-  );
-
-  // Get all invoice uploads for this month
-  const invoicesResponse = await supabase
-    .from('invoices')
-    .select('employee_id')
-    .eq('invoice_month', invoiceMonth);
-
-  if (invoicesResponse.error) {
-    summary.errors.push(`Invoice query failed: ${invoicesResponse.error.message}`);
-    return { statusCode: 500, body: JSON.stringify(summary) };
-  }
-
-  const uploadedEmployeeIds = new Set(
-    (invoicesResponse.data || []).map(row => row.employee_id)
-  );
-
-  const monthLabel = new Date(invoiceMonth + '-15').toLocaleDateString('en-IN', {
-    month: 'long', year: 'numeric'
-  });
-
-  // Find employees who still need to upload
-  const pendingEmployees = employees.filter(e => !uploadedEmployeeIds.has(e.id));
+  const { employees, pendingEmployees, monthLabel } = status;
 
   // If all invoices received, notify Blake (only once — check notification log)
   if (pendingEmployees.length === 0) {
     summary.allInvoicesReceived = true;
 
-    // Check if we already sent the completion email for this month
-    const alreadySentResponse = await supabase
-      .from('notification_log')
-      .select('id')
-      .eq('kind', 'invoice_all_received')
-      .contains('payload', { invoice_month: invoiceMonth })
-      .limit(1);
-
-    const alreadySent = (alreadySentResponse.data || []).length > 0;
+    // Once a month. This check could never succeed until invoice_all_received
+    // was added to app.notification_kind (202609300001): the log insert failed.
+    const alreadySent = await alreadyLogged(supabase, 'invoice_all_received', invoiceMonth);
 
     if (!alreadySent) {
       const subject = `All invoices received — ${monthLabel}`;
@@ -177,6 +224,7 @@ const run = async (event) => {
   }
 
   // Send reminders to employees who haven't uploaded yet (skip silenced ones)
+  const reminderCc = await configList(supabase, 'invoice_reminder_cc_emails', INVOICE_REMINDER_CC_EMAILS);
   for (const employee of pendingEmployees) {
     if (INVOICE_REMINDER_SKIP_EMAILS.includes((employee.email || '').toLowerCase().trim())) continue;
     const subject = `Invoice reminder — ${monthLabel}`;
@@ -198,6 +246,7 @@ const run = async (event) => {
     try {
       const emailResult = await sendEmail({
         to: employee.email,
+        cc: reminderCc.filter((e) => e !== (employee.email || '').toLowerCase().trim()),
         subject,
         html,
         text

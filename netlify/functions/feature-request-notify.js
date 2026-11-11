@@ -99,7 +99,8 @@ exports.handler = async (event) => {
       author_partner:partners!feature_requests_author_partner_id_fkey (
         id,
         full_name,
-        email
+        email,
+        email_opt_out
       )
     `)
     .eq('id', featureRequestId)
@@ -143,21 +144,26 @@ exports.handler = async (event) => {
     const postedOn = fr.author_partner_id ? 'Circle' : 'Colony';
     const who = fr.author_partner_id ? `${actor} (client, on Circle)` : actor;
     const bodyLine = `<p>${escapeHtml(who)} posted a new ${escapeHtml(typeLabel)} on ${postedOn}:</p>`;
+    // A client post lives on Circle only (6 Oct 2026): Colony's wall no longer
+    // shows it, so the alert is a Circle email that links to Circle, where
+    // Alex replies and marks it fixed. Reminders follow every 2 days until
+    // then (client-feedback-reminder.js).
+    const openLink = fr.author_partner_id
+      ? `${circleBaseUrl}?open=request:${fr.id}#partner-feedback`
+      : `${appBaseUrl}?open=request:${fr.id}#feature-requests`;
 
     const html = `
       <div style="font-family:Arial,sans-serif;line-height:1.5">
         <p>Hey Alex,</p>
         ${bodyLine}
         <blockquote style="border-left:3px solid ${isBug ? '#e74c3c' : '#b8a04a'};margin:8px 0;padding:4px 12px;color:#555">${escapeHtml(snippet)}</blockquote>
-        <!-- This alert goes to Alex, an employee: it always links to Colony,
-             where he can act on it, even when the post was made on Circle. -->
-        <p>Open it in Colony: <a href="${appBaseUrl}?open=request:${fr.id}#feature-requests">${appBaseUrl}?open=request:${fr.id}#feature-requests</a></p>
+        <p>Open it in ${postedOn}: <a href="${openLink}">${openLink}</a></p>
       </div>
     `;
-    const text = `New ${typeLabel} from ${who}:\n"${snippet}"\nOpen in Colony: ${appBaseUrl}?open=request:${fr.id}#feature-requests`;
+    const text = `New ${typeLabel} from ${who}:\n"${snippet}"\nOpen in ${postedOn}: ${openLink}`;
 
     try {
-      const emailResult = await sendEmail({ to: adminEmail, subject, html, text });
+      const emailResult = await sendEmail({ to: adminEmail, subject, html, text, audience: fr.author_partner_id ? 'partner' : 'team' });
       await logNotification({
         kind: 'new_bug_report',
         recipientEmail: adminEmail,
@@ -176,6 +182,11 @@ exports.handler = async (event) => {
   // Don't notify yourself
   if (callerEmail === ownerEmail.toLowerCase()) {
     return jsonResponse(200, { ok: true, skipped: true, reason: 'Actor is the owner.' });
+  }
+  // Opted-out client logins (Your Agency people posting on a client's behalf,
+  // 30 Sep 2026) get no client emails, as in the brief nudges.
+  if (ownerIsPartner && fr.author_partner?.email_opt_out) {
+    return jsonResponse(200, { ok: true, skipped: true, reason: 'Owner opted out.' });
   }
 
   let subject;

@@ -19,6 +19,9 @@ function calendarDayCount(startDate, endDate) {
 // The request-form policy check. Returns { level: 'ok'|'warn', text }.
 // Rule: SL of 3+ days needs a medical certificate (matches the DB trigger).
 function leavePolicyCheck(type, days) {
+  if (type === 'SR') {
+    return { level: 'ok', text: 'Streak reward: a half-day off from your streak, not from PL, CL or SL.' };
+  }
   if (type === 'SL' && days >= 3) {
     return { level: 'warn', text: `Policy check: SL for ${days} day(s) requires medical certificate.` };
   }
@@ -68,4 +71,25 @@ function formatLeaveDateRange(startValue, endValue) {
   if (!start) return '';
   if (!end || start === end) return start;
   return `${start} – ${end}`;
+}
+
+// Streak rewards (27 Sep 2026): a half-day every 50 streak days, 90 days to
+// use. `rows` are the viewer's app.streak_rewards; a reward is available while
+// no leave request holds it and it has not expired. The DB trigger enforces
+// the same rule on submit; this only decides what the form offers.
+function streakRewardSummary(rows, todayIso) {
+  const open = (Array.isArray(rows) ? rows : [])
+    .filter((r) => !r.leave_request_id && String(r.expires_on || '') >= todayIso)
+    .sort((a, b) => String(a.expires_on).localeCompare(String(b.expires_on)));
+  return { count: open.length, days: open.length * 0.5, nextExpiry: open[0]?.expires_on || null };
+}
+
+// Leave type as a person reads it in a table: SR is not an acronym anyone knows.
+function leaveTypeDisplay(type) {
+  return type === 'SR' ? 'Streak reward' : String(type || '');
+}
+
+// The plain word, for lists people read (Leave, 13 Oct 2026).
+function leaveTypeShort(type) {
+  return { PL: 'privilege', CL: 'casual', SL: 'sick', SR: 'streak reward', OOO: 'out of office' }[type] || String(type || '').toLowerCase();
 }

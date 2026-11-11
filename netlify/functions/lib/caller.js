@@ -42,6 +42,14 @@ async function callerIs(token, fn) {
   return !error && data === true;
 }
 
+// True only when the caller may MOVE this brief (the briefs_update_employee
+// rule), which is more than reading it: brief viewers read every brief and
+// can work none. Errors fail closed.
+async function callerCanWorkBrief(token, briefId) {
+  const { data, error } = await callerClient(token).rpc('can_work_brief', { p_brief_id: briefId });
+  return !error && data === true;
+}
+
 // The caller's own display name, from their row — never from the payload.
 // Mirrors displayPersonName() in app.js (first + last word).
 async function callerDisplayName(admin, authUserId) {
@@ -58,4 +66,4 @@ async function callerDisplayName(admin, authUserId) {
   };
 }
 
-module.exports = { bearerToken, callerClient, callerCanSee, callerIs, callerDisplayName };
+module.exports = { bearerToken, callerClient, callerCanSee, callerCanWorkBrief, callerIs, callerDisplayName };

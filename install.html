@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Set up Colony</title>
+<style>
+:root{--bg:#f3f1ec;--card:#fff;--ink:#23211d;--soft:#6a665e;--line:#dcd8cf;--go:#2f6f55;--bad:#a93a2c;--field:#faf9f6}
+@media (prefers-color-scheme:dark){:root{--bg:#23221f;--card:#2e2c28;--ink:#f1eee7;--soft:#aaa59a;--line:#46433c;--go:#7fc6a6;--bad:#ef9486;--field:#262521}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:620px;margin:0 auto;padding:40px 16px 80px}h1{font-size:30px;line-height:1.15;margin:0 0 6px}h2{font-size:19px;margin:0 0 4px}
+.lead,.hint{color:var(--soft)}.hint{font-size:14px;margin:4px 0 0}section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:22px;margin-top:18px}
+label{display:block;font-weight:600;font-size:14px;margin:14px 0 4px}input[type=text],input[type=email],input[type=password],select,input[type=file]{width:100%;padding:10px 12px;font:inherit;color:inherit;background:var(--field);border:1px solid var(--line);border-radius:6px}
+button{font:inherit;font-weight:600;padding:10px 18px;border-radius:6px;border:1px solid var(--go);background:var(--go);color:var(--card);cursor:pointer;margin-top:16px}button.quiet{background:none;color:var(--go);padding:6px 12px;margin-top:10px}button:disabled{opacity:.5;cursor:default}:focus-visible{outline:2px solid var(--go);outline-offset:2px}
+a{color:var(--go)}.pick{display:flex;gap:10px;align-items:flex-start;padding:12px 0;border-top:1px solid var(--line);font-weight:400;font-size:16px;margin:0}.pick:first-of-type{border-top:0}.pick input{margin-top:5px}.pick b{display:block}
+.fields{padding:0 0 14px 24px}.err{color:var(--bad);margin:10px 0 0}.ok{color:var(--go);margin:10px 0 0}.hidden{display:none}ol{padding-left:20px;margin:8px 0}code{font-size:13px;word-break:break-all}
+progress{width:100%;height:10px;margin-top:12px;accent-color:var(--go)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Set up Colony</h1>
+  <p class="lead">About 10 minutes. Nothing to install and no code to edit.</p>
+
+  <section id="s-connect">
+    <h2>1. Connect your accounts</h2>
+    <p class="hint">Netlify runs the site. Supabase holds its data. Both have free plans. These tokens are used while you're on this page and are not saved.</p>
+    <label for="nt">Netlify token</label><input id="nt" type="password" autocomplete="off">
+    <p class="hint"><a href="https://app.netlify.com/user/applications#personal-access-tokens" target="_blank" rel="noopener">Get one here</a>: choose New access token, then copy it.</p>
+    <label for="st">Supabase token</label><input id="st" type="password" autocomplete="off">
+    <p class="hint"><a href="https://supabase.com/dashboard/account/tokens" target="_blank" rel="noopener">Get one here</a>: sign up first if you're new, and create an organization. Choose Generate new token, pick Organization and your organization, and set Permissions to Full access. Leave it blank if you're only adding a feature to a finished install.</p>
+    <button id="connect">Continue</button><p class="err hidden" id="connect-err" role="alert"></p>
+  </section>
+
+  <section id="s-about" class="hidden">
+    <h2>2. About your company</h2>
+    <label for="company">Company name</label><input id="company" type="text">
+    <label for="admin">Your work email</label><input id="admin" type="email">
+    <p class="hint">You become the admin. Anyone with an email at this domain can ask to join, so it must be on your company's own domain, not Gmail or Outlook. It doesn't need Google Workspace. No company domain? See CUSTOMIZE.md in your new GitHub repo.</p>
+    <label for="org">Supabase organization</label><select id="org"></select>
+    <label for="region">Where should your data live?</label>
+    <select id="region"><option value="ap-south-1">India (Mumbai)</option><option value="ap-southeast-1">Singapore</option><option value="eu-west-1">Ireland</option><option value="eu-central-1">Germany</option><option value="eu-west-2">United Kingdom</option><option value="us-east-1">United States (East)</option><option value="us-west-1">United States (West)</option><option value="ap-southeast-2">Australia</option><option value="ca-central-1">Canada</option><option value="sa-east-1">Brazil</option></select>
+    <button id="create">Create my database</button><p class="err hidden" id="create-err" role="alert"></p><p class="ok hidden" id="create-ok">Database created. It finishes starting up while you carry on below.</p>
+  </section>
+
+  <section id="s-login" class="hidden">
+    <h2>3. How will people sign in?</h2>
+    <p class="hint">Pick at least one.</p>
+    <label class="pick"><input type="checkbox" id="login-email"><span><b>Email link</b>Colony emails a sign-in link. Works with any email provider. Needs the Email feature below.</span></label>
+    <label class="pick"><input type="checkbox" id="login-google"><span><b>Google</b>Sign in with a Google account.</span></label>
+    <div class="fields hidden" id="f-login-google">
+      <ol class="hint"><li><a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Open Google Credentials</a> and create an OAuth client ID of type Web application.</li><li>Under Authorized redirect URIs, add exactly this address: <code id="google-redirect"></code></li><li>Copy the Client ID and Client secret Google shows you into the boxes below.</li></ol>
+      <label for="g-id">Client ID</label><input id="g-id" type="text" autocomplete="off">
+      <label for="g-secret">Client secret</label><input id="g-secret" type="password" autocomplete="off">
+    </div>
+  </section>
+
+  <section id="s-features" class="hidden">
+    <h2 id="features-title">4. What do you use?</h2>
+    <p class="hint">Tick only what you have. Anything you skip stays out of the way. To add one later, or change Colony with an AI coding tool, see CUSTOMIZE.md in your new GitHub repo.</p>
+    <div id="features"></div>
+    <button id="save-features" class="hidden">Save</button>
+    <p class="err hidden" id="features-err" role="alert"></p><p class="ok hidden" id="features-ok"></p>
+  </section>
+
+  <section id="s-go" class="hidden">
+    <button id="install">Install Colony</button><p class="err hidden" id="go-err" role="alert"></p>
+    <div id="progress-wrap" class="hidden"><p id="step" aria-live="polite"></p><progress id="bar" max="100" value="0"></progress></div>
+    <div id="done" class="hidden"><h2>Colony is ready</h2><p>Sign in with <span id="done-email"></span> to become the admin.</p><p><strong>Before your team can open it:</strong> new Netlify sites can start out private, so only you can reach them. If you see a dark bar at the bottom of Colony that says Private, press <strong>Make public</strong>. Colony still asks everyone to sign in.</p><p id="done-webhook" class="hint hidden"></p><p><a id="done-link" href="/">Open Colony</a></p><p class="hint">Want to change something without coding? Open your new GitHub repo and read CUSTOMIZE.md.</p></div>
+  </section>
+</main>
+<script>
+const FEATURES = [
+  { id:'email', name:'Email', about:'Leave approvals, reminders and sign-in links. Uses Resend.', help:'<a href="https://resend.com/api-keys" target="_blank" rel="noopener">Create a Resend API key</a>, and add your domain under Domains so mail can be sent from it.', fields:[['apiKey','API key','password'],['sender','Send from (a no-reply address at your domain)','email']] },
+  { id:'ai', name:'AI summaries', about:'Written summaries of client analytics. Uses Anthropic.', help:'<a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Create an Anthropic API key</a>.', fields:[['apiKey','API key','password']] },
+  { id:'slack', name:'Slack', about:'Checks that new joiners have been added to Slack.', help:'<a href="https://api.slack.com/apps" target="_blank" rel="noopener">Create a Slack app</a> with users:read and users:read.email, install it, and copy the Bot User OAuth Token.', fields:[['token','Bot token','password']] },
+  { id:'papersign', name:'Papersign', about:'Sends hiring agreements for e-signature. Without it, you handle agreements yourself.', help:'Copy your API token from your Paperform account settings. Pick your templates in Colony afterwards.', fields:[['token','API token','password']] },
+  { id:'google', name:'Google Workspace', about:'Creates accounts for new hires. Only for companies on Google Workspace. Without it, you create accounts yourself.', help:'A Workspace super-admin needs to do this once: <ol><li><a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Create a service account</a> and download a JSON key.</li><li>In <a href="https://admin.google.com/ac/owl/domainwidedelegation" target="_blank" rel="noopener">Domain-wide delegation</a>, add its Client ID with these scopes: <code>https://www.googleapis.com/auth/admin.directory.user,https://www.googleapis.com/auth/admin.directory.group.member,https://www.googleapis.com/auth/drive</code></li></ol>', fields:[['keyFile','Key file (.json)','file'],['adminEmail','Super-admin email','email']] }
+];
+const $ = (id) => document.getElementById(id);
+const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
+const fail = (id, msg) => { $(id).textContent = msg; show(id, Boolean(msg)); };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const T = {};
+let configured = false;
+let ref = null;
+try { ref = sessionStorage.getItem('colony_ref'); } catch (e) {}
+
+async function api(action, extra = {}) {
+  for (let i = 0; ; i++) {
+    let res, body = {};
+    try { res = await fetch('/api/install', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action, ...T, ...extra }) }); body = await res.json().catch(() => ({})); }
+    catch (e) { if (i < 4) { await wait(3000); continue; } throw new Error('Lost the connection. Check your internet and press the button again; finished steps are kept.'); }
+    if (res.ok) return body;
+    if (body.retry && i < 12) { await wait(5000 + i * 2000); continue; }
+    if (res.status === 401 && !body.error) throw new Error('Netlify has this site set to Private and your session ended. Open this page in a new tab, then come back here and press the button again.');
+    throw new Error(body.error || `Something went wrong (error ${res.status}).`);
+  }
+}
+
+$('features').innerHTML = FEATURES.map((f) => `<label class="pick"><input type="checkbox" data-f="${f.id}"><span><b>${f.name}</b>${f.about}</span></label>
+  <div class="fields hidden" id="f-${f.id}"><div class="hint">${f.help}</div>
+  ${f.fields.map(([k,l,t]) => `<label for="${f.id}-${k}">${l}</label><input id="${f.id}-${k}" type="${t}" ${t==='file'?'accept=".json"':'autocomplete="off"'}>`).join('')}
+  <button class="quiet" type="button" data-test="${f.id}">Test</button><p class="err hidden" id="t-err-${f.id}" role="alert"></p><p class="ok hidden" id="t-ok-${f.id}">Works.</p></div>`).join('');
+
+document.addEventListener('change', (e) => { if (e.target.dataset.f) show('f-' + e.target.dataset.f, e.target.checked); });
+$('login-google').addEventListener('change', (e) => show('f-login-google', e.target.checked));
+$('login-email').addEventListener('change', (e) => { if (e.target.checked) { const c = document.querySelector('[data-f=email]'); c.checked = true; show('f-email'); } });
+
+async function values(f) {
+  const out = {};
+  for (const [k,,t] of f.fields) {
+    const el = $(`${f.id}-${k}`);
+    out[k] = t === 'file' ? (el.files[0] ? await el.files[0].text() : '') : el.value.trim();
+  }
+  return out;
+}
+document.addEventListener('click', async (e) => {
+  const id = e.target.dataset.test; if (!id) return;
+  fail('t-err-' + id, ''); show('t-ok-' + id, false); e.target.disabled = true;
+  try { await api('test', { id, values: await values(FEATURES.find((f) => f.id === id)) }); show('t-ok-' + id); }
+  catch (err) { fail('t-err-' + id, err.message); }
+  e.target.disabled = false;
+});
+async function chosen() {
+  const out = {};
+  for (const f of FEATURES) if (document.querySelector(`[data-f=${f.id}]`).checked) out[f.id] = await values(f);
+  return out;
+}
+
+$('connect').addEventListener('click', async () => {
+  fail('connect-err', ''); $('connect').disabled = true;
+  T.netlifyToken = $('nt').value.trim(); T.supabaseToken = $('st').value.trim();
+  try {
+    const r = await api('connect'); configured = r.configured;
+    if (configured) { show('s-features'); $('features-title').textContent = 'Add a feature'; show('save-features'); }
+    else {
+      $('org').innerHTML = r.orgs.map((o) => `<option value="${o.slug}"></option>`).join('');
+      [...$('org').options].forEach((o, i) => { o.textContent = r.orgs[i].name; });
+      if (!r.orgs.length) throw new Error('Your Supabase account has no organization yet. Create one at supabase.com, then press Continue.');
+      show('s-about');
+      if (ref) databaseReady();
+    }
+    show('s-connect', false);
+  } catch (err) { fail('connect-err', err.message); }
+  $('connect').disabled = false;
+});
+
+$('save-features').addEventListener('click', async () => {
+  fail('features-err', ''); show('features-ok', false); $('save-features').disabled = true;
+  try { await api('saveIntegrations', { integrations: await chosen() }); $('features-ok').textContent = 'Saved. Colony is rebuilding and will pick this up in about 2 minutes.'; show('features-ok'); }
+  catch (err) { fail('features-err', err.message); }
+  $('save-features').disabled = false;
+});
+
+// Google needs the database's address before it will issue a Client ID, so the
+// database comes first and the sign-in question after it.
+function databaseReady() {
+  $('google-redirect').textContent = `https://${ref}.supabase.co/auth/v1/callback`;
+  show('create', false); show('create-ok');
+  $('org').disabled = true; $('region').disabled = true;
+  show('s-login'); show('s-features'); show('s-go');
+}
+$('create').addEventListener('click', async () => {
+  fail('create-err', ''); $('create').disabled = true;
+  try {
+    ref = (await api('createProject', { adminEmail: $('admin').value.trim(), companyName: $('company').value.trim(), org: $('org').value, region: $('region').value })).ref;
+    try { sessionStorage.setItem('colony_ref', ref); } catch (e) {}
+    databaseReady();
+  } catch (err) { fail('create-err', err.message); }
+  $('create').disabled = false;
+});
+
+const progress = (text, pct) => { $('step').textContent = text; $('bar').value = pct; };
+$('install').addEventListener('click', async () => {
+  fail('go-err', ''); $('install').disabled = true; show('progress-wrap');
+  const who = { adminEmail: $('admin').value.trim(), companyName: $('company').value.trim() };
+  const login = { emailLink: $('login-email').checked, google: $('login-google').checked ? { clientId: $('g-id').value.trim(), clientSecret: $('g-secret').value.trim() } : null };
+  if (login.google) {
+    const id = login.google.clientId.match(/\d+-[a-z0-9]+\.apps\.googleusercontent\.com/i);
+    if (!id) { show('progress-wrap', false); fail('go-err', "That Client ID doesn't look right. It should end in .apps.googleusercontent.com."); $('install').disabled = false; return; }
+    login.google.clientId = id[0];
+  }
+  try {
+    const integrations = await chosen();
+    progress('Waiting for the database to start (usually 2 minutes)', 6);
+    for (;;) { if ((await api('projectStatus', { ref })).ready) break; await wait(8000); }
+    const { total, pending } = await api('prepare', { ref });
+    let n = total - pending.length;
+    for (const name of pending) {
+      await api('migrate', { ref, name, ...who });
+      n += 1; progress(`Building your database (${n} of ${total})`, 8 + Math.round((n / total) * 76));
+    }
+    progress('Connecting everything', 86);
+    const done = await api('finish', { ref, ...who, login, integrations });
+    progress('Building your site (about 2 minutes)', 90);
+    await wait(10000);
+    for (;;) { const s = (await api('buildStatus')).state; if (s === 'ready') break; if (s === 'error') throw new Error('Netlify could not build the site. Open your Netlify dashboard to see why.'); await wait(8000); }
+    progress('Done', 100); show('progress-wrap', false); show('install', false);
+    $('done-email').textContent = who.adminEmail; $('done-link').href = done.siteUrl; show('done');
+    if (done.webhookKey) { $('done-webhook').textContent = `Papersign: add this webhook in your Papersign folder: ${done.siteUrl}/api/papersign-webhook?key=${done.webhookKey}`; show('done-webhook'); }
+    try { sessionStorage.removeItem('colony_ref'); } catch (e) {}
+  } catch (err) { fail('go-err', `${err.message} Press Install Colony to carry on from where it stopped.`); $('install').disabled = false; }
+});
+</script>
+</body>
+</html>

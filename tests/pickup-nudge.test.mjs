@@ -46,3 +46,20 @@ test('a distant deadline is chased but not urgent', () => {
   assert.equal(hit.urgent, false);
   assert.ok(hit.waited >= 1);
 });
+
+// Quick requests (27 Sep 2026): Mira's email-signature request sat as "New"
+// from 10 Sep because nothing chased an unacknowledged quick request.
+const { quickRequestNudgeFor, awaitsAcknowledgement } = require('../netlify/functions/lib/pickup-nudge.js');
+const quick = { id: 'q1', request_type: 'notify_only', status: 'submitted', paused_at: null, created_at: '2026-09-10T09:00:00Z' };
+
+test('an unacknowledged quick request is chased after one working day', () => {
+  assert.equal(quickRequestNudgeFor(quick, '2026-09-10', HOLS), null, 'not on the day it was sent');
+  assert.equal(quickRequestNudgeFor(quick, '2026-09-11', HOLS).waited, 1);
+});
+
+test('acknowledged, closed, paused or a full brief: no chase', () => {
+  assert.equal(awaitsAcknowledgement({ ...quick, status: 'acknowledged' }), false);
+  assert.equal(awaitsAcknowledgement({ ...quick, status: 'closed' }), false);
+  assert.equal(awaitsAcknowledgement({ ...quick, paused_at: '2026-09-12' }), false);
+  assert.equal(awaitsAcknowledgement({ ...quick, request_type: 'brief' }), false);
+});

@@ -57,8 +57,27 @@ function buildDirectoryUser(hire, workEmail, password) {
   // Their personal Gmail is the recovery channel — it is where the invite went,
   // so it is already proven to reach them.
   if (hire?.personal_email) user.recoveryEmail = String(hire.personal_email).toLowerCase();
-  if (hire?.phone) user.recoveryPhone = String(hire.phone).replace(/\s+/g, '');
+  const phone = recoveryPhone(hire?.phone);
+  if (phone) user.recoveryPhone = phone;
   return user;
+}
+
+// Google only takes E.164 ("+919876543210"). Joiners type "98765 43210",
+// and the bare 10 digits made Google refuse the whole account (Manisha,
+// 30 Oct 2026). A 10-digit number is Indian; anything still unclear is left
+// out, because a missing recovery phone costs nothing and a bad one costs
+// the account.
+function recoveryPhone(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const digits = s.replace(/\D/g, '');
+  let e164 = '';
+  if (s.startsWith('+')) e164 = `+${digits}`;
+  else if (s.startsWith('00')) e164 = `+${digits.slice(2)}`;
+  else if (digits.length === 10) e164 = `+91${digits}`;
+  else if (digits.length === 11 && digits.startsWith('0')) e164 = `+91${digits.slice(1)}`;
+  else if (digits.length === 12 && digits.startsWith('91')) e164 = `+${digits}`;
+  return /^\+[1-9]\d{7,14}$/.test(e164) ? e164 : '';
 }
 
 // The one email that carries the password. Plain, short, and honest about the
@@ -87,4 +106,40 @@ function provisionEmail({ hire, workEmail, password, startDate, colonyUrl }) {
   return { subject, text, html };
 }
 
-module.exports = { generateTempPassword, buildDirectoryUser, provisionEmail, splitName, PASSWORD_ALPHABET };
+
+// READ ONLY. Asks the directory whether each candidate address already exists
+// and returns the first that does not. A 404 means free; a 200 means taken.
+// Nothing here creates, changes or deletes an account — the only write in this
+// flow is the users.insert in workspace-provision.js (7 Oct 2026).
+async function firstFreeWorkEmail(access, candidates) {
+  for (const email of candidates) {
+    const res = await fetch(`https://admin.googleapis.com/admin/directory/v1/users/${encodeURIComponent(email)}`, {
+      headers: { Authorization: `Bearer ${access}` }
+    });
+    if (res.status === 404) return { email, checked: candidates.indexOf(email) + 1 };
+    if (!res.ok && res.status !== 200) throw new Error(`directory lookup failed (${res.status}) for ${email}`);
+  }
+  return { email: null, checked: candidates.length };
+}
+
+// Server-to-server calls (papersign-webhook's auto-provision, workspace-retry)
+// prove themselves with a key used for nothing else. Until 14 Oct 2026 it was
+// PAPERSIGN_WEBHOOK_KEY, which also sits in Papersign's webhook URL (S18).
+// It is DERIVED from the service-role key rather than stored: a separate
+// INTERNAL_FUNCTION_KEY env var pushed the functions past AWS Lambda's 4KB
+// environment limit and every deploy failed (14 Oct 2026). One-way, never
+// leaves the server, and nothing derived from the webhook key can match it.
+function internalFunctionKey(env = process.env) {
+  const secret = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!secret) return '';
+  return require('node:crypto').createHmac('sha256', secret).update('colony:internal-function:v1').digest('hex');
+}
+
+function isInternalCaller(token, env = process.env) {
+  const key = internalFunctionKey(env);
+  if (!key || !token) return false;
+  const x = Buffer.from(String(token)); const y = Buffer.from(String(key));
+  return x.length === y.length && require('node:crypto').timingSafeEqual(x, y);
+}
+
+module.exports = { isInternalCaller, internalFunctionKey, firstFreeWorkEmail, generateTempPassword, buildDirectoryUser, recoveryPhone, provisionEmail, splitName, PASSWORD_ALPHABET };

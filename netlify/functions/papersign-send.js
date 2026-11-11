@@ -33,7 +33,7 @@ exports.handler = async (event) => {
   ]);
   if (!hire) return json(404, { error: 'Hire not found.' });
   if (!terms?.papersign_draft_id) return json(409, { error: 'No draft exists for this hire yet.' });
-  if (terms.papersign_sent_at) return json(409, { error: 'Already sent for signature.' });
+  if (terms.papersign_sent_at) return json(409, { error: 'Already sent for signature.', alreadySent: true });
 
   try {
     await call('POST', `/papersign/documents/${encodeURIComponent(terms.papersign_draft_id)}/send`, {
@@ -45,5 +45,12 @@ exports.handler = async (event) => {
   const now = new Date().toISOString();
   await admin.from('hire_offer_terms').update({ papersign_sent_at: now, updated_at: now }).eq('hire_id', hireId);
   await admin.from('hires').update({ stage: 'reviewed', updated_at: now }).eq('id', hireId);
+  // The stage trigger can't see who clicked (this runs as the service role),
+  // so stamp the sender on the history row Colony shows (30 Oct 2026).
+  const { data: sender } = await admin.from('employees').select('id').eq('auth_user_id', who.data.user.id).maybeSingle();
+  if (sender?.id) {
+    await admin.from('hire_stage_history').update({ changed_by_employee_id: sender.id })
+      .eq('hire_id', hireId).eq('stage', 'reviewed').is('exited_at', null);
+  }
   return json(200, { sent: true });
 };

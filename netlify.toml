@@ -1,26 +1,35 @@
 [build]
-  # Version string = BASE-YYYYMMDD-g<short sha>. Deliberately NOT `git describe`:
+  # Version string = YYYYMMDD-g<short sha>, stamped fresh on every build. Deliberately NOT `git describe`:
   # Netlify builds from a shallow clone, so describe can't see the v2.3.0 tag
   # (275 commits back) and silently degraded to a bare sha — which is what
   # shipped on 24 Aug 2026. `rev-list --count` is no substitute: in a shallow
   # clone it returns 1. Date + sha needs no history, so it can't regress.
-  # Bump the base by hand when the version changes.
-  command = "VER=\"v2.3.0-$(date -u +%Y%m%d)-g$(git rev-parse --short HEAD)\" && echo \"var APP_VERSION = '${VER}';\" > version.js && sed -i -E \"s/\\?v=[a-zA-Z0-9._-]+/?v=${VER}/g\" index.html"
+  # No hand-typed base since 28 Sep 2026 (Alex): a "v2.3.0" prefix sat
+  # unchanged through every deploy after the public release and made Colony
+  # look stale. The public agency-colony export sets its own semver.
+  # Asset ?v= are CONTENT hashes (_build/hash-assets.mjs, C2 24 Sep 2026), not
+  # the deploy version: an unchanged file keeps its URL, so visitors re-fetch
+  # only what a deploy actually changed. It runs after build-circle.mjs because
+  # Circle's page is hashed against the stripped files clients.youragency.com serves.
+  command = "node _build/apply-identity.mjs && VER=\"$(date -u +%Y%m%d)-g$(git rev-parse --short HEAD)\" && echo \"var APP_VERSION = '${VER}';\" > version.js && node _build/hash-assets.mjs"
   publish = "."
   functions = "netlify/functions"
   # TRAP (11 Sep 2026): this ignore rule also cancels a MANUAL "Trigger deploy"
   # when nothing has been committed — so adding an env var and pressing the
   # button in the dashboard builds nothing. To pick up new env vars, push a
   # commit that touches a non-markdown file (this comment was one).
-  ignore = "if [ -z \"$CACHED_COMMIT\" ]; then exit 1; fi; git diff --quiet $CACHED_COMMIT HEAD -- . ':!*.md' ':!.claude'"
 
 # Deploy previews ENABLED (PR-based) for pre-live testing. They inherit the
 # main [build] ignore rule, so doc-only PRs still skip. Auth on a preview URL
 # works because sign-in uses redirectTo: window.location.origin and the
-# deploy-preview-*--youragency.netlify.app wildcard is in Supabase's Redirect URLs.
+# https://deploy-preview-*--youragency.netlify.app/** pattern is in Supabase's Redirect
+# URLs. Never widen it to *.netlify.app: anyone can host one (S12, 25 Sep 2026).
 # Branch deploys stay disabled so backup/* branches don't consume build minutes.
 [context.branch-deploy]
   ignore = "true"
+
+[build.environment]
+  SECRETS_SCAN_OMIT_KEYS = "AGENCY_ADMIN_EMAIL,AGENCY_NAME,APP_BASE_URL,SUPABASE_URL,SUPABASE_ANON_KEY,EMAIL_SENDER,LOGIN_GOOGLE,LOGIN_EMAIL"
 
 [functions]
   node_bundler = "esbuild"
@@ -77,6 +86,138 @@
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
+# ── Repo files are not the website (24 Sep 2026) ─────────────────────────
+# publish = "." serves the whole repository, so until today anyone on the
+# internet could download, on BOTH hosts and without signing in: CLAUDE.md,
+# docs/ (OPEN.md's open security items, SCHEMA.md's every table and policy,
+# the security audit reports), every migration, the tests, the function
+# source, and setup/ + sample_data/ CSVs naming staff with their personal
+# Gmail addresses. No secret was exposed (.env and scripts/sql.sh are not
+# tracked). These rules come first because the first matching rule wins.
+# tests/public-surface.test.mjs fails on any tracked file that is neither on
+# its public list nor blocked here — a new file is private until classified.
+[[redirects]]
+  from = "/docs/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/supabase/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/tests/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/_build/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/netlify/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/scripts/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/setup/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/sample_data/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/ux-overhaul/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/visual-references/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/sample-report.json"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/package.json"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/package-lock.json"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/CLAUDE.md"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/README.md"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/MORNING_STATUS.md"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/COLONY_PIPELINE_AUDIT_4Aug2026.md"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/MOVEMENT_PULSE_TAB_SPEC.md"
+  to = "/404.html"
+  status = 404
+  force = true
+
+# Colony's home screen reads these; Circle never does, and the changelog
+# describes internal features ("Deal Flow: track BD pipeline…").
+[[redirects]]
+  from = "https://clients.youragency.com/changelog.json"
+  to = "/404.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "https://clients.youragency.com/data/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
@@ -105,6 +246,16 @@
 [functions."scheduled-activation"]
   schedule = "0 4 * * *"
 
+# 09:15 IST: retry adding Colony-created accounts to all@youragency.com, and name
+# any active employee who is not on it (report only).
+# Every six hours: retry @youragency.com accounts Google refused for want of a
+# licence; Colony has already asked Example Reseller for the seat (7 Oct 2026).
+[functions."workspace-retry"]
+  schedule = "10 */6 * * *"
+
+[functions."workspace-group-sync"]
+  schedule = "45 3 * * *"
+
 [functions."brief-deadline-reminder"]
   schedule = "30 4 * * *"
 
@@ -117,13 +268,69 @@
 [functions."brief-pickup-nudge"]
   schedule = "15 5 * * *"
 
+# Delivered briefs the client has not answered in 7 days close as complete (30 Sep 2026).
+[functions."brief-auto-complete"]
+  schedule = "45 4 * * *"
+
+# Fixed-term hires: email the setup approvers 30 days before the end date (6 Oct 2026).
+[functions."contract-end-reminder"]
+  schedule = "50 4 * * *"
+
+# Full-time probation: email the hiring manager 15 days before it ends (3 Nov 2026). 10:25 IST.
+[functions."probation-reminder"]
+  schedule = "55 4 * * *"
+
+# Joiner welcome: 2 working days before the start date (7 Oct 2026). 09:00 IST, every day.
+# 09:00 IST: S7 emergency contact reminder, sent only on the working day
+# before app_config emergency_contact_deadline (7 Oct 2026).
+# 00:05 IST: pause anyone still without an emergency contact once the
+# deadline has passed (7 Oct 2026). Saving a contact lifts it.
+[functions."emergency-contact-pause"]
+  schedule = "35 18 * * *"
+
+[functions."emergency-contact-reminder"]
+  schedule = "30 3 * * *"
+
+[functions."hire-welcome"]
+  schedule = "30 3 * * *"
+
+# Joiner meetings: add to All Hands + Thirsty Thursday after first sign-in (7 Oct 2026). Hourly.
+[functions."joiner-calendar"]
+  schedule = "20 * * * *"
+
+# Joiner Slack check: in #youragency-all + #youragency-random? (7 Oct 2026). Hourly.
+[functions."joiner-slack"]
+  schedule = "25 * * * *"
+
+# 09:45 IST: grant streak rewards (a half-day every 50 streak days) and email
+# the earner + an FYI to their leave approver. Morning, so yesterday counts.
+[functions."streak-rewards"]
+  schedule = "15 4 * * *"
+
 [functions."invoice-reminder"]
   schedule = "30 4 * * *"
 
 [functions."policy-update-reminder"]
   schedule = "30 4 * * 1"
 
+# 09:00 IST daily: remind Alex of client feedback on Circle still open on
+# day 2, 4, 6 … after it was posted, until she marks it fixed (6 Oct 2026).
+[functions."client-feedback-reminder"]
+  schedule = "30 3 * * *"
+
 # Tuesday 10:00 IST (not Monday): the AM team gets Monday to upload unprompted;
 # the function itself skips anyone who has already uploaded this week.
 [functions."analytics-upload-reminder"]
   schedule = "30 4 * * 2"
+
+# Monday 10:00 IST: last week's website traffic from Google Analytics, for
+# every client in app_config.website_analytics (26 Oct 2026), plus Google Search
+# (Search Console) where a search_site is set (3 Nov). Weekly, with the
+# other reports, not daily.
+[functions."website-analytics-sync"]
+  schedule = "30 4 * * 1"
+
+# Registrations from Rishi's media dashboard sheet (Example Collective, 5 Nov
+# 2026): re-read every morning, 10:10 IST. Read-only (lib/registrations.js).
+[functions."registrations-sync"]
+  schedule = "40 4 * * *"

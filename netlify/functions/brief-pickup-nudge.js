@@ -18,7 +18,7 @@ const { sendEmail } = require('./lib/email');
 const { logNotification, withCronHeartbeat } = require('./lib/notifications');
 const { getConfig, zonedParts, IST_TIME_ZONE } = require('./lib/config');
 const { isReminderRunDay } = require('./lib/brief-reminders');
-const { pickupNudgeFor, pickupNudgeKey } = require('./lib/pickup-nudge');
+const { pickupNudgeFor, pickupNudgeKey, quickRequestNudgeFor, quickRequestNudgeKey } = require('./lib/pickup-nudge');
 
 const BRIEF_REVIEWER_EMAILS = ['rhea@youragency.com', 'mara@youragency.com'];
 
@@ -48,16 +48,19 @@ async function handler(event) {
   if (!isReminderRunDay(todayIso, holidays)) { summary.skippedNonWorkingDay = true; return json(200, summary); }
   summary.ran = true;
 
-  const [briefRes, delivRes, histRes, sentRes, cfgRes] = await Promise.all([
-    supabase.from('briefs').select('id, org, title, request_type, status, deadline, paused_at').eq('status', 'ready_for_review').limit(2000),
-    supabase.from('brief_deliverables').select('brief_id, assignee_employee_id').limit(5000),
+  const [briefRes, delivRes, histRes, sentRes, cfgRes, quickRes, quickSentRes] = await Promise.all([
+    supabase.from('briefs').select('id, org, title, request_type, status, deadline, paused_at').eq('status', 'ready_for_review').is('archived_at', null).limit(2000),
+    supabase.from('brief_deliverables').select('brief_id, assignee_employee_id, copy_assignee_id, design_assignee_id').limit(5000),
     // When each brief ENTERED ready_for_review — the clock starts at approval,
     // not at submission.
     supabase.from('brief_status_history').select('brief_id, entered_at').eq('status', 'ready_for_review').limit(5000),
     supabase.from('notification_log').select('payload').eq('kind', 'brief_pickup_nudge').limit(5000),
-    supabase.from('app_config').select('value').eq('key', 'brief_reviewer_emails').maybeSingle()
+    supabase.from('app_config').select('value').eq('key', 'brief_reviewer_emails').maybeSingle(),
+    // Quick requests the client sent that nobody here has acknowledged (27 Sep 2026).
+    supabase.from('briefs').select('id, org, title, request_type, status, paused_at, created_at').eq('request_type', 'notify_only').eq('status', 'submitted').is('archived_at', null).limit(2000),
+    supabase.from('notification_log').select('payload').eq('kind', 'quick_request_nudge').limit(5000)
   ]);
-  for (const r of [briefRes, delivRes, histRes, sentRes]) {
+  for (const r of [briefRes, delivRes, histRes, sentRes, quickRes, quickSentRes]) {
     if (r.error) { summary.errors.push(r.error.message); return json(500, summary); }
   }
 
@@ -108,6 +111,38 @@ async function handler(event) {
       summary.sent += 1;
       alreadySent.add(key);
     } catch (err) { summary.errors.push(`send ${brief.id}: ${err.message}`); }
+  }
+
+  // Quick requests: acknowledge (seen, we have it) or close (done / no action).
+  const quickSent = new Set((quickSentRes.data || []).map((n) => n.payload?.nudge_key).filter(Boolean));
+  summary.quickConsidered = 0; summary.quickStuck = 0; summary.quickSent = 0;
+  for (const req of quickRes.data || []) {
+    summary.quickConsidered += 1;
+    const hit = quickRequestNudgeFor(req, todayIso, holidays);
+    if (!hit) continue;
+    summary.quickStuck += 1;
+    const key = quickRequestNudgeKey(req.id, todayIso);
+    if (quickSent.has(key)) { summary.skippedAlreadySent += 1; continue; }
+    const link = `${appBaseUrl}?open=brief:${req.id}#briefs-pipeline`;
+    const waitedText = plural(hit.waited, 'working day');
+    const subject = `${req.org} sent a quick request ${waitedText} ago — nobody has acknowledged it`;
+    summary.planned.push({ to, quickRequest: req.title, org: req.org, waited: hit.waited, subject });
+    if (dryRun) continue;
+    const html = `<div style="font-family:Arial,sans-serif;line-height:1.6">
+      <p>Hi,</p>
+      <p>${escapeHtml(req.org)} sent the quick request <strong>${escapeHtml(req.title)}</strong> ${waitedText} ago, and nobody at Your Agency has acknowledged it yet.</p>
+      <p>Open it and move it on: <strong>Acknowledge</strong> if we have it in hand, or <strong>Close</strong> if it is done or needs no action. If it needs real work, raise it as a brief.</p>
+      <p><a href="${escapeHtml(link)}">Open it in Colony</a></p>
+      <p style="color:#666;font-size:12px;">This reminder repeats each working morning until the request is acknowledged or closed.</p>
+    </div>`;
+    const text = `${req.org} sent the quick request "${req.title}" ${waitedText} ago and nobody has acknowledged it.\nAcknowledge it, close it, or raise it as a brief:\n${link}\n`;
+    try {
+      await sendEmail({ to, subject, html, text, audience: 'team' });
+      await logNotification({ kind: 'quick_request_nudge', recipientEmail: to.join(', '), subject,
+        payload: { nudge_key: key, brief_id: req.id, org: req.org, waited: hit.waited } });
+      summary.quickSent += 1;
+      quickSent.add(key);
+    } catch (err) { summary.errors.push(`send quick ${req.id}: ${err.message}`); }
   }
   return json(200, summary);
 }

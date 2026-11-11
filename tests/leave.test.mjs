@@ -53,3 +53,22 @@ test('leaveStatusMeta + formatLeaveDateRange behave as before', () => {
   assert.equal(u('formatLeaveDateRange')('2026-06-08', '2026-06-08'), 'Mon, Jun 8');
   assert.equal(u('formatLeaveDateRange')('', ''), '');
 });
+
+// Streak rewards (27 Sep 2026): the form offers one only while it is unused and unexpired.
+test('streakRewardSummary: unused and unexpired only, earliest expiry first', () => {
+  const s = u('streakRewardSummary')([
+    { expires_on: '2026-12-01', leave_request_id: null },
+    { expires_on: '2026-11-01', leave_request_id: null },
+    { expires_on: '2026-10-01', leave_request_id: null },   // expired
+    { expires_on: '2027-01-01', leave_request_id: 'x' }     // already taken
+  ], '2026-10-15');
+  assert.equal(s.count, 2);
+  assert.equal(s.days, 1);
+  assert.equal(s.nextExpiry, '2026-11-01');
+});
+
+test('SR reads as Streak reward, and its policy line never mentions a balance', () => {
+  assert.equal(u('leaveTypeDisplay')('SR'), 'Streak reward');
+  assert.equal(u('leaveTypeDisplay')('PL'), 'PL');
+  assert.match(u('leavePolicyCheck')('SR', 0.5).text, /not from PL, CL or SL/);
+});

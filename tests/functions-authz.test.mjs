@@ -18,7 +18,8 @@ const files = readdirSync(DIR).filter((f) => f.endsWith('.js'));
 const src = (f) => readFileSync(DIR + f, 'utf8');
 
 const isCron = (s) => /\.next_run\b/.test(s);
-const PUBLIC = new Set(['runtime-config.js']);              // anon key + feature flags only
+const PUBLIC = new Set(['install.js', 'runtime-config.js',               // anon key + feature flags only
+  'nda-intake.js']);  // the NDA link: a one-time token is the permission (tests/nda.test.mjs)
 const WEBHOOK = new Set(['papersign-webhook.js']);          // shared key, no session
 
 // A check that asks WHO the caller is, beyond "their token is valid".
@@ -52,12 +53,59 @@ test('the webhook rejects a missing or wrong key before doing anything', () => {
   assert.match(s, /if \(!expected \|\|/, 'an unset key must refuse, not accept everything');
 });
 
+test('the webhook escapes the candidate-typed name in its HTML email', () => {
+  const s = src('papersign-webhook.js');
+  const html = s.slice(s.indexOf('const html = '), s.indexOf('const text = '));
+  assert.ok(html.length > 0, 'html template not found');
+  assert.doesNotMatch(html, /\$\{hire\.full_name\}/, 'raw hire.full_name in the HTML body');
+  assert.match(html, /escapeHtml\(hire\.full_name\)/);
+});
+
 test('notify functions do not echo recipients back to the caller', () => {
   for (const f of ['hire-notify.js', 'brief-notify.js', 'client-status-notify.js', 'feature-request-notify.js']) {
     const s = src(f);
     const echoes = /jsonResponse\(200,[^)]*(\brecipients\b|\bemailResult\s*[,}]|sent: results\s*[,}])/.test(s);
     assert.ok(!echoes, `${f} returns addresses`);
   }
+});
+
+// Audit 11 Nov 2026: a read-only brief viewer could read a brief, so passed
+// callerCanSee, and could then email the client "Delivered".
+test('brief-notify refuses staff who can read a brief but not work it', async () => {
+  const Module = require('node:module');
+  const briefId = '11111111-1111-1111-1111-111111111111';
+  const run = async ({ canWork, partner = null }) => {
+    const sent = [];
+    const chain = (table) => {
+      const c = { select: () => c, eq: () => c,
+        maybeSingle: async () => ({ data: table === 'partners' ? partner : null }),
+        single: async () => ({ data: { id: briefId, title: 'T', org: 'O', status: 'in_creative' } }),
+        then: (ok) => ok({ data: [{ id: 'p', email: 'client@example.com', full_name: 'C', partner_role: 'coordinator', is_active: true }] }) };
+      return c;
+    };
+    const stubs = {
+      './lib/supabase-admin': { getSupabaseAdmin: () => ({ auth: { getUser: async () => ({ data: { user: { id: 'u', email: 'staff@youragency.com' } } }) }, from: chain }) },
+      './lib/email': { sendEmail: async (m) => { sent.push(m); return { skipped: false }; } },
+      './lib/notifications': { logNotification: async () => {} },
+      './lib/config': { getConfig: () => ({ appBaseUrl: 'https://a', circleBaseUrl: 'https://c' }) },
+      './lib/caller': { callerCanSee: async () => true, callerCanWorkBrief: async () => canWork },
+      './lib/brief-approvers': { approverRecipients: () => [], shortDate: (d) => d }
+    };
+    const file = require.resolve('../netlify/functions/brief-notify.js');
+    const load = Module._load;
+    delete require.cache[file];
+    Module._load = function (req, ...rest) { return stubs[req] || load.call(this, req, ...rest); };
+    try {
+      const { handler } = require(file);
+      const res = await handler({ httpMethod: 'POST', headers: { authorization: 'Bearer t' }, body: JSON.stringify({ event: 'delivered', briefId }) });
+      return { status: res.statusCode, sent: sent.length };
+    } finally {
+      Module._load = load;
+      delete require.cache[file];
+    }
+  };
+  assert.deepEqual(await run({ canWork: false }), { status: 403, sent: 0 }, 'a read-only viewer emailed the client');
+  assert.deepEqual(await run({ canWork: true }), { status: 200, sent: 1 }, 'someone who can move the brief must still reach the client');
 });
 
 test('nothing a caller can type reaches a feature-request email', () => {
@@ -118,9 +166,12 @@ test('staff on Circle get no write controls beyond feedback replies', () => {
   assert.match(fn('canEditOrgContacts'), /if \(state\.staffOnCircle\) return false;/);
   const detail = fn('renderPartnerBriefDetail');
   assert.match(detail, /const staffView = Boolean\(state\.staffOnCircle\) && !state\.partnerProfile;/);
-  assert.match(detail, /const editable = !staffView &&/);
-  assert.match(detail, /!\(!staffView && brief\.status === 'delivered'/);
-  assert.match(detail, /\['pbdUploadInput', 'pbdCommentInput'\][\s\S]*toggle\('hidden', staffView\)/);
+  // Every partner write control keys off canWrite, which is false for staff
+  // and follows the DB partner write rule for clients (22 Sep 2026).
+  assert.match(detail, /const canWrite = !staffView && partnerCanWriteBrief\(brief, state\.partnerProfile\);/);
+  assert.match(detail, /const editable = canWrite &&/);
+  assert.match(detail, /!\(canWrite && brief\.status === 'delivered'\)/);
+  assert.match(detail, /\['pbdUploadInput', 'pbdLinkUrl', 'pbdCommentInput'\][\s\S]*toggle\('hidden', !canWrite\)/);
   assert.match(fn('uploadPartnerBriefFiles'), /!state\.partnerProfile\) return;/);
   assert.match(fn('applyStaffOnCircleReadOnly'), /'newBriefBtn', 'submitBriefBtn', 'pfComposePanel', 'orgContactsForm'/);
   // It must never UN-hide anything: for a client that re-showed the internal
@@ -129,17 +180,66 @@ test('staff on Circle get no write controls beyond feedback replies', () => {
   assert.doesNotMatch(fn('applyStaffOnCircleReadOnly'), /classList\.toggle\('hidden', readOnly\)/);
 });
 
-// Address and emergency contact are column-revoked from authenticated
-// (202609210001): a client select naming them fails for EVERYONE, sign-in
+// Address and emergency contact (202609210001) and date of birth
+// (202609250002, S6) are column-revoked from authenticated: a client select naming them fails for EVERYONE, sign-in
 // included, and a save that writes them unloaded blanks them (21 Sep 2026).
 test('no client query selects the private employee columns; the save writes them only once loaded', () => {
   const files = ['../app.js', ...readdirSync(fileURLToPath(new URL('../js/', import.meta.url))).filter((f) => f.endsWith('.js')).map((f) => `../js/${f}`)];
   for (const f of files) {
     const s = readFileSync(fileURLToPath(new URL(f, import.meta.url)), 'utf8');
     for (const m of s.matchAll(/\.from\(['"]employees['"]\)\s*\.select\(\s*(`[^`]*`|'[^']*'|"[^"]*")/g)) {
-      assert.doesNotMatch(m[1], /personal_address|emergency_contact|\*/, `${f}: employees select reaches a private column: ${m[1].slice(0, 80)}`);
+      assert.doesNotMatch(m[1], /personal_address|emergency_contact|date_of_birth|\*/, `${f}: employees select reaches a private column: ${m[1].slice(0, 80)}`);
     }
   }
   const app = readFileSync(fileURLToPath(new URL('../app.js', import.meta.url)), 'utf8');
-  assert.match(app, /if \(profilePrivateDetailsFor === targetEmployeeId\) \{\s*updatePayload\.emergency_contact_name/);
+  assert.match(app, /if \(profilePrivateDetailsFor === targetEmployeeId\) \{[^}]*updatePayload\.date_of_birth = birthdayValue;\s*updatePayload\.emergency_contact_name/);
+  assert.doesNotMatch(app, /const updatePayload = \{[^}]*date_of_birth/, 'the profile save writes date_of_birth before it has loaded');
+  // Birthdays moved into the home feed's Coming up list (28 Sep 2026).
+  assert.match(app, /if \(!e\.birthday_md \|\| !e\.is_active\) return;/, 'Coming up no longer reads birthdays from birthday_md');
+});
+
+// Access parity audit, 22 Sep 2026: runtime-config is public and served on
+// Circle, so it returns the anon key and feature flags and nothing else.
+test('runtime-config returns only the anon connection and feature flags', async () => {
+  const saved = { ...process.env };
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = 'anon';
+  process.env.APP_BASE_URL = 'https://staff.example';
+  try {
+    const { handler } = require(DIR + 'runtime-config.js');
+    const res = await handler({});
+    const body = JSON.parse(res.body);
+    assert.deepEqual(Object.keys(body).sort(),
+      ['ai', 'driveMirror', 'loginEmail', 'papersign', 'supabaseAnonKey', 'supabaseUrl', 'workspaceProvisioning']);
+    assert.doesNotMatch(res.body, /colony|staff\.example/i);
+  } finally {
+    process.env = saved;
+  }
+});
+
+// A partner's org is never assumed (S3, 24 Sep 2026). The add bar arrived
+// pre-filled with the client and fell back to it when cleared, so a second client
+// invited without retyping it read all of the client's briefs.
+test('the partner add bar neither pre-fills nor falls back to an org', () => {
+  const html = readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const input = html.match(/<input[^>]*id="newPartnerOrg"[^>]*>/)?.[0] || '';
+  assert.ok(input, 'newPartnerOrg input not found');
+  assert.ok(!/\svalue=/.test(input), `newPartnerOrg is pre-filled: ${input}`);
+  const app = readFileSync(fileURLToPath(new URL('../app.js', import.meta.url)), 'utf8');
+  const start = app.indexOf('async function addPartner(');
+  const body = app.slice(start, app.indexOf('\n}\n', start));
+  assert.ok(start >= 0, 'addPartner not found');
+  assert.ok(!/\|\|\s*['"][^'"]+['"]/.test(body.split('\n').filter((l) => /org/i.test(l)).join('\n')), 'addPartner falls back to a literal org');
+  assert.match(body, /resolvePartnerOrg\(/, 'addPartner no longer resolves the org through resolvePartnerOrg');
+});
+
+// The signed-out page redraws the empty client table; the analytics lookup
+// inside it must not go out with the anon key (Q1, 24 Sep 2026: a 401 on
+// every signed-out load of app.youragency.com).
+test('the client table asks for analytics only when signed in', () => {
+  const app = readFileSync(fileURLToPath(new URL('../app.js', import.meta.url)), 'utf8');
+  const start = app.indexOf('async function renderClientRegistryTable(');
+  assert.ok(start >= 0, 'renderClientRegistryTable not found');
+  const body = app.slice(start, app.indexOf("from('client_analytics')", start));
+  assert.match(body, /if \(state\.isAuthenticated && state\.supabase\) try \{\s*const \{ data: analyticsRows \}/, 'the client_analytics lookup is no longer guarded by a signed-in check');
 });

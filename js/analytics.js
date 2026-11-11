@@ -13,6 +13,17 @@
    Uses the global XLSX (vendor/xlsx.js) and browser File APIs — not pure;
    pure format helpers are unit-tested in tests/analytics.test.mjs. */
 
+// Links shown on a client's Newsletter tab (3 Nov 2026): the LinkedIn
+// follower-DM tracker for Antenna, and the subscriber list in Beehiiv.
+// Lives here, not in config.js, because Circle serves config.js to clients and
+// does not load this file (audit S23, 5 Nov 2026).
+const NEWSLETTER_LINKS = {
+  '0087c1a8-0b55-453c-9b12-7fa62a720b4b': [
+    { label: 'LinkedIn follower DM tracker (sheet)', url: 'https://docs.google.com/spreadsheets/d/1ZXGtxbx3JkcEX-NzmqlR1wtZ5OqIUWgVKAi8rDqNSSM/edit' },
+    { label: 'Subscribers in Beehiiv', url: 'https://app.beehiiv.com/subscribers' }
+  ]
+};
+
 // Format large numbers
 function fmtAnalytics(n) {
   if (n == null || isNaN(n)) return '0';
@@ -117,9 +128,56 @@ function getReportCompareLabel(report) {
   return `Week of ${weekLabelAnalytics(latest.week)} vs ${weekLabelAnalytics(prev.week)}`;
 }
 
+// LinkedIn engagement rate, LinkedIn's own definition
+// (linkedin.com/help/lms/answer/a564051): (clicks + reactions + comments +
+// reposts) ÷ impressions, follows excluded. Always sum the counts for the
+// period first, then divide. Never average daily or weekly rates: a 50-
+// impression day then weighs as much as a 5,000 one (UIV's year read 17.0%
+// that way vs 14.1% summed; Alex, 2 Nov 2026).
+const LI_ENGAGEMENT_KEYS = ['Clicks (total)', 'Reactions (total)', 'Comments (total)', 'Reposts (total)'];
+function liEngagementRate(rows) {
+  const list = Array.isArray(rows) ? rows : [rows];
+  let impressions = 0, actions = 0;
+  list.forEach(r => {
+    impressions += Number(r['Impressions (total)']) || 0;
+    LI_ENGAGEMENT_KEYS.forEach(k => { actions += Number(r[k]) || 0; });
+  });
+  return impressions > 0 ? actions / impressions : 0;
+}
+// A group of LinkedIn posts (a content type, a weekday, all posts): the same
+// rule, summed over the posts, never the mean of each post's own rate.
+function liPostsEngagementRate(posts) {
+  let impressions = 0, actions = 0;
+  (posts || []).forEach(p => {
+    impressions += Number(p['Impressions']) || 0;
+    actions += ['Clicks', 'Likes', 'Comments', 'Reposts'].reduce((s, k) => s + (Number(p[k]) || 0), 0);
+  });
+  return impressions > 0 ? actions / impressions : 0;
+}
+// The per-day rows are for month splits only: keep them out of totals and AI payloads
+function liWithoutDays(row) {
+  if (!row || !('daily_counts' in row)) return row;
+  const { daily_counts, ...rest } = row;
+  return rest;
+}
+// Stored weeks from before 2 Nov 2026 carry the old averaged rate; recompute
+// it from the week's own counts. Rows without counts are left as they are.
+function liWithRates(weekly) {
+  return (weekly || []).map(w => ('Impressions (total)' in w)
+    ? { ...w, 'Engagement rate (total)': liEngagementRate(w) } : w);
+}
+
 function aggregateWeeklyToMonthly(weekly) {
   const map = new Map();
+  // A week that crosses a month boundary is split by its days (daily_counts,
+  // uploads from 2 Nov 2026). Older weeks have no days and file under the
+  // month they start in.
+  const parts = [];
   weekly.forEach(w => {
+    if (Array.isArray(w.daily_counts) && w.daily_counts.length) w.daily_counts.forEach(d => parts.push({ ...d, week: d.date }));
+    else parts.push(w);
+  });
+  parts.forEach(w => {
     const monthKey = w.week.substring(0, 7);
     if (!map.has(monthKey)) {
       map.set(monthKey, {
@@ -127,7 +185,7 @@ function aggregateWeeklyToMonthly(weekly) {
         'Impressions (organic)': 0, 'Impressions (sponsored)': 0, 'Impressions (total)': 0,
         'Clicks (total)': 0, 'Reactions (total)': 0, 'Comments (total)': 0, 'Reposts (total)': 0,
         'New followers (organic)': 0, 'New followers (sponsored)': 0, 'New followers (total)': 0,
-        'Engagement rate (total)': 0, _engCount: 0, 'Posts': 0
+        'Engagement rate (total)': 0, 'Posts': 0
       });
     }
     const m = map.get(monthKey);
@@ -142,18 +200,38 @@ function aggregateWeeklyToMonthly(weekly) {
     m['New followers (organic)'] += w['New followers (organic)'] || 0;
     m['New followers (sponsored)'] += w['New followers (sponsored)'] || 0;
     m['New followers (total)'] += w['New followers (total)'] || 0;
-    const eng = w['Engagement rate (total)'] || 0;
-    if (eng > 0) { m['Engagement rate (total)'] += eng; m._engCount++; }
   });
   const months = [...map.values()].sort((a, b) => a.month.localeCompare(b.month));
-  months.forEach(m => {
-    if (m._engCount > 0) m['Engagement rate (total)'] /= m._engCount;
-    delete m._engCount;
-  });
+  months.forEach(m => { m['Engagement rate (total)'] = liEngagementRate(m); });
   return months;
 }
 
 // --- XLS/CSV Parsing ---
+// SheetJS is not loaded with the page (24 Sep 2026): at 288kB compressed it
+// was the largest download on every Colony visit, for a feature only analytics
+// uploads use. The first upload fetches it from the URL the page keeps in its
+// inert <template id="lazySheetJS"> (content-versioned by the build); every
+// parser below still refuses with "SheetJS library not loaded" if it is absent.
+let sheetJsLoading = null;
+function loadSheetJS() {
+  if (typeof XLSX !== 'undefined') return Promise.resolve();
+  if (sheetJsLoading) return sheetJsLoading;
+  const src = document.getElementById('lazySheetJS')?.content.querySelector('script')?.getAttribute('src');
+  if (!src) return Promise.reject(new Error('SheetJS library not loaded'));
+  sheetJsLoading = new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = src;
+    tag.onload = () => (typeof XLSX !== 'undefined' ? resolve() : reject(new Error('SheetJS library not loaded')));
+    tag.onerror = () => {
+      sheetJsLoading = null;   // let the next upload try again
+      tag.remove();
+      reject(new Error('Could not load the spreadsheet reader — check your connection and try again.'));
+    };
+    document.head.appendChild(tag);
+  });
+  return sheetJsLoading;
+}
+
 function parseLinkedInAnalytics(file, existingWb) {
   return new Promise((resolve, reject) => {
     function doParse(wb) {
@@ -222,30 +300,40 @@ function parseLinkedInAnalytics(file, existingWb) {
               'Impressions (organic)': 0, 'Impressions (sponsored)': 0, 'Impressions (total)': 0,
               'Clicks (total)': 0, 'Reactions (total)': 0, 'Comments (total)': 0, 'Reposts (total)': 0,
               'New followers (organic)': 0, 'New followers (sponsored)': 0, 'New followers (total)': 0,
-              'Engagement rate (total)': 0, _engCount: 0, 'Posts': 0
+              'Engagement rate (total)': 0, 'Posts': 0, daily_counts: []
             });
           }
           const w = weeklyMap.get(weekKey);
+          // Total columns, or organic when total is blank: one set for the
+          // whole row, so the rate's numerator and denominator always match.
+          const blank = (v) => v === undefined || v === null || String(v).trim() === '';
+          const set = blank(row['Impressions (total)']) ? 'organic' : 'total';
+          const n = (metric) => Number(row[`${metric} (${set})`]) || 0;
           w['Impressions (organic)'] += Number(row['Impressions (organic)']) || 0;
           w['Impressions (sponsored)'] += Number(row['Impressions (sponsored)']) || 0;
-          w['Impressions (total)'] += Number(row['Impressions (total)']) || Number(row['Impressions (organic)']) || 0;
-          w['Clicks (total)'] += Number(row['Clicks (total)']) || 0;
-          w['Reactions (total)'] += Number(row['Reactions (total)']) || 0;
-          w['Comments (total)'] += Number(row['Comments (total)']) || 0;
-          w['Reposts (total)'] += Number(row['Reposts (total)']) || 0;
+          w['Impressions (total)'] += n('Impressions');
+          w['Clicks (total)'] += n('Clicks');
+          w['Reactions (total)'] += n('Reactions');
+          w['Comments (total)'] += n('Comments');
+          w['Reposts (total)'] += n('Reposts');
           w['New followers (organic)'] += Number(row['New followers (organic)']) || 0;
           w['New followers (sponsored)'] += Number(row['New followers (sponsored)']) || 0;
           w['New followers (total)'] += Number(row['New followers (total)']) || Number(row['New followers (organic)']) || 0;
-          const eng = Number(row['Engagement rate (total)']) || Number(row['Engagement rate (organic)']) || 0;
-          if (eng > 0) { w['Engagement rate (total)'] += eng; w._engCount++; }
+          // The same counts per day, so months can split a week on the real date
+          w.daily_counts.push({ date: dateVal,
+            'Impressions (organic)': Number(row['Impressions (organic)']) || 0,
+            'Impressions (sponsored)': Number(row['Impressions (sponsored)']) || 0,
+            'Impressions (total)': n('Impressions'), 'Clicks (total)': n('Clicks'),
+            'Reactions (total)': n('Reactions'), 'Comments (total)': n('Comments'), 'Reposts (total)': n('Reposts'),
+            'New followers (organic)': Number(row['New followers (organic)']) || 0,
+            'New followers (sponsored)': Number(row['New followers (sponsored)']) || 0,
+            'New followers (total)': Number(row['New followers (total)']) || Number(row['New followers (organic)']) || 0,
+            'Posts': 0 });
         });
 
-        // Average out engagement rates
+        // Each week's rate from its summed counts (0% and 0-impression days count)
         const weekly = [...weeklyMap.values()].sort((a, b) => a.week.localeCompare(b.week));
-        weekly.forEach(w => {
-          if (w._engCount > 0) w['Engagement rate (total)'] /= w._engCount;
-          delete w._engCount;
-        });
+        weekly.forEach(w => { w['Engagement rate (total)'] = liEngagementRate(w); });
 
         // Parse posts
         const posts = postsRaw.map(row => {
@@ -258,9 +346,10 @@ function parseLinkedInAnalytics(file, existingWb) {
           const engScore = likes + comments * 2 + reposts * 3;
 
           let createdDate = row['Created date'] || '';
-          let postWeekKey = '';
+          let postWeekKey = '', postDayIso = '';
           if (typeof createdDate === 'number') {
             const d = new Date((createdDate - 25569) * 86400 * 1000);
+            postDayIso = d.toISOString().slice(0, 10);
             createdDate = d.toLocaleDateString('en-IN', { month: '2-digit', day: '2-digit', year: 'numeric' });
             const day = d.getDay(); const diff = day === 0 ? 6 : day - 1;
             const ws = new Date(d); ws.setDate(d.getDate() - diff);
@@ -269,6 +358,7 @@ function parseLinkedInAnalytics(file, existingWb) {
             const str = String(createdDate).trim();
             const slashParts = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
             const isoStr = slashParts ? slashParts[3] + '-' + slashParts[1].padStart(2, '0') + '-' + slashParts[2].padStart(2, '0') : str;
+            postDayIso = isoStr.slice(0, 10);
             const d = new Date(isoStr + 'T00:00:00');
             if (!isNaN(d.getTime())) {
               const day = d.getDay(); const diff = day === 0 ? 6 : day - 1;
@@ -279,7 +369,10 @@ function parseLinkedInAnalytics(file, existingWb) {
 
           // Count post in its weekly bucket
           if (postWeekKey && weeklyMap.has(postWeekKey)) {
-            weeklyMap.get(postWeekKey)['Posts']++;
+            const wk = weeklyMap.get(postWeekKey);
+            wk['Posts']++;
+            const day = wk.daily_counts.find(x => x.date === postDayIso);
+            if (day) day['Posts']++;
           }
 
           return {
@@ -310,7 +403,7 @@ function parseLinkedInAnalytics(file, existingWb) {
         const new_followers = weekly.reduce((s, w) => s + (w['New followers (total)'] || 0), 0);
         const new_followers_organic = weekly.reduce((s, w) => s + (w['New followers (organic)'] || 0), 0);
         const new_followers_sponsored = weekly.reduce((s, w) => s + (w['New followers (sponsored)'] || 0), 0);
-        const avgEng = weekly.length ? weekly.reduce((s, w) => s + w['Engagement rate (total)'], 0) / weekly.length : 0;
+        const avgEng = liEngagementRate(weekly);
 
         let dateFrom = '', dateTo = '';
         if (weekly.length) {
@@ -1003,9 +1096,40 @@ function mergeByKey(existing, incoming, keyFn) {
   return [...map.values()];
 }
 
+// LinkedIn weeks merge by DAY. An export starts mid-week, so its first week
+// is partial; replacing the stored full week with it dropped the earlier days
+// (UIV's Sep read 21.0% instead of 16.8%; 3 Nov 2026). Days in both: the
+// incoming file wins. A stored week without days (saved before 2 Nov 2026)
+// is only replaced by a complete 7-day week.
+function liMergeWeeks(existing, incoming) {
+  const map = new Map();
+  (existing || []).forEach(w => map.set(w.week, w));
+  (incoming || []).forEach(w => {
+    const old = map.get(w.week);
+    const inDays = Array.isArray(w.daily_counts) ? w.daily_counts : null;
+    const oldDays = old && Array.isArray(old.daily_counts) ? old.daily_counts : null;
+    if (!old || !inDays) { map.set(w.week, w); return; }
+    if (!oldDays) { if (inDays.length >= 7) map.set(w.week, w); return; }
+    const byDate = new Map();
+    oldDays.forEach(d => byDate.set(d.date, d));
+    inDays.forEach(d => byDate.set(d.date, d));
+    const days = [...byDate.values()].sort((x, y) => String(x.date).localeCompare(String(y.date)));
+    const merged = { ...w, daily_counts: days };
+    Object.keys(days[0] || {}).forEach(k => {
+      if (k !== 'date') merged[k] = days.reduce((sum, d) => sum + (Number(d[k]) || 0), 0);
+    });
+    merged['Engagement rate (total)'] = liEngagementRate(merged);
+    map.set(w.week, merged);
+  });
+  return [...map.values()];
+}
+
 // Overview KPI math (pure — extracted from renderAnalyticsOverview, slice 8).
-// Impressions/engagement compare last week vs previous week; followers and
-// visitors compare last 7 days vs the previous 7 (needing >=7/>=14 data days).
+// All four numbers describe ONE week — the latest complete LinkedIn week —
+// against the week before, and the card says both ranges (9 Oct 2026:
+// "Week of 27 Sep" under a "data through 9 Oct" chip read as two different
+// claims). Followers and visitors are summed over those same dates from the
+// daily rows; undated rows fall back to the last 7 days vs the previous 7.
 function computeOverviewKpis(contentReport, followersReport, visitorsReport, todayIso) {
   const today = todayIso || new Date().toISOString().slice(0, 10);
   const allWeekly = contentReport?.metrics_data || [];
@@ -1023,26 +1147,42 @@ function computeOverviewKpis(contentReport, followersReport, visitorsReport, tod
   const lastWeekImpressions = latestWeek ? Math.round(latestWeek['Impressions (organic)'] || 0) : 0;
   const lastWeekEngRate = latestWeek ? (latestWeek['Engagement rate (total)'] || 0) : 0;
 
-  const fLen = followerDaily.length;
-  const fRecent = fLen >= 7 ? followerDaily.slice(-7).reduce((s, d) => s + (d.total || 0), 0) : 0;
-  const fPrev = fLen >= 14 ? followerDaily.slice(-14, -7).reduce((s, d) => s + (d.total || 0), 0) : 0;
-
-  const vLen = visitorDaily.length;
-  const vRecent = vLen >= 7 ? visitorDaily.slice(-7).reduce((s, d) => s + (d.overview_unique || 0), 0) : 0;
-  const vPrev = vLen >= 14 ? visitorDaily.slice(-14, -7).reduce((s, d) => s + (d.overview_unique || 0), 0) : 0;
+  const weekStart = latestWeek?.week ? normalizeDateStr(latestWeek.week).slice(0, 10) : null;
+  const weekEnd = weekStart ? isoAddDays(weekStart, 6) : null;
+  const prevStart = prevWeek?.week ? normalizeDateStr(prevWeek.week).slice(0, 10) : null;
+  // { recent, prev, hasRecent, hasPrev } for a daily series over the KPI week.
+  const dailyWindow = (rows, key) => {
+    const dated = rows.filter((d) => d && d.date).map((d) => ({ iso: normalizeDateStr(d.date).slice(0, 10), v: Number(d[key]) || 0 }));
+    if (weekStart && dated.length === rows.length && dated.length) {
+      const sum = (a, b) => dated.filter((d) => d.iso >= a && d.iso <= b).reduce((t, d) => t + d.v, 0);
+      const last = dated.map((d) => d.iso).sort().pop();
+      const first = dated.map((d) => d.iso).sort()[0];
+      return { recent: sum(weekStart, weekEnd), prev: prevStart ? sum(prevStart, isoAddDays(prevStart, 6)) : 0,
+        hasRecent: last >= weekEnd && first <= weekStart, hasPrev: Boolean(prevStart) && first <= prevStart };
+    }
+    const n = rows.length;
+    return { recent: n >= 7 ? rows.slice(-7).reduce((t, d) => t + (Number(d[key]) || 0), 0) : 0,
+      prev: n >= 14 ? rows.slice(-14, -7).reduce((t, d) => t + (Number(d[key]) || 0), 0) : 0, hasRecent: n >= 7, hasPrev: n >= 14 };
+  };
+  const fw = dailyWindow(followerDaily, 'total');
+  const vw = dailyWindow(visitorDaily, 'overview_unique');
+  const fRecent = fw.hasRecent ? fw.recent : 0, fPrev = fw.prev;
+  const vRecent = vw.hasRecent ? vw.recent : 0, vPrev = vw.prev;
 
   const kpis = [
     { label: 'Impressions', value: fmtAnalytics(lastWeekImpressions), arrow: prevWeek ? trendArrow(lastWeekImpressions, prevWeek['Impressions (organic)'] || 0) : '' },
     // Rate metric → delta in percentage POINTS (trendArrowPoints), matching how
     // the AI brief talks about the same move. Relative % on a rate reads wrong.
     { label: 'Engagement Rate', value: pctAnalytics(lastWeekEngRate), arrow: prevWeek ? trendArrowPoints(lastWeekEngRate, prevWeek['Engagement rate (total)'] || 0) : '' },
-    { label: 'New Followers', value: fRecent > 0 ? `+${fmtAnalytics(fRecent)}` : '–', arrow: fLen >= 14 ? trendArrow(fRecent, fPrev) : '' },
-    { label: 'Page Visits', value: vRecent > 0 ? fmtAnalytics(vRecent) : '–', arrow: vLen >= 14 ? trendArrow(vRecent, vPrev) : '' },
+    { label: 'New Followers', value: fRecent > 0 ? `+${fmtAnalytics(fRecent)}` : '–', arrow: fw.hasRecent && fw.hasPrev ? trendArrow(fRecent, fPrev) : '' },
+    { label: 'Page Visits', value: vRecent > 0 ? fmtAnalytics(vRecent) : '–', arrow: vw.hasRecent && vw.hasPrev ? trendArrow(vRecent, vPrev) : '' },
   ];
 
   return {
     kpis,
-    kpiPeriod: latestWeek?.week ? `Week of ${weekLabelAnalytics(latestWeek.week)}` : 'Last week',
+    kpiPeriod: weekStart ? weekRangeLabel(weekStart) : 'Last week',
+    comparePeriod: prevStart ? weekRangeLabel(prevStart) : null,
+    weekEnd,
     hasPrevWeek: Boolean(prevWeek),
     weekInProgress
   };
@@ -1296,7 +1436,7 @@ function liComparisonWindows(weekly, mode, todayIso, aKey, bKey) {
   if (!rows.length) return null;
   const trimmedNote = rows.length < all.length
     ? `Current week (${weekRangeLabel(all[all.length - 1].week)}) is in progress and excluded.` : '';
-  const win = (row, name) => row ? ({ startIso: row.week, label: `${name} (${weekRangeLabel(row.week)})`, totals: row }) : null;
+  const win = (row, name) => row ? ({ startIso: row.week, label: `${name} (${weekRangeLabel(row.week)})`, totals: liWithoutDays(row) }) : null;
 
   if (mode === 'wow') {
     if (rows.length < 2) return null;
@@ -1311,6 +1451,8 @@ function liComparisonWindows(weekly, mode, todayIso, aKey, bKey) {
       const v = Number(r[k]);
       if (!isNaN(v) && k !== 'week') avg[k] = (avg[k] || 0) + v / base.length;
     }));
+    // Rate from the four weeks' summed counts, not the mean of four rates
+    if ('Impressions (total)' in avg) avg['Engagement rate (total)'] = liEngagementRate(base);
     return { a: win(a, 'Last full week'),
       b: { startIso: null, label: `${base.length}-week average`, totals: avg },
       note: trimmedNote + (base.length < 4 ? ` Average uses ${base.length} prior week${base.length > 1 ? 's' : ''}.` : '') };
@@ -1431,6 +1573,69 @@ function parseCommsDocxStructure(documentXml, relsXml) {
   return sends.filter((s) => s.imagePaths.length);
 }
 
+// Rhea's ongoing report is a Google Doc with one TAB per send (27 Oct
+// 2026). Exported to Word, Google drops the tab titles, so there are no
+// "5 May 2026 Dispatch" headings to find: each tab becomes a section, holding
+// a "Link:" (the LeadConnector preview, typed or hyperlinked), a "Time:" and
+// the screenshots. Here a section break ends one send. The date comes from the
+// link's time_stamp when it has one; the type is never in the file, so the
+// uploader picks it on the review screen.
+function parseCommsDocxSections(documentXml, relsXml) {
+  const rels = {};
+  (String(relsXml || '').match(/<Relationship\s[^>]*>/g) || []).forEach((tag) => {
+    const id = (tag.match(/\sId="([^"]+)"/) || [])[1];
+    const target = (tag.match(/\sTarget="([^"]+)"/) || [])[1];
+    if (id && target) rels[id] = target.replace(/&amp;/g, '&');
+  });
+  const sends = [];
+  const fresh = () => ({ link: '', time: '', imagePaths: [] });
+  let cur = fresh();
+  const close = () => { if (cur.imagePaths.length) sends.push(cur); cur = fresh(); };
+  const paras = String(documentXml || '').match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];
+  paras.forEach((p) => {
+    const text = (p.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [])
+      .map((t) => t.replace(/<[^>]+>/g, '')).join('').replace(/&amp;/g, '&').trim();
+    if (/^link\s*:/i.test(text)) {
+      const typed = text.match(/https?:\/\/\S+/);
+      const linked = (p.match(/<w:hyperlink[^>]*r:id="([^"]+)"/) || [])[1];
+      cur.link = typed ? typed[0] : (rels[linked] && /^https?:/.test(rels[linked]) ? rels[linked] : '');
+    }
+    const tm = text.match(/^time\s*:\s*(.*)$/i);
+    if (tm) cur.time = tm[1].trim();
+    (p.match(/r:embed="([^"]+)"/g) || []).forEach((e) => {
+      const target = rels[e.slice(9, -1)];
+      if (target && !/^https?:/.test(target)) cur.imagePaths.push('word/' + target.replace(/^\.?\//, ''));
+    });
+    if (p.includes('<w:sectPr')) close();
+  });
+  close();
+  return sends.map((s) => ({ ...s, linkId: commsLinkId(s.link), dateIso: commsLinkDate(s.link) }));
+}
+
+// "…/email-preview/<location>/<id>?time_stamp=…" → the send's own id, so a
+// re-upload of the same growing report can skip sends Colony already has.
+function commsLinkId(url) {
+  const m = String(url || '').match(/email-preview\/[^/?#]+\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : '';
+}
+
+// The preview link's time_stamp (ms) as an IST calendar date, or ''.
+function commsLinkDate(url) {
+  const m = String(url || '').match(/[?&]time_stamp=(\d{13})/);
+  if (!m) return '';
+  return new Date(Number(m[1]) + 5.5 * 3600000).toISOString().slice(0, 10);
+}
+
+// The name the client's saved sends already use ("23 July 2026 Dispatch"), so a send
+// that was saved before merges with its new copy instead of doubling up.
+function commsSendName(dateIso, sendType) {
+  const d = new Date(`${String(dateIso).slice(0, 10)}T00:00:00Z`);
+  if (isNaN(d)) return String(sendType || 'Send');
+  const label = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const word = sendType === 'Dispatches' ? 'Dispatch' : (sendType || 'Send');
+  return `${label} ${word}`;
+}
+
 // Storage object name → display parts. Uploads are stored as
 // `${Date.now()}_${original name}` (see the upload handlers), so the date the
 // file landed is IN the name — the bucket API's own timestamps reflect
@@ -1442,4 +1647,283 @@ function parseStoredUploadName(objectName) {
     displayName: m[2],
     dateIso: new Date(Number(m[1])).toISOString().slice(0, 10)
   };
+}
+
+// ── Website (Google Analytics) comparison windows, 26 Oct 2026 ──
+// Same four modes as LinkedIn. Every week Colony stores is complete (the sync
+// only pulls finished Monday-Sunday weeks) and months are complete calendar
+// months, so nothing here trims an in-progress bucket. Visitors are the client's own
+// count per week or month; the 4-week baseline is an average of four weekly
+// counts, never a sum. Returns { a, b } with totals, pages and sources, or null.
+function websiteComparison(report, mode, aKey, bKey) {
+  const weeks = Array.isArray(report?.metrics_data) ? report.metrics_data : [];
+  const extra = report?.demographics_data || {};
+  const pages = extra.pages || {}, sources = extra.sources || {};
+  const months = Array.isArray(extra.months) ? extra.months : [];
+  const KEYS = ['users', 'new_users', 'sessions', 'views', 'events', 'engagement_seconds'];
+  const withAvg = (t) => ({ ...t, avg_engagement_seconds: t.users ? Math.round(t.engagement_seconds / t.users) : 0 });
+  const week = (w, label) => w && ({
+    key: w.week_start, label: `${label} (${weekRangeLabel(w.week_start)})`,
+    totals: withAvg(w), pages: (pages.weeks || {})[w.week_start] || [], sources: (sources.weeks || {})[w.week_start] || []
+  });
+  // Average several weeks: KPIs, and pages/sources merged by name.
+  const average = (list, label) => {
+    const n = list.length;
+    const totals = {};
+    KEYS.forEach(k => { totals[k] = list.reduce((s, w) => s + (Number(w[k]) || 0), 0) / n; });
+    const merge = (lists, id, nums) => {
+      const map = new Map();
+      lists.flat().forEach(x => {
+        const hit = map.get(x[id]) || map.set(x[id], { ...x, ...Object.fromEntries(nums.map(k => [k, 0])) }).get(x[id]);
+        nums.forEach(k => { hit[k] += (Number(x[k]) || 0) / n; });
+      });
+      return [...map.values()].sort((x, y) => y[nums[0]] - x[nums[0]]);
+    };
+    return { key: null, label, totals: withAvg(totals),
+      pages: merge(list.map(w => (pages.weeks || {})[w.week_start] || []), 'path', ['views', 'users']),
+      sources: merge(list.map(w => (sources.weeks || {})[w.week_start] || []), 'channel', ['users', 'sessions']) };
+  };
+  const monthName = (m) => new Date(`${m}-01T00:00:00Z`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const month = (m) => m && ({ key: m.month, label: monthName(m.month), totals: withAvg(m),
+    pages: (pages.months || {})[m.month] || [], sources: (sources.months || {})[m.month] || [] });
+
+  if (mode === 'wow') {
+    if (weeks.length < 2) return null;
+    return { a: week(weeks[weeks.length - 1], 'Last full week'), b: week(weeks[weeks.length - 2], 'Week before') };
+  }
+  if (mode === 'wo4') {
+    if (weeks.length < 2) return null;
+    const base = weeks.slice(-5, -1);
+    return { a: week(weeks[weeks.length - 1], 'Last full week'), b: average(base, `${base.length}-week average`) };
+  }
+  if (mode === 'mom') {
+    if (months.length < 2) return null;
+    return { a: month(months[months.length - 1]), b: month(months[months.length - 2]) };
+  }
+  if (mode === 'custom') {
+    const a = weeks.find(w => w.week_start === aKey), b = weeks.find(w => w.week_start === bKey);
+    if (!a || !b) return null;
+    return { a: week(a, 'Week A'), b: week(b, 'Week B') };
+  }
+  return null;
+}
+
+// ── Google Search (Search Console) comparison windows, 3 Nov 2026 ──
+// The same four modes as the website above, over demographics_data.search.
+// Clicks and impressions add up; CTR and position are recomputed from the
+// summed counts (clicks / impressions, impression-weighted position), never
+// averaged. The 4-week baseline divides the four weeks' sums by four, so its
+// CTR and position equal the four weeks taken together.
+function searchComparison(report, mode, aKey, bKey) {
+  const s = report?.demographics_data?.search;
+  if (!s || !Array.isArray(s.weeks)) return null;
+  const weeks = s.weeks, months = Array.isArray(s.months) ? s.months : [];
+  const q = s.queries || {}, p = s.pages || {};
+  const rate = (t) => ({ ...t, ctr: t.impressions ? t.clicks / t.impressions : 0, position: t.impressions ? t.position_sum / t.impressions : 0 });
+  const sumOf = (list) => rate(['clicks', 'impressions', 'position_sum'].reduce((t, k) => ({ ...t, [k]: list.reduce((n, w) => n + (Number(w[k]) || 0), 0) }), {}));
+  const week = (w, label) => w && ({ key: w.week_start, label: `${label} (${weekRangeLabel(w.week_start)})`, totals: rate(w),
+    queries: (q.weeks || {})[w.week_start] || [], pages: (p.weeks || {})[w.week_start] || [] });
+  const average = (list, label) => {
+    const n = list.length || 1;
+    const sum = sumOf(list);
+    const merge = (lists) => {
+      const map = new Map();
+      lists.flat().forEach(x => {
+        const hit = map.get(x.key) || map.set(x.key, { key: x.key, clicks: 0, impressions: 0, position_sum: 0 }).get(x.key);
+        ['clicks', 'impressions', 'position_sum'].forEach(k => { hit[k] += (Number(x[k]) || 0); });
+      });
+      return [...map.values()].map(x => rate({ ...x, clicks: x.clicks / n, impressions: x.impressions / n, position_sum: x.position_sum / n }))
+        .sort((x, y) => y.clicks - x.clicks || y.impressions - x.impressions);
+    };
+    return { key: null, label, totals: { ...sum, clicks: sum.clicks / n, impressions: sum.impressions / n, position_sum: sum.position_sum / n },
+      queries: merge(list.map(w => (q.weeks || {})[w.week_start] || [])), pages: merge(list.map(w => (p.weeks || {})[w.week_start] || [])) };
+  };
+  const monthName = (m) => new Date(`${m}-01T00:00:00Z`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const month = (m) => m && ({ key: m.month, label: monthName(m.month), totals: rate(m),
+    queries: (q.months || {})[m.month] || [], pages: (p.months || {})[m.month] || [] });
+  if (mode === 'wow') return weeks.length < 2 ? null : { a: week(weeks[weeks.length - 1], 'Last full week'), b: week(weeks[weeks.length - 2], 'Week before') };
+  if (mode === 'wo4') {
+    if (weeks.length < 2) return null;
+    const base = weeks.slice(-5, -1);
+    return { a: week(weeks[weeks.length - 1], 'Last full week'), b: average(base, `${base.length}-week average`) };
+  }
+  if (mode === 'mom') return months.length < 2 ? null : { a: month(months[months.length - 1]), b: month(months[months.length - 2]) };
+  if (mode === 'custom') {
+    const a = weeks.find(w => w.week_start === aKey), b = weeks.find(w => w.week_start === bKey);
+    return a && b ? { a: week(a, 'Week A'), b: week(b, 'Week B') } : null;
+  }
+  return null;
+}
+
+// ── AI summaries: reuse within a week, never past it (27 Oct 2026) ──
+// Alex: a summary written for this week's numbers stays (no tokens spent on
+// every click), but once the week has moved on, last week's text must not
+// keep showing. A summary is saved with the client's data stamp: every
+// report's upload time and the date its data runs to. Only a new upload or a
+// Monday sync changes it; clicks and the passing days don't. Summaries saved
+// before this (plain text, no stamp) count as stale.
+function insightDataStamp(reports) {
+  return Object.values(reports || {}).filter(Boolean)
+    .map((r) => `${r.report_type || ''}:${r.uploaded_at || ''}:${r.data_through || ''}`)
+    .sort().join('|');
+}
+
+function usableInsight(entry, stamp) {
+  return entry && typeof entry === 'object' && entry.stamp === stamp && typeof entry.text === 'string' && entry.text
+    ? entry : null;
+}
+
+// ── Newsletter: Beehiiv subscriber export (3 Nov 2026) ──
+// Antenna (Your Agency's newsletter) lives on Beehiiv's free plan, which has no
+// API or webhooks, so the weekly Chrome task exports "Export all subscribers"
+// and uploads the CSV. Only counts and sources are kept: emails and names
+// never reach Colony (the archived copy is stripped too).
+const BEEHIIV_PERSONAL_COLUMNS = ['email', 'first name', 'last name', 'name'];
+
+function isBeehiivSubscriberHeader(header) {
+  const h = (header || []).map((x) => String(x || '').trim().toLowerCase());
+  return h.includes('api_subscription_id') && h.includes('acquisition_source') && h.includes('created_at');
+}
+
+// "website: linktr.ee / referral" -> "Linktree"; "website: direct / " -> "Direct".
+function beehiivSourceLabel(acquisition, referringUrl, channel) {
+  const raw = String(acquisition || '');
+  const m = raw.match(/^[^:]*:\s*([^/]*)\//);
+  let src = (m ? m[1] : raw).trim().toLowerCase();
+  if (!src && referringUrl) { try { src = new URL(referringUrl).hostname.toLowerCase(); } catch { src = ''; } }
+  src = src.replace(/^www\./, '');
+  const known = [[/linktr\.ee/, 'Linktree'], [/(^|\.)linkedin\.com$|lnkd\.in/, 'LinkedIn'], [/instagram\.com/, 'Instagram'],
+    [/(^|\.)(facebook\.com|fb\.me)$/, 'Facebook'], [/(^|\.)(x\.com|twitter\.com|t\.co)$/, 'X'], [/google\./, 'Google'],
+    [/youragency\.com/, 'youragency.com'], [/^direct$/, 'Direct']];
+  for (const [re, label] of known) if (re.test(src)) return label;
+  if (src) return src;
+  const ch = String(channel || '').trim();
+  return ch ? ch.charAt(0).toUpperCase() + ch.slice(1) : 'Other';
+}
+
+// Beehiiv writes UTC ("2026-10-30 11:29:13 UTC"); Colony counts days in IST.
+function beehiivIstDate(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  const t = Date.parse(s.replace(' UTC', 'Z').replace(' ', 'T'));
+  if (Number.isNaN(t)) return '';
+  return new Date(t + 330 * 60000).toISOString().slice(0, 10);
+}
+
+// rows: [header, ...data] as arrays of strings. Returns the stored shape:
+//   weeks  [{week_start, new, left, subscribers}]  finished Monday-Sunday weeks,
+//          oldest first; subscribers = on the list at the week's end
+//   months [{month, new, left, subscribers}]  finished months only
+// (the same finished weeks and months as Website and Google Search: an
+// export taken on Monday ends at the Sunday before)
+//   sources {all:{label:n}, weeks:{week_start:{label:n}}, months:{"YYYY-MM":{label:n}}}
+//   summary {subscribers, ever, left, delivered, opened, clicked, open_rate, click_rate}
+// Rates are summed counts over summed deliveries (Alex's rule, 2 Nov 2026).
+function parseBeehiivSubscribers(rows, throughIso) {
+  const [header, ...data] = rows || [];
+  if (!isBeehiivSubscriberHeader(header)) throw new Error('Not a Beehiiv subscriber export.');
+  const col = Object.fromEntries(header.map((h, i) => [String(h || '').trim().toLowerCase(), i]));
+  const get = (r, k) => (col[k] == null ? '' : String(r[col[k]] ?? '').trim());
+  const num = (r, k) => { const n = Number(get(r, k)); return Number.isFinite(n) ? n : 0; };
+  const weekOf = (iso) => { const d = new Date(`${iso}T00:00:00Z`); return new Date(d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10); };
+  const people = data.filter((r) => r && r.some((c) => String(c || '').trim())).map((r) => {
+    const status = get(r, 'status').toLowerCase();
+    const joined = beehiivIstDate(get(r, 'created_at'));
+    const gone = status === 'active' ? '' : (beehiivIstDate(get(r, 'unsubscribed_at')) || (status === 'inactive' ? beehiivIstDate(get(r, 'updated_at')) : ''));
+    return { joined, gone, active: status === 'active',
+      source: beehiivSourceLabel(get(r, 'acquisition_source'), get(r, 'referring_url'), get(r, 'channel')),
+      delivered: num(r, 'total_delivered'), opened: num(r, 'total_unique_opened'), clicked: num(r, 'total_unique_clicked') };
+  }).filter((p) => p.joined);
+  const through = throughIso || people.reduce((m, p) => (p.joined > m ? p.joined : m), '');
+  const summary = { subscribers: people.filter((p) => p.active).length, ever: people.length,
+    left: people.filter((p) => !p.active).length, delivered: 0, opened: 0, clicked: 0 };
+  people.forEach((p) => { summary.delivered += p.delivered; summary.opened += p.opened; summary.clicked += p.clicked; });
+  summary.open_rate = summary.delivered ? summary.opened / summary.delivered : 0;
+  summary.click_rate = summary.delivered ? summary.clicked / summary.delivered : 0;
+  if (!people.length || !through) return { weeks: [], months: [], sources: { all: {}, weeks: {}, months: {} }, summary, data_through: through || null };
+
+  const first = people.reduce((m, p) => (p.joined < m ? p.joined : m), through);
+  const onListAt = (iso) => people.filter((p) => p.joined <= iso && !(p.gone && p.gone <= iso)).length;
+  const addDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const weeks = [];
+  for (let w = weekOf(first); addDays(w, 6) < through; w = addDays(w, 7)) {
+    const end = addDays(w, 6);
+    weeks.push({ week_start: w, new: people.filter((p) => p.joined >= w && p.joined <= end).length,
+      left: people.filter((p) => p.gone && p.gone >= w && p.gone <= end).length, subscribers: onListAt(end) });
+  }
+  const months = [];
+  for (let m = first.slice(0, 7); m <= through.slice(0, 7);) {
+    const [y, mo] = m.split('-').map(Number);
+    const end = new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10);
+    if (end >= through) break;
+    months.push({ month: m, new: people.filter((p) => p.joined.slice(0, 7) === m).length,
+      left: people.filter((p) => p.gone && p.gone.slice(0, 7) === m).length, subscribers: onListAt(end) });
+    m = new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 7);
+  }
+  const tally = (list) => list.reduce((t, p) => ({ ...t, [p.source]: (t[p.source] || 0) + 1 }), {});
+  const sources = { all: tally(people), weeks: {}, months: {} };
+  weeks.forEach((w) => { sources.weeks[w.week_start] = tally(people.filter((p) => weekOf(p.joined) === w.week_start)); });
+  months.forEach((m) => { sources.months[m.month] = tally(people.filter((p) => p.joined.slice(0, 7) === m.month)); });
+  return { weeks, months, sources, summary, data_through: through };
+}
+
+// The same four comparisons as Website and Google Search. "Subscribers" is
+// the list size at the end of each period; for the 4-week average it is the
+// average of the four week-end sizes.
+function newsletterComparison(report, mode, aKey, bKey) {
+  const weeks = Array.isArray(report?.metrics_data) ? report.metrics_data : [];
+  const d = report?.demographics_data || {};
+  const months = Array.isArray(d.months) ? d.months : [];
+  const src = d.sources || {};
+  const week = (w, label) => w && ({ key: w.week_start, label: `${label} (${weekRangeLabel(w.week_start)})`,
+    totals: { new: w.new, left: w.left, subscribers: w.subscribers }, sources: (src.weeks || {})[w.week_start] || {} });
+  const average = (list, label) => {
+    const n = list.length || 1;
+    const sum = (k) => list.reduce((t, w) => t + (Number(w[k]) || 0), 0) / n;
+    const sources = {};
+    list.forEach((w) => Object.entries((src.weeks || {})[w.week_start] || {}).forEach(([k, v]) => { sources[k] = (sources[k] || 0) + v / n; }));
+    return { key: null, label, totals: { new: sum('new'), left: sum('left'), subscribers: sum('subscribers') }, sources };
+  };
+  const monthName = (m) => new Date(`${m}-01T00:00:00Z`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const month = (m) => m && ({ key: m.month, label: monthName(m.month), totals: { new: m.new, left: m.left, subscribers: m.subscribers }, sources: (src.months || {})[m.month] || {} });
+  if (mode === 'wow') return weeks.length < 2 ? null : { a: week(weeks[weeks.length - 1], 'Last week'), b: week(weeks[weeks.length - 2], 'Week before') };
+  if (mode === 'wo4') {
+    if (weeks.length < 2) return null;
+    const base = weeks.slice(-5, -1);
+    return { a: week(weeks[weeks.length - 1], 'Last week'), b: average(base, `${base.length}-week average`) };
+  }
+  if (mode === 'mom') return months.length < 2 ? null : { a: month(months[months.length - 1]), b: month(months[months.length - 2]) };
+  if (mode === 'custom') {
+    const a = weeks.find((w) => w.week_start === aKey), b = weeks.find((w) => w.week_start === bKey);
+    return a && b ? { a: week(a, 'Week A'), b: week(b, 'Week B') } : null;
+  }
+  return null;
+}
+
+// The archived copy keeps the numbers and drops who people are.
+function stripBeehiivPersonalColumns(rows) {
+  const [header, ...data] = rows || [];
+  const keep = (header || []).map((h, i) => (BEEHIIV_PERSONAL_COLUMNS.includes(String(h || '').trim().toLowerCase()) ? -1 : i)).filter((i) => i >= 0);
+  return [keep.map((i) => header[i]), ...data.map((r) => keep.map((i) => r[i] ?? ''))];
+}
+
+// Plain RFC 4180 CSV -> rows of strings. No type guessing: Beehiiv's
+// "2026-10-30 11:29:13 UTC" must stay text.
+function parseCsvText(text) {
+  const rows = []; let row = []; let cell = ''; let q = false;
+  const s = String(text || '').replace(/^﻿/, '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) {
+      if (c === '"') { if (s[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && s[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+function toCsvText(rows) {
+  return rows.map((r) => r.map((c) => (/[",\n\r]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : String(c))).join(',')).join('\n');
 }

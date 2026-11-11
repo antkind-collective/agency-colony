@@ -109,7 +109,7 @@ test('buildActionItems: pending setups surface, fractional flagged as blocked', 
   // A consultant is an employee: named as one, and NOT locked out.
   assert.match(consultant.text, /consultant/);
   assert.doesNotMatch(consultant.detail, /no client access/);
-  assert.equal(project.screen, 'admin-settings');
+  assert.equal(project.screen, 'hiring');
 });
 
 test('buildActionItems: pending setups sort above older, lower-stakes items', () => {
@@ -130,4 +130,26 @@ test('buildActionItems: pending setups sort above older, lower-stakes items', ()
 test('buildActionItems: no pending setups (or non-approver) adds nothing', () => {
   const none = u('buildActionItems')({ myEmail: 'max@youragency.com', leaveRows: [], todayIso: '2026-07-18', signals: {} });
   assert.equal(none.filter(i => i.key.startsWith('setup-pending-')).length, 0);
+});
+
+// S7 (24 Sep 2026): six people have no emergency contact on file; the bell
+// asks them for one, on their own profile, until they save it.
+test('a missing emergency contact is a personal to-do that opens your profile', () => {
+  const build = u('buildActionItems');
+  const items = build({ myEmail: 'ruby@youragency.com', leaveRows: [], todayIso: '2026-09-24', signals: { emergencyContactMissing: true } });
+  const item = items.find((i) => i.key === 'emergency-contact-missing');
+  assert.ok(item, 'no emergency-contact item');
+  assert.equal(item.screen, 'employee-profile');
+  assert.equal(item.anchor, 'personalDataBlock');
+  const none = build({ myEmail: 'ruby@youragency.com', leaveRows: [], todayIso: '2026-09-24', signals: { emergencyContactMissing: false } });
+  assert.ok(!none.some((i) => i.key === 'emergency-contact-missing'), 'item shown although a contact is on file');
+});
+
+test('the bell only asks when the contact is known to be missing, and clears on save', () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  assert.match(app, /signals\.emergencyContactMissing = 'emergency_contact_phone' in me\s*&& !String\(me\.emergency_contact_phone \|\| ''\)\.trim\(\);/,
+    'the signal must stay silent when the private details could not be read');
+  assert.match(app, /if \('emergency_contact_phone' in updatePayload\) \{[\s\S]{0,400}loadNotifySignals\(\)/, 'saving a contact no longer refreshes the bell');
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /id="personalDataBlock"/, 'the bell item scrolls to #personalDataBlock');
 });

@@ -47,21 +47,36 @@ test('isValidBriefTransition: notify_only uses the lightweight subset', () => {
   assert.equal(f('submitted', 'acknowledged', 'brief'), false);
 });
 
-test('briefMissingFields: full brief requires the checklist fields', () => {
+test('briefMissingFields: a brief needs only its four questions', () => {
   const f = u('briefMissingFields');
-  const complete = {
-    request_type: 'brief', title: 'T', objective: 'O', key_message: 'K',
-    audience: 'A', content_text: 'C', key_dates: 'D', approver_name: 'Grace',
-    platforms: ['Instagram'], requested_deliverables: ['reel'], deadline: '2026-08-07'
-  };
-  assert.equal(f(complete).length, 0);
-  const missing = f({ request_type: 'brief', title: 'T', platforms: [], requested_deliverables: [] });
-  const keys = missing.map(m => m.key);
-  assert.ok(keys.includes('objective'));
-  assert.ok(keys.includes('platforms'));
-  assert.ok(keys.includes('requested_deliverables'));
-  assert.ok(keys.includes('deadline'));
-  assert.ok(!keys.includes('title'));
+  // What (title + formats), what for, who for, by when. Nothing else.
+  const four = { request_type: 'brief', title: 'T', requested_deliverables: ['reel'], objective: 'O', audience: 'A', deadline: '2026-10-07' };
+  assert.equal(f(four).length, 0);
+  const keys = f({ request_type: 'brief', title: 'T', requested_deliverables: [] }).map(m => m.key);
+  assert.equal(keys.sort().join(','), 'audience,deadline,objective,requested_deliverables');
+  // Moved under "Add more detail": never required any more.
+  for (const k of ['key_message', 'platforms', 'content_text', 'key_dates', 'approver_name']) assert.ok(!keys.includes(k), k);
+});
+
+test('neededFirstFor: only with two or more formats, only formats still asked for', () => {
+  const f = u('neededFirstFor');
+  assert.equal(f(['reel'], ['reel']).length, 0);
+  assert.equal(f(['reel', 'static'], ['reel', 'carousel', 'reel']).join(','), 'reel');
+  assert.equal(f(null, null).length, 0);
+});
+
+test('relatedBriefPrefill: carries the context, leaves what/formats/when to the follow-up', () => {
+  const f = u('relatedBriefPrefill');
+  const p = f({ id: 'b1', title: 'Launch', objective: 'O', audience: 'A', requested_deliverables: ['reel'], deadline: '2026-10-01', platforms: ['Instagram'], approver_name: 'G', priority: 'P0' });
+  assert.equal(p.parent_brief_id, 'b1');
+  assert.equal(p.objective, 'O');
+  assert.equal(p.platforms.join(','), 'Instagram');
+  assert.equal(p.title, undefined);
+  assert.equal(p.requested_deliverables, undefined);
+  assert.equal(p.deadline, undefined);
+  assert.equal(p.id, undefined, 'a new brief, never an edit of the parent');
+  assert.equal(p.priority, 'P2', 'urgency is not inherited');
+  assert.equal(f(null), null);
 });
 
 test('briefMissingFields: notify_only needs only title + message', () => {
@@ -353,4 +368,80 @@ test('unwrapHardBreaks joins single line breaks and keeps paragraph breaks', () 
   const unwrap = new Function(`${fn}; return unwrapHardBreaks;`)();
   assert.equal(unwrap('Done — Other is now in\nthe list.\n\nSecond para\nhere.'), 'Done — Other is now in the list.\n\nSecond para here.');
   assert.equal(unwrap('one line'), 'one line');
+});
+
+// Access parity audit, 22 Sep 2026: every partner READS the whole org's
+// briefs, but writes follow app.partner_can_edit_brief + the submitter/
+// coordinator role test in each partner write policy. The detail page's Edit,
+// Request revision, comment and upload controls follow this function.
+test('partnerCanWriteBrief mirrors the DB partner write rule', () => {
+  const f = u('partnerCanWriteBrief');
+  const brief = { org: 'the client', submitted_by_partner_id: 'p-own' };
+  assert.equal(f(brief, { id: 'p-own', org: 'the client', partner_role: 'submitter' }), true);
+  assert.equal(f(brief, { id: 'p-other', org: 'the client', partner_role: 'submitter' }), false);  // colleague's brief
+  assert.equal(f(brief, { id: 'p-coord', org: 'the client', partner_role: 'coordinator' }), true); // any in org
+  assert.equal(f(brief, { id: 'p-own', org: 'the client', partner_role: 'client_viewer' }), false); // never writes
+  assert.equal(f(brief, { id: 'p-coord', org: 'Other', partner_role: 'coordinator' }), false);
+  assert.equal(f({ org: 'the client', submitted_by_partner_id: null }, { id: 'p-other', org: 'the client', partner_role: 'submitter' }), false); // AM-logged
+  assert.equal(f(brief, null), false);  // staff on Circle
+  assert.equal(f(null, { id: 'p-own', partner_role: 'coordinator' }), false);
+});
+
+test('briefTrack: five named steps, the current one carries its own word', () => {
+  const t = u('briefTrack');
+  const r = t({ status: 'in_creative' });
+  assert.equal(r.step, 2);
+  assert.equal(r.labels.join(','), 'New brief,With Your Agency,In creative,Delivered,Completed');
+  assert.equal(t({ status: 'pending_info' }).labels[0], 'Pending info');
+  assert.equal(t({ status: 'under_revision' }).labels[2], 'Under revision');
+  assert.equal(t({ status: 'ready_for_review' }, 'client').labels[1], 'Approved');
+  assert.equal(t({ status: 'pending_info' }, 'client').labels[0], 'Needs info');
+  assert.equal(t({ status: 'ready_for_review', paused_at: '2026-09-15T00:00:00Z' }).labels[1], 'On pause');
+});
+
+test('briefDueInfo: late only while unfinished', () => {
+  const f = u('briefDueInfo');
+  assert.equal(f('2026-10-02', '2026-10-13', false).text, '2 Oct · 11 days late');
+  assert.equal(f('2026-10-02', '2026-10-13', false).late, true);
+  assert.equal(f('2026-10-02', '2026-10-13', true).late, false);
+  assert.equal(f('2026-10-20', '2026-10-13', false).text, '20 Oct');
+  assert.equal(f(null, '2026-10-13', false).text, '');
+});
+
+test('briefListTab: quick, paused, completed, active', () => {
+  const f = u('briefListTab');
+  assert.equal(f({ request_type: 'notify_only', status: 'submitted' }), 'quick');
+  assert.equal(f({ request_type: 'brief', status: 'in_creative', paused_at: 'x' }), 'paused');
+  assert.equal(f({ request_type: 'brief', status: 'completed' }), 'completed');
+  assert.equal(f({ request_type: 'brief', status: 'delivered' }), 'active');
+});
+
+test('a new date for the client wins, and the asked-for date stays visible', () => {
+  const due = u('briefDueDate'); const was = u('briefWasDate');
+  assert.equal(due({ deadline: '2026-10-15', revised_deadline: '2026-10-21' }), '2026-10-21');
+  assert.equal(was({ deadline: '2026-10-15', revised_deadline: '2026-10-21' }), '2026-10-15');
+  assert.equal(due({ deadline: '2026-10-15' }), '2026-10-15');
+  assert.equal(was({ deadline: '2026-10-15' }), null);
+  assert.equal(was({ deadline: '2026-10-21', revised_deadline: '2026-10-21' }), null);
+  // Late counts from the new date.
+  assert.equal(u('briefDueInfo')(due({ deadline: '2026-10-15', revised_deadline: '2026-10-21' }), '2026-10-21', false).late, false);
+});
+
+test('pieces: who is waited on, and only once the brief has gone to creative', () => {
+  const acts = (...a) => JSON.parse(JSON.stringify(u('pieceActionsFor')(...a)));
+  const brief = { status: 'in_creative', org: 'Example Collective' };
+  const q = { status: 'queued', needs_copy: true, needs_design: true };
+  assert.deepEqual(acts(q, brief, { me: 'x', lead: true }), ['assign']);
+  assert.deepEqual(acts(q, { ...brief, status: 'ready_for_review' }, { me: 'x', lead: true }), []);
+  assert.deepEqual(acts(q, { ...brief, paused_at: '2026-10-01' }, { me: 'x', lead: true }), []);
+  const p = { status: 'in_progress', needs_copy: true, needs_design: true, copy_assignee_id: 'a', design_assignee_id: 'b', copy_done_at: '2026-10-21' };
+  assert.deepEqual(acts(p, brief, { me: 'a' }), []);
+  assert.deepEqual(acts(p, brief, { me: 'b' }), ['design']);
+  assert.deepEqual(acts({ status: 'in_review' }, brief, { me: 'x', lead: true }), ['lead_review']);
+  assert.deepEqual(acts({ status: 'ready_to_share' }, brief, { me: 'x', reviewer: true }), ['am_review']);
+  assert.equal(u('pieceStageLabel')({ status: 'in_progress', sent_back_at: 'x' }, 'the client'), 'Changes needed');
+  assert.equal(u('pieceStageLabel')({ status: 'delivered' }, 'Example Collective'), 'Shared with Example Collective');
+  assert.equal(u('isCreativeLeadFor')('Example Collective', 'dev@youragency.com', { 'Example Collective': ['dev@youragency.com'] }), true);
+  const counts = u('pieceActionCounts')([q, p], { undefined: brief }, { me: 'b', email: 'dev@youragency.com', reviewer: false, leadsMap: {} });
+  assert.equal(counts.assign, 0);
 });

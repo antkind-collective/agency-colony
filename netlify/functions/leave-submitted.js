@@ -90,6 +90,7 @@ exports.handler = async (event) => {
       status,
       approver_emails,
       created_at,
+      marked_by_employee_id,
       employee:employees!leave_requests_employee_id_fkey (
         id,
         auth_user_id,
@@ -124,6 +125,35 @@ exports.handler = async (event) => {
 
   if (!requesterIsOwner && !requesterIsApprover && !requesterIsLeadership) {
     return jsonResponse(403, { error: 'Not allowed to trigger this notification.' });
+  }
+
+  // A manager marked their report out (14 Oct 2026): the leave is already
+  // approved, so the email goes to the person, from the manager who did it.
+  // Only that manager can trigger it.
+  if (leaveRequest.marked_by_employee_id) {
+    if (requesterEmployeeResponse.data?.id !== leaveRequest.marked_by_employee_id) {
+      return jsonResponse(403, { error: 'Not allowed to trigger this notification.' });
+    }
+    const to = String(leaveRequest.employee?.email || '').toLowerCase();
+    if (!to) return jsonResponse(200, { ok: true, skipped: true, reason: 'No email for this person.' });
+    const { data: marker } = await supabase.from('employees').select('full_name').eq('id', leaveRequest.marked_by_employee_id).maybeSingle();
+    const first = (n) => String(n || '').trim().split(/\s+/)[0] || 'Your manager';
+    const who = first(marker?.full_name);
+    const name = first(leaveRequest.employee?.full_name);
+    const kind = { SL: 'out sick', CL: 'on casual leave', PL: 'on leave' }[leaveRequest.leave_type] || 'on leave';
+    const when = formatDateRange(leaveRequest.start_date, leaveRequest.end_date) + (leaveRequest.is_half_day ? ' (half day)' : '');
+    const markedSubject = `You're marked ${kind}: ${when}`;
+    const lines = [`Hi ${name},`, `${who} marked you ${kind} for ${when}.${leaveRequest.leave_type === 'SL' ? ' Get well soon.' : ''}`, `If that's not right, let ${who} know.`];
+    try {
+      await sendEmail({ to: [to], subject: markedSubject,
+        html: `<div style="font-family:Arial,sans-serif;line-height:1.6">${lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}</div>`,
+        text: lines.join('\n\n') });
+      await logNotification({ kind: 'leave_submitted', recipientEmail: to, subject: markedSubject,
+        payload: { leave_request_id: leaveRequest.id, employee_id: leaveRequest.employee_id, marked_by: leaveRequest.marked_by_employee_id } });
+    } catch (error) {
+      return jsonResponse(500, { error: `Email send failed: ${error.message}` });
+    }
+    return jsonResponse(200, { ok: true, marked: true });
   }
 
   if (leaveRequest.status !== 'pending') {

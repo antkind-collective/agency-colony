@@ -3,6 +3,9 @@ const { isHolidayInIst } = require('./lib/holidays');
 const { sendEmail } = require('./lib/email');
 const { logNotification, withCronHeartbeat } = require('./lib/notifications');
 const { formatDateInIST, formatDateTimeInIST, getConfig, zonedParts, IST_TIME_ZONE } = require('./lib/config');
+const { planTaskRollover } = require('./lib/task-rollover');
+const { birthdayRecipients } = require('./lib/birthdays');
+const { isLastDayOfMonth, groupByApprover, reminderEmail } = require('./lib/reimbursement-reminder');
 
 function escapeHtml(value) {
   return String(value || '')
@@ -21,6 +24,18 @@ function toDateRange(startDate, endDate) {
   const start = formatDateInIST(startDate);
   const end = formatDateInIST(endDate);
   return start === end ? start : `${start} to ${end}`;
+}
+
+// Netlify sometimes starts this job a second time a few seconds after the
+// first when a run is slow (most days since 4 Oct 2026). The task rollover
+// was already safe to repeat; the emails were not, and Modeera's birthday
+// went to everyone twice (4 Nov 2026). Each email now checks the log first.
+async function sentToday(supabase, kind, recipientEmail, todayIso) {
+  const { data, error } = await supabase.from('notification_log').select('id')
+    .eq('kind', kind).eq('recipient_email', recipientEmail)
+    .gte('created_at', `${todayIso}T00:00:00+05:30`).limit(1);
+  if (error) throw error;
+  return (data || []).length > 0;
 }
 
 const run = async (event) => {
@@ -52,9 +67,12 @@ const run = async (event) => {
     runAtIst: runLabel,
     leaveCycleRowsProcessed: 0,
     dailyTasksRolledOver: 0,
+    dailyTasksArchivedAsDuplicates: 0,
     dailyTasklistRemindersSent: 0,
     birthdayNotificationsSent: 0,
+    skippedAlreadySent: 0,
     pendingLeaveDigestsSent: 0,
+    reimbursementRemindersSent: 0,
     errors: []
   };
 
@@ -71,19 +89,58 @@ const run = async (event) => {
     summary.errors.push(`Leave cycle rollover failed: ${error.message}`);
   }
 
-  // Roll over incomplete daily tasks: move any task from a past date that isn't done to today
+  // Roll over unfinished daily tasks to today (lib/task-rollover.js, Q2 24 Sep
+  // 2026). This used to be one UPDATE of every past row that wasn't 'done' —
+  // archived rows included, so each run re-dated the task archive, and one
+  // duplicate title on today aborted the whole batch (failing daily since
+  // 8 Sep). Now: plan per person and title, archive the copies that would
+  // duplicate, then move the rest one row at a time so a single clash (a
+  // browser carrying the same task forward at this minute) can't sink the rest.
   try {
-    const taskRollover = await supabase
+    const { data: pastRows, error: pastError } = await supabase
       .from('daily_tasks')
-      .update({ task_date: todayIso, updated_at: new Date().toISOString() })
+      .select('id, employee_id, task_title, task_date, status')
       .lt('task_date', todayIso)
-      .neq('status', 'done');
-
-    if (taskRollover.error) {
-      summary.errors.push(`Daily task rollover failed: ${taskRollover.error.message}`);
-    } else {
-      summary.dailyTasksRolledOver = taskRollover.count || 0;
+      .in('status', ['pending', 'in_progress'])
+      .limit(5000);
+    if (pastError) throw pastError;
+    const employeeIds = [...new Set((pastRows || []).map((r) => r.employee_id))];
+    let todayActive = [];
+    if (employeeIds.length) {
+      const { data, error } = await supabase
+        .from('daily_tasks')
+        .select('employee_id, task_title')
+        .eq('task_date', todayIso)
+        .neq('status', 'archived')
+        .in('employee_id', employeeIds);
+      if (error) throw error;
+      todayActive = data || [];
     }
+    const plan = planTaskRollover(pastRows, todayActive, todayIso);
+    const stamp = () => new Date().toISOString();
+    if (plan.archive.length) {
+      // Archived rows sit outside uniq_daily_tasks_active, so this cannot clash.
+      const { error } = await supabase.from('daily_tasks')
+        .update({ status: 'archived', updated_at: stamp() }).in('id', plan.archive);
+      if (error) summary.errors.push(`Daily task rollover: archiving duplicates failed: ${error.message}`);
+      else summary.dailyTasksArchivedAsDuplicates = plan.archive.length;
+    }
+    let moved = 0;
+    for (const id of plan.move) {
+      const { error } = await supabase.from('daily_tasks')
+        .update({ task_date: todayIso, updated_at: stamp() }).eq('id', id);
+      if (!error) { moved += 1; continue; }
+      if (error.code === '23505') {
+        // Someone's browser put this task on today since we looked: keep theirs.
+        const { error: archiveError } = await supabase.from('daily_tasks')
+          .update({ status: 'archived', updated_at: stamp() }).eq('id', id);
+        if (archiveError) summary.errors.push(`Daily task rollover: ${id}: ${archiveError.message}`);
+        else summary.dailyTasksArchivedAsDuplicates = (summary.dailyTasksArchivedAsDuplicates || 0) + 1;
+      } else {
+        summary.errors.push(`Daily task rollover: ${id}: ${error.message}`);
+      }
+    }
+    summary.dailyTasksRolledOver = moved;
   } catch (error) {
     summary.errors.push(`Daily task rollover failed: ${error.message}`);
   }
@@ -121,6 +178,35 @@ const run = async (event) => {
     summary.errors.push(`Recurring spawn failed: ${error.message}`);
   }
 
+  // Last day of the month: managers with reimbursements still waiting get one
+  // email each (lib/reimbursement-reminder.js). Before the weekend/holiday
+  // skip on purpose: Alex asked for the month's last day, whatever day it is.
+  if (isLastDayOfMonth(todayIso)) {
+    try {
+      const [pendingRes, peopleRes] = await Promise.all([
+        supabase.from('invoices').select('id, employee_id, approver_id, invoice_month, notes, file_name')
+          .eq('invoice_type', 'reimbursement').eq('approval_status', 'pending'),
+        supabase.from('employees').select('id, full_name, email, is_active')
+      ]);
+      if (pendingRes.error) throw pendingRes.error;
+      if (peopleRes.error) throw peopleRes.error;
+      const byId = new Map((peopleRes.data || []).map((e) => [e.id, e]));
+      for (const [email, group] of groupByApprover(pendingRes.data || [], byId)) {
+        if (await sentToday(supabase, 'reimbursement_month_end', email, todayIso)) { summary.skippedAlreadySent += 1; continue; }
+        const { subject, html, text } = reminderEmail(group, appBaseUrl);
+        const result = await sendEmail({ to: email, subject, html, text });
+        await logNotification({
+          kind: 'reimbursement_month_end', recipientEmail: email, subject,
+          payload: { invoice_ids: group.items.map((i) => i.id), sent_for_date: todayIso },
+          status: result.skipped ? 'skipped' : 'sent'
+        });
+        if (!result.skipped) summary.reimbursementRemindersSent += 1;
+      }
+    } catch (error) {
+      summary.errors.push(`Reimbursement reminder failed: ${error.message}`);
+    }
+  }
+
   // Was `new Date(runAt + 5.5h).getDay()` — the LOCAL weekday of a UTC-shifted
   // instant, which only equals the IST weekday because Netlify's runtime is
   // itself UTC. zonedParts asks the tz database instead of the host clock.
@@ -146,7 +232,7 @@ const run = async (event) => {
 
   const activeEmployeesResponse = await supabase
     .from('employees')
-    .select('id, full_name, email, is_active, date_of_birth')
+    .select('id, full_name, email, is_active, date_of_birth, access_level, direct_manager_email')
     .eq('is_active', true)
     .order('full_name', { ascending: true });
 
@@ -163,29 +249,15 @@ const run = async (event) => {
   // (The daily tasklist reminder moved to task-nudge.js — 11:00 IST, only
   // for people who have not touched their tasks that day.)
 
-  // Birthday notifications to leadership
-  const todayMonth = runAt.getMonth() + 1;
-  const todayDay = runAt.getDate();
-  const birthdayEmployees = activeEmployees.filter((emp) => {
-    if (!emp.date_of_birth) return false;
-    const [, m, d] = emp.date_of_birth.split('-').map(Number);
-    return m === todayMonth && d === todayDay;
-  });
-
-  if (birthdayEmployees.length) {
-    const leadershipEmails = [
-      'admin@youragency.com',
-      'strategy-lead@youragency.com',
-      'creative-lead@youragency.com',
-      'am-lead@youragency.com',
-      'ops-lead@youragency.com'
-    ];
-
-    const names = birthdayEmployees.map((emp) => emp.full_name).filter(Boolean);
+  // Birthdays: leadership plus the person's manager (lib/birthdays.js).
+  const istToday = zonedParts(runAt, IST_TIME_ZONE);
+  const [, bMonth, bDay] = istToday.iso.split('-').map(Number);
+  const birthdayMail = birthdayRecipients(activeEmployees, bMonth, bDay);
+  for (const [recipientEmail, people] of birthdayMail.entries()) {
+    const names = people.map((emp) => emp.full_name).filter(Boolean);
     const nameList = names.length === 1
       ? escapeHtml(names[0])
       : names.slice(0, -1).map(escapeHtml).join(', ') + ' and ' + escapeHtml(names[names.length - 1]);
-
     const subject = `\u{1F382} Birthday today: ${names.join(', ')}`;
     const html = `
       <div style="font-family:Arial,sans-serif;line-height:1.5">
@@ -200,29 +272,19 @@ const run = async (event) => {
       "Don't forget to wish them!",
       `Open app: ${appBaseUrl}`
     ].join('\n');
-
-    for (const recipientEmail of leadershipEmails) {
-      // Don't notify someone about their own birthday
-      if (birthdayEmployees.some((emp) => emp.email === recipientEmail)) continue;
-
-      try {
-        const emailResult = await sendEmail({ to: recipientEmail, subject, html, text });
-        await logNotification({
-          kind: 'birthday_notification',
-          recipientEmail,
-          subject,
-          payload: {
-            birthday_employee_names: names,
-            sent_for_date: formatDateInIST(runAt)
-          },
-          status: emailResult.skipped ? 'skipped' : 'sent'
-        });
-        if (!emailResult.skipped) {
-          summary.birthdayNotificationsSent += 1;
-        }
-      } catch (error) {
-        summary.errors.push(`Birthday notification failed for ${recipientEmail}: ${error.message}`);
-      }
+    try {
+      if (await sentToday(supabase, 'birthday_notification', recipientEmail, todayIso)) { summary.skippedAlreadySent += 1; continue; }
+      const emailResult = await sendEmail({ to: recipientEmail, subject, html, text });
+      await logNotification({
+        kind: 'birthday_notification',
+        recipientEmail,
+        subject,
+        payload: { birthday_employee_names: names, sent_for_date: formatDateInIST(runAt) },
+        status: emailResult.skipped ? 'skipped' : 'sent'
+      });
+      if (!emailResult.skipped) summary.birthdayNotificationsSent += 1;
+    } catch (error) {
+      summary.errors.push(`Birthday notification failed for ${recipientEmail}: ${error.message}`);
     }
   }
 
@@ -311,16 +373,17 @@ const run = async (event) => {
           <p>Hello,</p>
           <p>You have ${items.length} pending leave request(s) awaiting action in Agency Colony.</p>
           <ul>${listHtml}</ul>
-          <p>Open leave center: <a href="${appBaseUrl}#leave-center">${appBaseUrl}#leave-center</a></p>
+          <p><a href="${appBaseUrl}?open=approvals#leave-center">Open leave approvals</a></p>
         </div>
       `;
       const text = [
         `You have ${items.length} pending leave request(s) awaiting action in Agency Colony.`,
         ...items.map((item) => `${item.employeeName} | ${item.leaveType} | ${item.dateRange} | ${item.leaveId}`),
-        `Open app: ${appBaseUrl}`
+        `Open leave approvals: ${appBaseUrl}?open=approvals#leave-center`
       ].join('\n');
 
       try {
+        if (await sentToday(supabase, 'pending_leave_digest', approverEmail, todayIso)) { summary.skippedAlreadySent += 1; continue; }
         const emailResult = await sendEmail({
           to: approverEmail,
           subject,

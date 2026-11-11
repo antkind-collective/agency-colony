@@ -138,10 +138,14 @@ exports.handler = async (event) => {
     };
   } catch (err) {
     console.error('Claude API error:', err.message);
+    // Say why (27 Oct 2026): a dead API key hid behind 'Failed to generate
+    // insights' for weeks. The SDK's status + message carry no key or user data.
+    const why = err.status === 401 ? 'The AI service refused Colony\'s key.'
+      : `${err.status ? `${err.status} ` : ''}${String(err.message || '').slice(0, 140)}`.trim();
     return {
       statusCode: 502,
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'Failed to generate insights' }),
+      body: JSON.stringify({ error: why || 'The AI service did not answer.' }),
     };
   }
 };

@@ -165,6 +165,21 @@ function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+// A partner's org decides everything they can read, so it is never guessed
+// (S3, 24 Sep 2026). The add bar used to arrive pre-filled with "Global
+// Artivism" and fell back to it when cleared: inviting a second client without
+// retyping the box made them a the client partner with all of the client's briefs. Now it must
+// be typed. A case/space variant of a known org resolves to that org's exact
+// spelling (a stray "example collective" would otherwise be a separate, empty
+// org); anything else is reported as new so the caller can confirm it.
+function resolvePartnerOrg(input, knownOrgs = []) {
+  const typed = String(input || '').trim().replace(/\s+/g, ' ');
+  if (!typed) return { error: 'Enter the client organisation.' };
+  const key = typed.toLowerCase();
+  const match = (knownOrgs || []).find((o) => String(o || '').trim().replace(/\s+/g, ' ').toLowerCase() === key);
+  return match ? { org: String(match).trim(), isNew: false } : { org: typed, isNew: true };
+}
+
 // Matches the DB's lower(task_title) unique index — never compare task titles
 // with plain ===; always go through this.
 function taskTitleKey(title) {
@@ -320,4 +335,12 @@ function ordinal(n) {
   const mod100 = num % 100;
   if (mod100 >= 11 && mod100 <= 13) return `${num}th`;
   return `${num}${['th', 'st', 'nd', 'rd'][num % 10] || 'th'}`;
+}
+
+
+// People pickers list everyone alphabetically by first name (25 Sep
+// 2026, P3). Replaces a surname test that pushed every "Morgan" to one end.
+// full_name starts with the first name; case and accents are ignored.
+function compareByFirstName(a, b) {
+  return String(a?.full_name || '').trim().localeCompare(String(b?.full_name || '').trim(), 'en', { sensitivity: 'base' });
 }

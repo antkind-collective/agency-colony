@@ -23,6 +23,10 @@ const SUPERADMIN_EMAIL = 'admin@youragency.com';
 const INVOICE_VIEWER_EMAILS = ['finance@youragency.com', 'am-lead@youragency.com', 'admin@youragency.com'];
 const INVOICE_EXCLUDED_EMAILS = ['admin@youragency.com'];
 const HIDDEN_EMPLOYEE_EMAILS = ['finance@youragency.com']; // have access but hidden from all team views
+// Accounts that are not a person, so they never belong on all@youragency.com and
+// the daily group sync should stop naming them (24 Sep 2026: studio is
+// "a temp ID, soon to be disconnected").
+const ALL_GROUP_EXEMPT_EMAILS = ['studio@youragency.com'];
 // NOTE: there is no CAPACITY_EXCLUDED_EMAILS. "Not part of the agency capacity
 // pool" is derived from client scope (app.employee_client_scope) — see
 // isCapacityExcluded in js/access.js. A hand-maintained email list drifted from
@@ -54,10 +58,10 @@ const HIRING_ONLY_EMAILS = ['leo@youragency.com'];
 // time against. Excluded from the client-scope picker, since "dedicated to
 // Pitches/BD" isn't a thing — and scoping someone to one would mark them
 // client-scoped (gating their access, removing them from agency capacity)
-// while granting no real client. 'Internal' is the synthetic parent
-// save_my_allocations invents; the others are genuine buckets Alex named.
+// while granting no real client. These are genuine buckets Alex named (the
+// synthetic 'Internal' client was removed on 27 Sep 2026).
 // Compared lowercased; see the scope picker in renderPendingSetupAdmin.
-const NON_CLIENT_BUCKETS = ['internal', 'misc', 'pitches/bd'];
+const NON_CLIENT_BUCKETS = ['misc', 'misc/bizdev', 'pitches/bd'];
 const ANT_DOMAIN = '@youragency.com';
 const TEAM_AM = 'AM';
 const TEAM_AM_LEGACY = 'Acc Management'; // DB renamed to 'AM' — kept for backward compat during transition
@@ -140,21 +144,6 @@ const CITY_OPTIONS = [
 
 const DEFAULT_TIMEZONE = 'Asia/Kolkata';
 
-const STATEFUL_SCREENS = [
-  'home-feed',
-  'executive-dashboard',
-  'leadership-planner',
-  'daily-tasklist',
-  'my-allocations',
-  'leave-center',
-  'people-directory',
-  'client-projects',
-  'employee-profile',
-  'admin-settings',
-  'invoice-center',
-  'policy'
-];
-
 // Keep sorted by date. The holiday list is decided collaboratively with the
 // team each year — append the next year's entries only after that exercise.
 // Every consumer filters by date, so past entries are harmless to keep.
@@ -170,7 +159,24 @@ const PUBLIC_HOLIDAYS = [
   { date: '2026-10-19', name: 'Durga Ashtami' },
   { date: '2026-11-09', name: 'Diwali' },
   { date: '2026-11-24', name: 'Guru Nanak Jayanti' },
-  { date: '2026-12-25', name: 'Christmas Break' }
+  { date: '2026-12-25', name: 'Christmas Break' },
+  { date: '2026-12-26', name: 'Christmas Break' },
+  { date: '2026-12-27', name: 'Christmas Break' },
+  { date: '2026-12-28', name: 'Christmas Break' },
+  { date: '2026-12-29', name: 'Christmas Break' },
+  { date: '2026-12-30', name: 'Christmas Break' },
+  { date: '2026-12-31', name: 'Christmas Break' },
+  { date: '2027-01-01', name: 'Christmas Break' },
+  { date: '2027-01-02', name: 'Christmas Break' },
+  { date: '2027-01-03', name: 'Christmas Break' }
+];
+
+// Festivals that fall on a weekend, when the office day off is a different
+// day (29 Oct 2026: Diwali is on a Sunday and should still show).
+// Home's Coming up lists the festival itself on its own day; the holiday
+// above still says the office is closed.
+const FESTIVALS = [
+  { date: '2026-11-08', name: 'Diwali' }
 ];
 
 
@@ -212,7 +218,7 @@ const STAFF_HOST = 'app.youragency.com';
 const CIRCLE_HOST = 'clients.youragency.com';
 
 function isCircleHost(hostname) {
-  return String(hostname || '').toLowerCase().split(':')[0] === CIRCLE_HOST;
+  return STAFF_HOST !== CIRCLE_HOST && String(hostname || '').toLowerCase().split(':')[0] === CIRCLE_HOST;
 }
 
 function productName(hostname) {
@@ -224,6 +230,7 @@ function productName(hostname) {
 // caller never redirects for no reason. Localhost and deploy previews are
 // left alone — they are neither host and bouncing them would break testing.
 function homeHostFor(sessionKind, hostname) {
+  if (STAFF_HOST === CIRCLE_HOST) return null;
   const host = String(hostname || '').toLowerCase().split(':')[0];
   if (host !== STAFF_HOST && host !== CIRCLE_HOST) return null;
   const belongs = sessionKind === 'partner' ? CIRCLE_HOST : STAFF_HOST;

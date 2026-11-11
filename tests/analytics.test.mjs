@@ -102,7 +102,8 @@ test('computeOverviewKpis: week-on-week + 7-day windows + sparse-data guards', (
   assert.match(full.kpis[2].arrow, /trend-up/);      // 21 > 7
   assert.match(full.kpis[3].arrow, /trend-down/);    // 14 < 35
   assert.equal(full.hasPrevWeek, true);
-  assert.match(full.kpiPeriod, /^Week of /);
+  assert.equal(full.kpiPeriod, '8–14 Jun');
+  assert.equal(full.comparePeriod, '1–7 Jun');
 
   const sparse = f({ metrics_data: [] }, { metrics_data: [day(1), day(2)] }, { visitor_metrics: [] });
   assert.equal(sparse.kpis[0].value, '0');
@@ -110,6 +111,26 @@ test('computeOverviewKpis: week-on-week + 7-day windows + sparse-data guards', (
   assert.equal(sparse.kpis[2].arrow, '');            // <14 days → no trend
   assert.equal(sparse.hasPrevWeek, false);
   assert.equal(sparse.kpiPeriod, 'Last week');
+});
+
+test('computeOverviewKpis: followers and visitors cover the same dates as the KPI week', () => {
+  const f = u('computeOverviewKpis');
+  const days = (from, n, v) => Array.from({ length: n }, (_, i) => {
+    const d = new Date(`${from}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + i);
+    return { date: d.toISOString().slice(0, 10), total: v(i), overview_unique: v(i) };
+  });
+  // Content weeks 20 Sep and 27 Sep (Sun–Sat); daily data runs on to 7 Oct.
+  const out = f({ metrics_data: [{ week: '2026-09-20', 'Impressions (organic)': 1 }, { week: '2026-09-27', 'Impressions (organic)': 2 }] },
+    { metrics_data: days('2026-09-20', 18, (i) => (i < 7 ? 1 : i < 14 ? 2 : 100)) },
+    { visitor_metrics: days('2026-09-20', 18, () => 1) }, '2026-10-09');
+  assert.equal(out.kpiPeriod, '27 Sept – 3 Oct');
+  assert.equal(out.comparePeriod, '20–26 Sept');
+  assert.equal(out.kpis[2].value, '+14');            // 27 Sep–3 Oct only, not the 4–7 Oct days
+  assert.match(out.kpis[2].arrow, /trend-up/);       // 14 vs 7
+  assert.equal(out.kpis[3].value, '7');
+  // Daily data that stops before the week ends shows no number for it.
+  const short = f({ metrics_data: [{ week: '2026-09-20' }, { week: '2026-09-27' }] }, { metrics_data: days('2026-09-20', 10, () => 1) }, { visitor_metrics: [] }, '2026-10-09');
+  assert.equal(short.kpis[2].value, '–');
 });
 
 test('excelSerialToIso: serials, serial-strings, ISO strings, junk', () => {
@@ -343,7 +364,7 @@ test('computeOverviewKpis ignores the in-progress bucket', () => {
   const out = f({ metrics_data: makeWeekly() }, { metrics_data: [] }, { visitor_metrics: [] }, TODAY);
   assert.equal(out.kpis[0].value, '5.0K');            // wk of 07-12, not 6000
   assert.equal(out.weekInProgress, '2026-07-19');     // surfaced for the note
-  assert.match(out.kpiPeriod, /12 Jul/);
+  assert.equal(out.kpiPeriod, '12–18 Jul');
 });
 
 // ── Comms DOCX ingest — heading dates and section/image pairing ──
@@ -378,6 +399,44 @@ test('parseCommsDocxStructure: headings partition; images follow their heading',
   assert.equal(sends[0].imagePaths.join(','), 'word/media/image1.png,word/media/image2.png');
   assert.equal(sends[1].imagePaths.join(','), 'word/media/image3.png');
   assert.equal(sends[1].dateIso, '2026-07-07');
+});
+
+test('parseCommsDocxSections: a tabbed Google Doc export, one send per section (27 Oct 2026)', () => {
+  const doc = `
+    <w:p><w:r><w:t>Link</w:t></w:r><w:r><w:t>: </w:t></w:r><w:r><w:t>https://link.msgsndr.com/email-preview/LOC1/JKwE1L8jMCZ2A0GgOHpv?time_stamp=1777980137607</w:t></w:r></w:p>
+    <w:p><w:t>Time: 16.50 IST</w:t></w:p>
+    <w:p><w:drawing r:embed="rId4"/></w:p>
+    <w:p><w:drawing r:embed="rId5"/><w:pPr><w:sectPr/></w:pPr></w:p>
+    <w:p><w:t>Link: </w:t><w:hyperlink r:id="rId9"><w:r><w:t>Example Collective Matters</w:t></w:r></w:hyperlink></w:p>
+    <w:p><w:t>Time: 11 PM</w:t></w:p>
+    <w:p><w:drawing r:embed="rId6"/><w:pPr><w:sectPr/></w:pPr></w:p>
+    <w:p><w:t>Link:</w:t></w:p>
+    <w:p><w:t>Time: 8 PM</w:t></w:p>
+    <w:p><w:drawing r:embed="rId7"/></w:p>
+    <w:p><w:t>Time:</w:t></w:p>`;
+  const rels = `<Relationship Id="rId4" Type="t" Target="media/image1.png"/>
+    <Relationship Id="rId5" Type="t" Target="media/image2.png"/>
+    <Relationship Id="rId6" Type="t" Target="media/image3.png"/>
+    <Relationship Id="rId7" Type="t" Target="media/image4.png"/>
+    <Relationship Id="rId9" Type="h" Target="https://link.msgsndr.com/email-preview/LOC1/HKc6yr7shhLKjnyzOmOI?time_stamp=1779470000000&amp;x=1" TargetMode="External"/>`;
+  const sends = JSON.parse(JSON.stringify(u('parseCommsDocxSections')(doc, rels)));
+  assert.equal(sends.length, 3); // the last "Time:" has no screenshots → not a send
+  assert.equal(sends[0].imagePaths.join(','), 'word/media/image1.png,word/media/image2.png');
+  assert.equal(sends[0].linkId, 'JKwE1L8jMCZ2A0GgOHpv');
+  assert.equal(sends[0].dateIso, '2026-05-05');
+  assert.equal(sends[0].time, '16.50 IST');
+  assert.equal(sends[1].linkId, 'HKc6yr7shhLKjnyzOmOI', 'a hyperlinked Link: resolves through the rels');
+  assert.equal(sends[2].linkId, '');
+  assert.equal(sends[2].dateIso, '', 'no link, no date: the uploader fills it in');
+  assert.equal(sends[2].imagePaths.join(','), 'word/media/image4.png');
+});
+
+test('commsLinkDate is the IST date; commsSendName matches the names the client already has', () => {
+  assert.equal(u('commsLinkDate')('https://x/email-preview/a/b?time_stamp=1777980137607'), '2026-05-05');
+  assert.equal(u('commsLinkDate')('https://x/email-preview/a/b?time_stamp=1784917800000'), '2026-07-25'); // 00:00 IST, 24 Jul 18:30 UTC
+  assert.equal(u('commsLinkDate')(''), '');
+  assert.equal(u('commsSendName')('2026-07-23', 'Dispatches'), '23 July 2026 Dispatch');
+  assert.equal(u('commsSendName')('2026-05-05', 'Newsletter'), '5 May 2026 Newsletter');
 });
 
 test('parseStoredUploadName: timestamp prefix → date, rest is the name', () => {
@@ -488,4 +547,181 @@ test('the upload asks once per batch, and the archive labels both platforms', ()
   assert.doesNotMatch(app, /doesn't say which platform it's from — Meta names/, 'old error-style wording still present');
   // Facebook files must be identifiable in the uploaded-files archive.
   assert.match(app, /facebook: \['Facebook'/, 'archive has no Facebook label');
+});
+
+test('websiteComparison: the four LinkedIn modes over website weeks and months', () => {
+  const wk = (start, users, views, eng) => ({ week_start: start, users, new_users: users - 5, sessions: users, views, events: 0, engagement_seconds: eng });
+  const weeks = [wk('2026-09-21', 40, 80, 2400), wk('2026-09-28', 40, 80, 2400), wk('2026-10-05', 40, 80, 2400), wk('2026-10-12', 80, 160, 4800), wk('2026-10-19', 60, 120, 3840)];
+  const report = { metrics_data: weeks, demographics_data: {
+    months: [{ month: '2026-08', users: 150, views: 300, engagement_seconds: 9000 }, { month: '2026-09', users: 200, views: 400, engagement_seconds: 10000 }],
+    pages: { weeks: { '2026-10-19': [{ path: '/', views: 100, users: 50 }], '2026-10-12': [{ path: '/', views: 60, users: 30 }], '2026-10-05': [{ path: '/', views: 20, users: 10 }, { path: '/work', views: 8, users: 4 }] }, months: { '2026-09': [{ path: '/', views: 300, users: 150 }] } },
+    sources: { weeks: {}, months: {} } } };
+  const f = u('websiteComparison');
+  const wow = JSON.parse(JSON.stringify(f(report, 'wow')));
+  assert.equal(wow.a.totals.users, 60);
+  assert.equal(wow.a.totals.avg_engagement_seconds, 64);
+  assert.equal(wow.b.totals.users, 80);
+  assert.equal(wow.a.pages[0].views, 100);
+  const wo4 = JSON.parse(JSON.stringify(f(report, 'wo4')));
+  assert.equal(wo4.b.totals.users, 50, 'average of 40,40,40,80, never a sum');
+  assert.equal(wo4.b.label, '4-week average');
+  assert.deepEqual(wo4.b.pages.map((p) => [p.path, p.views]), [['/', 20], ['/work', 2]]);
+  const mom = JSON.parse(JSON.stringify(f(report, 'mom')));
+  assert.equal(mom.a.label, 'September 2026');
+  assert.equal(mom.a.totals.avg_engagement_seconds, 50);
+  assert.equal(mom.a.pages[0].views, 300);
+  const custom = JSON.parse(JSON.stringify(f(report, 'custom', '2026-09-21', '2026-10-12')));
+  assert.equal(custom.a.totals.users, 40);
+  assert.equal(custom.b.totals.users, 80);
+  assert.equal(f(report, 'custom', '2026-01-05', '2026-10-12'), null);
+  assert.equal(f({ metrics_data: weeks.slice(0, 1), demographics_data: { months: [] } }, 'mom'), null);
+});
+
+test('AI summaries: reused while the data is the same, never once it has moved on (27 Oct 2026)', () => {
+  const stamp = u('insightDataStamp'), usable = u('usableInsight');
+  const reports = { content: { report_type: 'content', uploaded_at: '2026-10-19T04:30:00Z', data_through: '2026-10-18' },
+    followers: { report_type: 'followers', uploaded_at: '2026-10-19T04:31:00Z', data_through: '2026-10-18' }, website: null };
+  const s1 = stamp(reports);
+  assert.equal(s1, stamp({ followers: reports.followers, content: reports.content }), 'order does not matter');
+  const entry = { text: 'Impressions up 12%', stamp: s1, at: '2026-10-20T06:00:00Z' };
+  assert.equal(usable(entry, s1).text, 'Impressions up 12%', 'same week: no new call');
+  const nextWeek = stamp({ ...reports, followers: { ...reports.followers, uploaded_at: '2026-10-26T04:31:00Z', data_through: '2026-10-25' } });
+  assert.notEqual(nextWeek, s1);
+  assert.equal(usable(entry, nextWeek), null, 'any report moved on: the old summary is not shown');
+  assert.equal(usable('Impressions up 12%', s1), null, 'pre-stamp plain-text summaries count as stale');
+  assert.equal(usable({ text: '', stamp: s1 }, s1), null);
+});
+
+// ── LinkedIn engagement rate: sum the counts, then divide (2 Nov 2026) ──
+test('liEngagementRate: (clicks + reactions + comments + reposts) ÷ impressions, summed first', () => {
+  const f = u('liEngagementRate');
+  const day = (impr, clicks) => ({ 'Impressions (total)': impr, 'Clicks (total)': clicks, 'Reactions (total)': 0, 'Comments (total)': 0, 'Reposts (total)': 0 });
+  // LinkedIn's own row: 27 Oct 2025 in UIV's export, 77 ÷ 1601
+  assert.equal(f({ 'Impressions (total)': 1601, 'Clicks (total)': 42, 'Reactions (total)': 34, 'Comments (total)': 1, 'Reposts (total)': 0 }).toFixed(6), '0.048095');
+  // 50 impressions at 40% + 5,000 at 2%: averaging says 21%, summed is 2.4%
+  assert.equal(f([day(50, 20), day(5000, 100)]).toFixed(4), '0.0238');
+  // 0% and 0-impression days stay in the totals
+  assert.equal(f([day(100, 10), day(100, 0), day(0, 0)]), 0.05);
+  assert.equal(f([]), 0);
+});
+
+test('liWithRates recomputes stored averaged rates; rows without counts untouched', () => {
+  const [a, b] = u('liWithRates')([
+    { week: '2026-06-01', 'Impressions (total)': 200, 'Clicks (total)': 10, 'Reactions (total)': 10, 'Comments (total)': 0, 'Reposts (total)': 0, 'Engagement rate (total)': 0.5 },
+    { week: '2026-06-08', 'Engagement rate (total)': 0.04 }
+  ]);
+  assert.equal(a['Engagement rate (total)'], 0.1);
+  assert.equal(b['Engagement rate (total)'], 0.04);
+});
+
+test('aggregateWeeklyToMonthly splits a week across months by its days', () => {
+  const d = (date, impr, clicks) => ({ date, 'Impressions (total)': impr, 'Clicks (total)': clicks, 'Reactions (total)': 0, 'Comments (total)': 0, 'Reposts (total)': 0, 'Posts': 0 });
+  const months = u('aggregateWeeklyToMonthly')([{ week: '2026-08-30', 'Impressions (total)': 1100, 'Clicks (total)': 110,
+    daily_counts: [d('2026-08-31', 100, 50), d('2026-09-01', 1000, 60)] }]);
+  const aug = months.find(m => m.month === '2026-08'), sep = months.find(m => m.month === '2026-09');
+  assert.equal(aug['Impressions (total)'], 100);
+  assert.equal(aug['Engagement rate (total)'], 0.5);
+  assert.equal(sep['Engagement rate (total)'], 0.06);
+});
+
+test('liComparisonWindows wo4: rate from the four weeks summed, totals carry no day rows', () => {
+  const wk = (week, impr, clicks) => ({ week, 'Impressions (total)': impr, 'Clicks (total)': clicks, 'Reactions (total)': 0, 'Comments (total)': 0, 'Reposts (total)': 0, daily_counts: [] });
+  const w = u('liComparisonWindows')([wk('2026-06-14', 100, 50), wk('2026-06-21', 900, 9), wk('2026-06-28', 1000, 10), wk('2026-07-05', 1000, 10), wk('2026-07-12', 1000, 30)], 'wo4', TODAY);
+  // (50 + 9 + 10 + 10) ÷ 3,000 = 2.63%, not the 13.25% mean of the four rates
+  assert.equal(w.b.totals['Engagement rate (total)'].toFixed(4), '0.0263');
+  assert.ok(!('daily_counts' in w.a.totals));
+});
+
+test('liPostsEngagementRate: a group of posts sums its counts, not its post rates', () => {
+  const post = (impr, clicks) => ({ 'Impressions': impr, 'Clicks': clicks, 'Likes': 0, 'Comments': 0, 'Reposts': 0, 'Engagement rate': clicks / impr });
+  // 1 post at 50% on 20 impressions + 1 at 1% on 2,000: mean 25.5%, summed 1.5%
+  assert.equal(u('liPostsEngagementRate')([post(20, 10), post(2000, 20)]).toFixed(4), '0.0149');
+  assert.equal(u('liPostsEngagementRate')([]), 0);
+});
+
+test('liMergeWeeks: a partial first week adds its days instead of replacing the full week', () => {
+  const d = (date, impr, clicks) => ({ date, 'Impressions (total)': impr, 'Clicks (total)': clicks, 'Reactions (total)': 0, 'Comments (total)': 0, 'Reposts (total)': 0, 'Posts': 0 });
+  const wk = (days) => ({ week: '2026-09-20', daily_counts: days, ...Object.fromEntries(['Impressions (total)', 'Clicks (total)', 'Reactions (total)', 'Comments (total)', 'Reposts (total)', 'Posts'].map(k => [k, days.reduce((s, x) => s + x[k], 0)])) });
+  const full = wk(['21', '22', '23', '24', '25', '26', '27'].map(n => d(`2026-09-${n}`, 100, 10)));
+  const partial = wk([d('2026-09-26', 100, 30), d('2026-09-27', 100, 10)]); // a new export starting on the 26th
+  const [m] = u('liMergeWeeks')([full], [partial]);
+  assert.equal(m.daily_counts.length, 7);
+  assert.equal(m['Impressions (total)'], 700);
+  assert.equal(m['Clicks (total)'], 90);         // the 26th's revised 30 wins over 10
+  assert.equal(m['Engagement rate (total)'].toFixed(4), '0.1286');
+  // a stored week without days keeps its totals against a partial week…
+  const legacy = { week: '2026-09-20', 'Impressions (total)': 700, 'Clicks (total)': 70 };
+  assert.equal(u('liMergeWeeks')([legacy], [partial])[0]['Impressions (total)'], 700);
+  // …and gives way to a complete one
+  assert.equal(u('liMergeWeeks')([legacy], [full])[0].daily_counts.length, 7);
+});
+
+test('searchComparison: the 4-week baseline sums first, so CTR and position are the four weeks together', () => {
+  const wk = (week_start, clicks, impressions, position) => ({ week_start, clicks, impressions, position_sum: position * impressions });
+  const report = { demographics_data: { search: {
+    weeks: [wk('2026-09-28', 10, 100, 5), wk('2026-10-05', 0, 900, 20), wk('2026-10-12', 10, 100, 5), wk('2026-10-19', 0, 900, 20), wk('2026-10-26', 5, 50, 3)],
+    months: [], queries: { weeks: {} }, pages: { weeks: {} } } } };
+  const w = u('searchComparison')(report, 'wo4');
+  assert.equal(w.b.totals.clicks, 5);              // 20 / 4
+  assert.equal(w.b.totals.ctr, 0.01);              // 20 / 2,000, not the 5% mean of four rates
+  assert.equal(w.b.totals.position.toFixed(1), '18.5'); // impression-weighted
+  assert.equal(w.a.totals.ctr, 0.1);
+  assert.equal(u('searchComparison')({ demographics_data: {} }, 'wow'), null);
+});
+
+// Newsletter: Beehiiv subscriber export (3 Nov 2026).
+const BH_HEADER = ['subscriber_id', 'api_subscription_id', 'email', 'tags', 'status', 'created_at', 'updated_at', 'unsubscribed_at', 'stripe_customer_id', 'referred_by', 'campaign', 'channel', 'acquisition_source', 'referring_url', 'acquisition_term', 'acquisition_content', 'device_type', 'total_revenue_cents', 'referral_count', 'total_sent', 'total_delivered', 'total_unique_opened', 'total_clicked', 'total_unique_clicked', 'open_rate', 'click_rate', 'last_opened_at', 'last_clicked_at', 'Free Tier', 'First Name', 'Last Name'];
+const bh = (o) => BH_HEADER.map((h) => o[h] ?? '');
+const BH_ROWS = [BH_HEADER,
+  bh({ email: 'a@example.com', status: 'active', created_at: '2026-10-30 11:29:13 UTC', channel: 'website', acquisition_source: 'website: direct / ', total_delivered: '0', total_unique_opened: '0' }),
+  bh({ email: 'b@example.com', status: 'active', created_at: '2026-10-30 15:52:03 UTC', channel: 'website', acquisition_source: 'website: linktr.ee / referral', referring_url: 'https://linktr.ee/', total_delivered: '1', total_unique_opened: '1' }),
+  bh({ email: 'c@example.com', status: 'inactive', created_at: '2026-10-21 04:00:00 UTC', unsubscribed_at: '2026-11-02 05:00:00 UTC', acquisition_source: 'website: lnkd.in / referral', total_delivered: '3', total_unique_opened: '1', total_unique_clicked: '1' }),
+  bh({ email: 'd@example.com', status: 'active', created_at: '2026-11-01 19:00:00 UTC', acquisition_source: 'website: l.instagram.com / referral', total_delivered: '0' })];
+
+test('Beehiiv export: detected by its columns; personal columns stripped', () => {
+  assert.equal(u('isBeehiivSubscriberHeader')(BH_HEADER), true);
+  assert.equal(u('isBeehiivSubscriberHeader')(['Date', 'Impressions']), false);
+  const stripped = u('stripBeehiivPersonalColumns')(BH_ROWS);
+  assert.ok(!stripped[0].map((h) => h.toLowerCase()).some((h) => ['email', 'first name', 'last name'].includes(h)));
+  assert.ok(!JSON.stringify(stripped).includes('@example.com'));
+});
+
+test('Beehiiv export: weeks, months, sources and rates (sum, then divide)', () => {
+  const r = u('parseBeehiivSubscribers')(BH_ROWS, '2026-11-03');
+  // Finished weeks only: exported Tue 3 Nov, so the week of 2 Nov is left
+  // out. 1 Nov 19:00 UTC is 2 Nov 00:30 IST, so that sign-up falls in it.
+  assert.deepEqual(JSON.parse(JSON.stringify(r.weeks)), [
+    { week_start: '2026-10-19', new: 1, left: 0, subscribers: 1 },
+    { week_start: '2026-10-26', new: 2, left: 0, subscribers: 3 }]);
+  const later = u('parseBeehiivSubscribers')(BH_ROWS, '2026-11-09');
+  assert.deepEqual(JSON.parse(JSON.stringify(later.weeks[2])), { week_start: '2026-11-02', new: 1, left: 1, subscribers: 3 });
+  assert.equal(r.summary.subscribers, 3);
+  assert.equal(r.summary.ever, 4);
+  assert.equal(r.summary.left, 1);
+  assert.equal(r.summary.open_rate, 2 / 4);
+  assert.equal(r.summary.click_rate, 1 / 4);
+  assert.deepEqual(JSON.parse(JSON.stringify(r.sources.all)), { Direct: 1, Linktree: 1, LinkedIn: 1, Instagram: 1 });
+  assert.deepEqual(JSON.parse(JSON.stringify(r.months)), [{ month: '2026-10', new: 3, left: 0, subscribers: 3 }]);
+  assert.equal(u('parseBeehiivSubscribers')(BH_ROWS, '2026-12-01').months.length, 2);
+});
+
+test('newsletterComparison: last week vs previous, month vs month', () => {
+  const p = u('parseBeehiivSubscribers')(BH_ROWS, '2026-12-01');
+  const report = { metrics_data: p.weeks, demographics_data: { months: p.months, sources: p.sources } };
+  const wow = u('newsletterComparison')(report, 'wow');
+  assert.equal(wow.a.key, '2026-11-23');
+  const wo4 = u('newsletterComparison')(report, 'wo4');
+  assert.equal(wo4.b.label, '4-week average');
+  const mom = u('newsletterComparison')(report, 'mom');
+  assert.equal(mom.a.key, '2026-11');
+  assert.equal(mom.a.totals.new, 1);
+  assert.equal(mom.a.totals.left, 1);
+  assert.equal(mom.b.totals.subscribers, 3);
+  assert.equal(u('newsletterComparison')({ metrics_data: [p.weeks[0]] }, 'wow'), null);
+});
+
+test('parseCsvText keeps text as text and handles quotes; toCsvText round-trips', () => {
+  const rows = u('parseCsvText')('﻿a,b,c\r\n"x, y","say ""hi""",2026-10-30 11:29:13 UTC\n');
+  assert.deepEqual(JSON.parse(JSON.stringify(rows)), [['a', 'b', 'c'], ['x, y', 'say "hi"', '2026-10-30 11:29:13 UTC']]);
+  assert.deepEqual(JSON.parse(JSON.stringify(u('parseCsvText')(u('toCsvText')(rows)))), JSON.parse(JSON.stringify(rows)));
 });

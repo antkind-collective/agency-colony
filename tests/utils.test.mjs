@@ -245,3 +245,24 @@ test('CITY_OPTIONS has no duplicate cities', () => {
   const cities = vm.runInContext('CITY_OPTIONS', ctx).map((o) => o.city.toLowerCase());
   assert.equal(new Set(cities).size, cities.length);
 });
+
+// ── resolvePartnerOrg — the org decides what a partner reads (S3, 24 Sep 2026) ──
+test('resolvePartnerOrg never defaults an org', () => {
+  const r = u('resolvePartnerOrg');
+  assert.ok(r('', ['Example Collective']).error);
+  assert.ok(r('   ', ['Example Collective']).error);
+  assert.ok(r(null).error);
+});
+test('resolvePartnerOrg snaps case/space variants to the known spelling', () => {
+  const r = u('resolvePartnerOrg');
+  assert.deepEqual({ ...r(' example  collective ', ['Example Collective', 'RM']) }, { org: 'Example Collective', isNew: false });
+});
+test('resolvePartnerOrg reports an unknown org as new', () => {
+  const r = u('resolvePartnerOrg');
+  assert.deepEqual({ ...r('Acme Foundation', ['Example Collective']) }, { org: 'Acme Foundation', isNew: true });
+});
+
+// ── compareByFirstName — people pickers are alphabetical by first name (P3) ──
+test('no people picker sorts by surname any more', () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+});

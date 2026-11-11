@@ -63,8 +63,10 @@ async function withRetry(fn, retryOn, delays = [1500, 3000, 5000]) {
 
 // key: what this file IS ("policy:remote_working_policy", "agreement:<hire>:<doc>").
 // convertTo: a Google MIME type to import as (a Doc), or null to keep the bytes.
-async function syncFile({ admin, key, name, contentType, content, convertTo = null }) {
-  const [token, folderId] = await Promise.all([googleAccessToken(DRIVE_SCOPE), mirrorFolderId(admin)]);
+// folderId: file somewhere other than the mirror folder (signed NDAs go to
+// Legal > Signed NDAs on the shared drive). lock: false leaves it editable.
+async function syncFile({ admin, key, name, contentType, content, convertTo = null, folderId: targetFolder = null, lock = true }) {
+  const [token, folderId] = await Promise.all([googleAccessToken(DRIVE_SCOPE), targetFolder ? Promise.resolve(String(targetFolder)) : mirrorFolderId(admin)]);
   const existing = await admin.from('drive_mirror').select('file_id').eq('key', key).maybeSingle();
   const fields = 'id,name,webViewLink,modifiedTime';
   let file;
@@ -76,7 +78,7 @@ async function syncFile({ admin, key, name, contentType, content, convertTo = nu
         // A locked file refuses content updates; lift the lock for the write.
         // The unlock lands a beat before Drive honours it — the first write
         // after it can still come back 403 — so the update gets a few tries.
-        await setLock(token, priorId, false);
+        if (lock) await setLock(token, priorId, false);
         file = await withRetry(() => driveRequest(token, `${UPLOAD}/${encodeURIComponent(priorId)}?uploadType=multipart&supportsAllDrives=true&fields=${fields}`,
           { method: 'PATCH', headers: { 'Content-Type': ct }, body }, 'update'), / 403:/);
       } catch (e) {
@@ -94,7 +96,7 @@ async function syncFile({ admin, key, name, contentType, content, convertTo = nu
   } finally {
     // Whatever happened, the copy must not be left editable.
     const lockId = file?.id || priorId;
-    if (lockId) await setLock(token, lockId, true).catch(() => {});
+    if (lock && lockId) await setLock(token, lockId, true).catch(() => {});
   }
   const row = { key, file_id: file.id, name: file.name || name, web_view_link: file.webViewLink || null, synced_at: new Date().toISOString() };
   await admin.from('drive_mirror').upsert(row, { onConflict: 'key' });

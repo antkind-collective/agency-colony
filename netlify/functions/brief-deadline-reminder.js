@@ -85,7 +85,7 @@ async function handler(event) {
     supabase.from('brief_deliverables')
       .select('id, brief_id, title, deliverable_type, status, due_at, delivered_at, assignee_employee_id')
       .not('due_at', 'is', null).limit(2000),
-    supabase.from('briefs').select('id, title, status, paused_at, org').limit(2000),
+    supabase.from('briefs').select('id, title, status, paused_at, org').is('archived_at', null).limit(2000),
     supabase.from('employees').select('id, email, full_name, is_active').limit(500),
     supabase.from('notification_log').select('payload')
       .eq('kind', 'brief_deadline_reminder').limit(5000)

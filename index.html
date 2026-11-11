@@ -76,19 +76,24 @@
                non-partner nav button, the login button included). -->
           <div id="circleIdentity" class="sidebar-item sidebar-identity circle-identity hidden"></div>
           <div class="sidebar-nav-separator" aria-hidden="true"></div>
+          <!-- Three groups, the same order for everyone (8 Oct 2026, T2).
+               A group's label hides itself when nothing under it is visible
+               (syncNavGroups). My Allocation and Resource Planner are tabs
+               inside My week and Overview, not menu items. -->
+          <p class="nav-group" data-nav-group>You</p>
           <button class="screen-link sidebar-item" data-screen="home-feed" data-role="all">Home</button>
-          <button class="screen-link sidebar-item leadership-only" data-screen="executive-dashboard" data-role="leadership">Agency Overview</button>
+          <button class="screen-link sidebar-item" data-screen="daily-tasklist" data-role="all">My week</button>
+          <button class="screen-link sidebar-item" data-screen="leave-center" data-role="all" id="leaveNavButton">Leave</button>
           <button class="screen-link sidebar-item hidden" data-screen="bd-pipeline" data-role="all" id="dealFlowNavButton">Deal Flow</button>
-          <button class="screen-link sidebar-item leadership-only" data-screen="leadership-planner" data-role="leadership">Resource Planner</button>
-          <button class="screen-link sidebar-item" data-screen="daily-tasklist" data-role="all">My Work</button>
-          <button class="screen-link sidebar-item" data-screen="my-allocations" data-role="all">My Allocation</button>
-          <button class="screen-link sidebar-item" data-screen="leave-center" data-role="all" id="leaveNavButton">My Leave</button>
-          <button class="screen-link sidebar-item" data-screen="people-directory" data-role="all">Team Directory</button>
-          <button class="screen-link sidebar-item hidden" data-screen="hiring" data-role="all" id="hiringNavButton">Hiring</button>
+          <p class="nav-group" data-nav-group>Your Agency</p>
+          <button class="screen-link sidebar-item" data-screen="people-directory" data-role="all">People</button>
           <button class="screen-link sidebar-item" data-screen="client-projects" data-role="all">Clients</button>
           <button class="screen-link sidebar-item hidden" data-screen="briefs-pipeline" data-role="all" id="briefsNavButton">Briefs</button>
+          <p class="nav-group" data-nav-group>Running Your Agency</p>
+          <button class="screen-link sidebar-item leadership-only" data-screen="executive-dashboard" data-role="leadership">Overview</button>
+          <button class="screen-link sidebar-item hidden" data-screen="hiring" data-role="all" id="hiringNavButton">Hiring</button>
           <button class="screen-link sidebar-item hidden" data-screen="invoice-center" data-role="all" id="invoiceNavButton">Invoices</button>
-          <button class="screen-link sidebar-item superadmin-only" data-screen="admin-settings" data-role="admin">Admin Settings</button>
+          <button class="screen-link sidebar-item superadmin-only" data-screen="admin-settings" data-role="admin">Settings</button>
           <button class="screen-link sidebar-item hidden" data-screen="partner-home" data-role="partner">My Briefs</button>
           <button class="screen-link sidebar-item hidden" data-screen="partner-timeline" data-role="partner">Timeline</button>
           <button class="screen-link sidebar-item hidden" data-screen="partner-team" data-role="partner">Team</button>
@@ -118,11 +123,12 @@
             </div>
             <p class="helper-text" id="staffAuthHelp">Your Agency employees — use your <code>@youragency.com</code> Workspace account.</p>
             <div class="login-partner-entrance" id="invitedEntrance">
-              <p class="helper-text" id="invitedEntranceTitle">Invited sign in</p>
+              <!-- No "Invited sign in" heading: the hint below says who this
+                   button is for (22 Sep 2026). -->
               <button id="partnerSignInBtn" class="google-btn google-btn-secondary" type="button">
                 <span>Sign in with Google</span>
               </button>
-              <p class="mini-meta" id="invitedEntranceHint">Not part of Your Agency? Sign in with the Google account your invite was sent to.</p>
+              <p class="mini-meta" id="invitedEntranceHint">Not part of Your Agency?<br>Sign in with the Google account your invite was sent to.</p>
             </div>
             <button id="registerBtn" class="hidden" type="button">Register</button>
             <p id="loginMessage" class="status hidden" aria-live="polite"></p>
@@ -136,7 +142,6 @@
               <p class="eyebrow" id="partnerGreeting">My Briefs</p>
               <button id="newBriefBtn" class="primary" type="button">New request</button>
             </div>
-            <p class="mini-meta">Creative briefs and quick notifications for the team — status updates live here.</p>
           </div>
           <div id="partnerBriefList" class="feed-list"></div>
           <p id="partnerBriefEmpty" class="mini-meta hidden">No requests yet — hit "New request" to send your first one.</p>
@@ -163,107 +168,117 @@
                   <option value="notify_only">Quick notification / FYI</option>
                 </select>
               </label>
+              <!-- Shown when the request came from "Request something related"
+                   on another brief; filled by resetBriefForm(). -->
+              <div id="bfRelatedBanner" class="brief-related-banner hidden"></div>
+              <!-- The four questions (21 Sep 2026): what, what for, who for, by
+                   when. Everything else sits under "Add more detail". -->
               <label class="form-field">
-                <span>Title <em class="req">*</em></span>
-                <input type="text" id="bfTitle" placeholder="What is this request called?">
+                <span>What do you need? <em class="req">*</em></span>
+                <input type="text" id="bfTitle" placeholder="In a line, e.g. Carousel for Proof of Life Day">
               </label>
-              <!-- Attribution, not permission: naming someone here changes
-                   nothing about who may approve or see the brief, and sends
-                   them no email. Outside #bfFullFields on purpose — a quick
-                   FYI can be on someone's behalf too. -->
-              <label class="form-field">
-                <span>Raising this for someone else?</span>
-                <select id="bfOnBehalf">
-                  <option value="">No — this is my own request</option>
-                </select>
-                <input type="text" id="bfOnBehalfOther" class="hidden" placeholder="Their name" style="margin-top:6px;">
-                <input type="email" id="bfOnBehalfEmail" class="hidden" placeholder="Their email (optional)" style="margin-top:6px;">
-                <span class="mini-meta">Use this when someone asked you on Slack or by email. We will show the request as theirs and come back to them with questions.</span>
-              </label>
-              <div id="bfFullFields">
-                <label class="form-field">
-                  <span>Objective <em class="req">*</em></span>
-                  <textarea id="bfObjective" rows="2" placeholder="What are we trying to achieve?"></textarea>
-                </label>
-                <label class="form-field">
-                  <span>Key message <em class="req">*</em></span>
-                  <textarea id="bfKeyMessage" rows="2" placeholder="What should the audience take away?"></textarea>
-                </label>
-                <label class="form-field">
-                  <span>Audience <em class="req">*</em></span>
-                  <input type="text" id="bfAudience" placeholder="Who is this for?">
-                </label>
+              <div id="bfFullFields" class="form-grid">
                 <div class="form-field">
-                  <span>Deliverable(s) <em class="req">*</em></span>
+                  <span>Which format(s)? <em class="req">*</em></span>
                   <div id="bfDeliverables" class="check-grid"></div>
+                  <!-- Only with two or more formats: which to deliver first
+                       when a brief is wanted in phases (21 Sep). -->
+                  <div id="bfNeededFirstWrap" class="brief-needed-first hidden">
+                    <span class="mini-meta">Need some of these first? Tick them and we will deliver those first.</span>
+                    <div id="bfNeededFirst" class="check-grid"></div>
+                  </div>
                 </div>
-                <div class="form-field">
-                  <span>Platform(s) <em class="req">*</em></span>
-                  <div id="bfPlatforms" class="check-grid"></div>
-                </div>
                 <label class="form-field">
-                  <span>Copy / content inputs <em class="req">*</em></span>
-                  <textarea id="bfContent" rows="4" placeholder="Copy suggestions, names, dates, links, context…"></textarea>
+                  <span>What's it for? <em class="req">*</em></span>
+                  <textarea id="bfObjective" rows="2" placeholder="What should this achieve?"></textarea>
                 </label>
                 <label class="form-field">
-                  <span>Key dates <em class="req">*</em></span>
-                  <input type="text" id="bfKeyDates" placeholder="Event date, posting window…">
+                  <span>Who's it for? <em class="req">*</em></span>
+                  <input type="text" id="bfAudience" placeholder="The people who should see it">
                 </label>
                 <label class="form-field">
-                  <span>Links to include</span>
-                  <textarea id="bfLinks" rows="2" placeholder="Registration links, reference docs…"></textarea>
-                </label>
-                <label class="form-field">
-                  <span>Partners to be tagged</span>
-                  <textarea id="bfPartnersTag" rows="2" placeholder="Names, social media handles/links, and any relevant details"></textarea>
-                </label>
-                <label class="form-field">
-                  <span>Media credits / captions</span>
-                  <input type="text" id="bfCredits">
-                </label>
-                <label class="form-field">
-                  <span>Preferred publication date</span>
-                  <input type="date" id="bfPublishDate">
-                </label>
-                <label class="form-field">
-                  <span>Deadline <em class="req">*</em></span>
+                  <span>By when? <em class="req">*</em></span>
                   <input type="date" id="bfDeadline">
                   <!-- Filled by renderSlaHint() from app.client_sla + the
                        holiday calendar; empty until deliverables are picked. -->
                   <div id="bfSlaHint" class="hidden"></div>
-                </label>
-                <label class="form-field">
-                  <span>Who approves this content? <em class="req">*</em></span>
-                  <select id="bfApprover"><option value="">Select approver</option></select>
-                  <input type="text" id="bfApproverOther" class="hidden" placeholder="Approver name" style="margin-top:6px;">
                 </label>
               </div>
               <label class="form-field hidden" id="bfNotifyFieldWrap">
                 <span>Message <em class="req">*</em></span>
                 <textarea id="bfNotifyMessage" rows="4" placeholder="What should the comms team know?"></textarea>
               </label>
-              <label class="form-field">
-                <span>Priority</span>
-                <select id="bfPriority">
-                  <option value="P2" selected>P2 — Standard (per agreed turnarounds)</option>
-                  <option value="P3">P3 — Low (scheduled)</option>
-                  <option value="P1">P1 — High (within 24 hours)</option>
-                  <option value="P0">P0 — Critical (same day)</option>
-                </select>
-              </label>
-              <label class="form-field hidden" id="bfUrgencyWrap">
-                <span>Reason for urgency <em class="req">*</em></span>
-                <textarea id="bfUrgencyReason" rows="2"></textarea>
-              </label>
-              <label class="form-field">
-                <span>Additional notes</span>
-                <textarea id="bfNotes" rows="2"></textarea>
-              </label>
-              <label class="form-field">
-                <span>Attachments</span>
-                <input type="file" id="bfFiles" multiple>
-                <span class="mini-meta">Reference examples, logos, brand assets, images.</span>
-              </label>
+              <details id="bfMoreDetail" class="brief-more-detail">
+                <summary>Add more detail <span class="mini-meta">optional</span></summary>
+                <div class="form-grid">
+                  <div id="bfFullDetailFields" class="form-grid">
+                    <label class="form-field">
+                      <span>Key message</span>
+                      <textarea id="bfKeyMessage" rows="2" placeholder="What should the audience take away?"></textarea>
+                    </label>
+                    <div class="form-field">
+                      <span>Platform(s)</span>
+                      <div id="bfPlatforms" class="check-grid"></div>
+                    </div>
+                    <label class="form-field">
+                      <span>Copy / content inputs</span>
+                      <textarea id="bfContent" rows="4" placeholder="Copy suggestions, names, dates, links, context…"></textarea>
+                    </label>
+                    <label class="form-field">
+                      <span>Key dates</span>
+                      <input type="text" id="bfKeyDates" placeholder="Event date, posting window…">
+                    </label>
+                    <label class="form-field">
+                      <span>Links to include</span>
+                      <textarea id="bfLinks" rows="2" placeholder="Registration links, reference docs…"></textarea>
+                    </label>
+                    <label class="form-field">
+                      <span>Preferred publication date</span>
+                      <input type="date" id="bfPublishDate">
+                    </label>
+                    <label class="form-field">
+                      <span>Who approves this content?</span>
+                      <select id="bfApprover"><option value="">Select approver</option></select>
+                      <input type="text" id="bfApproverOther" class="hidden" placeholder="Approver name" style="margin-top:6px;">
+                    </label>
+                  </div>
+                  <!-- Attribution, not permission: naming someone here changes
+                       nothing about who may approve or see the brief, and sends
+                       them no email. Outside #bfFullDetailFields on purpose — a
+                       quick FYI can be on someone's behalf too. -->
+                  <label class="form-field">
+                    <span>Raising this for someone else?</span>
+                    <select id="bfOnBehalf">
+                      <option value="">No — this is my own request</option>
+                    </select>
+                    <input type="text" id="bfOnBehalfOther" class="hidden" placeholder="Their name" style="margin-top:6px;">
+                    <input type="email" id="bfOnBehalfEmail" class="hidden" placeholder="Their email (optional)" style="margin-top:6px;">
+                    <span class="mini-meta">Use this when someone asked you on Slack or by email. We will show the request as theirs and come back to them with questions.</span>
+                  </label>
+                  <label class="form-field">
+                    <span>Priority</span>
+                    <select id="bfPriority">
+                      <option value="P2" selected>P2 — Standard (per agreed turnarounds)</option>
+                      <option value="P3">P3 — Low (scheduled)</option>
+                      <option value="P1">P1 — High (within 24 hours)</option>
+                      <option value="P0">P0 — Critical (same day)</option>
+                    </select>
+                  </label>
+                  <label class="form-field hidden" id="bfUrgencyWrap">
+                    <span>Reason for urgency <em class="req">*</em></span>
+                    <textarea id="bfUrgencyReason" rows="2"></textarea>
+                  </label>
+                  <label class="form-field">
+                    <span>Additional notes</span>
+                    <textarea id="bfNotes" rows="2"></textarea>
+                  </label>
+                  <label class="form-field">
+                    <span>Attachments</span>
+                    <input type="file" id="bfFiles" multiple>
+                    <span class="mini-meta">Reference examples, logos, brand assets, images.</span>
+                  </label>
+                </div>
+              </details>
             </div>
             <p id="briefFormNotice" class="mini-meta"></p>
             <div class="action-row">
@@ -285,7 +300,10 @@
           </div>
           <div class="action-row">
             <button id="pbdApproveBtn" class="primary hidden" type="button">Approve &amp; send to Your Agency ✓</button>
+            <button id="pbdAcceptBtn" class="primary hidden" type="button">Approve delivery ✓</button>
             <button id="pbdRevisionBtn" class="ghost small hidden" type="button">Request changes</button>
+            <!-- A follow-up that links back to this brief (21 Sep 2026). -->
+            <button id="pbdRelatedBtn" class="ghost small hidden" type="button">+ Request something related</button>
           </div>
           <div class="panel"><div>
             <h3>Brief summary</h3>
@@ -302,6 +320,11 @@
             <div class="action-row">
               <input type="file" id="pbdUploadInput" multiple>
               <button id="pbdUploadBtn" class="ghost small" type="button">Upload</button>
+            </div>
+            <div class="action-row">
+              <input type="url" id="pbdLinkUrl" placeholder="Paste a Drive or Canva link">
+              <input type="text" id="pbdLinkLabel" placeholder="Name (optional)">
+              <button id="pbdLinkBtn" class="ghost small" type="button">Add link</button>
             </div>
             <p id="pbdFilesNotice" class="mini-meta"></p>
           </div></div>
@@ -415,7 +438,7 @@
                 <input type="text" id="hfBankNumber" inputmode="numeric"></label>
               <label class="form-field"><span>Bank — IFSC code <em class="req">*</em></span>
                 <input type="text" id="hfIfsc" placeholder="HDFC0000123" style="text-transform:uppercase;"></label>
-              <div class="form-field">
+              <div class="form-field" data-hf-salaried>
                 <span id="hfSlipsLabel">Salary slips — from the start of the fiscal year to now</span>
                 <input type="file" id="hfSlips" multiple accept=".pdf,.jpg,.jpeg,.png">
                 <span class="mini-meta">Every month from the start of the fiscal year until your last salary. PDFs or photos are both fine.</span>
@@ -426,9 +449,9 @@
                 </label>
                 <span class="mini-meta">Totally fine — first job, or your employer didn't issue them. Tick this and move on.</span>
               </div>
-              <label class="form-field"><span>Anything we should know about your slips? (optional)</span>
+              <label class="form-field" data-hf-salaried><span>Anything we should know about your slips? (optional)</span>
                 <textarea id="hfSlipsNote" rows="2" placeholder="e.g. first job, previous employer didn't issue slips."></textarea></label>
-              <label class="form-field"><span>Income tax regime <em class="req">*</em></span>
+              <label class="form-field" data-hf-salaried><span>Income tax regime <em class="req">*</em></span>
                 <select id="hfTaxRegime">
                   <option value="">Choose one</option>
                   <option value="new">New regime</option>
@@ -436,7 +459,7 @@
                 </select>
                 <span class="mini-meta">Not sure? Most people on the default choose New. This is for TDS on your salary.</span>
               </label>
-              <label class="form-field hidden" id="hfTaxDeclWrap"><span>HRA / 80C / 80D declarations <em class="req">*</em></span>
+              <label class="form-field hidden" id="hfTaxDeclWrap" data-hf-salaried><span>HRA / 80C / 80D declarations <em class="req">*</em></span>
                 <textarea id="hfTaxDecl" rows="3" placeholder="Your HRA (rent paid), 80C (investments) and 80D (medical insurance) declarations. Attach proofs with your salary slips above if you have them."></textarea></label>
             </div>
             <p id="hireFormNotice" class="mini-meta"></p>
@@ -467,7 +490,110 @@
             <h2>Hiring</h2>
             <p class="mini-meta">Every open hire and where it stands. Each row has one owner; finishing it emails the next.</p>
           </div>
-          <div id="hiringScreenSlot"></div>
+          <!-- Hiring pipeline (crew only: Alex, Nadia + Leo, Blake). Lives on
+               the Hiring screen itself since 6 Oct 2026: it used to be born
+               inside Team Directory and was only moved here when Hiring was
+               opened, so it showed on the directory first (Alex's screenshot).
+               Leo's hiring-only view still borrows this node
+               (placeHiringPanel). Candidate PII lives here — crew eyes only. -->
+          <div id="hiringScreenSlot">
+          <div class="panel hidden" id="hiringPanel">
+            <div>
+              <!-- Collapsed by default (25 Sep 2026). The form was redesigned
+                   6 Oct 2026: hire type first, short labelled groups, no
+                   helper text, a tall scope box, and a Contract choice
+                   (Ongoing / Fixed term) for fractional and consultant hires. -->
+              <div class="collapsible-panel collapsed" id="hireCreatePanel">
+                <button class="collapsible-toggle hire-section-heading" type="button" aria-expanded="false" aria-controls="hireCreateContent">
+                  <span class="collapsible-icon">&#9654;</span> New hire
+                </button>
+                <div class="collapsible-content" id="hireCreateContent">
+                <div class="nh-form">
+                  <div class="nh-type-row">
+                    <input type="hidden" id="nhType" value="full-time">
+                    <div class="opt-group" role="radiogroup" aria-label="Hire type" data-opt-group="nhType">
+                      <button type="button" class="opt is-on" role="radio" aria-checked="true" data-opt="full-time">Full-time</button>
+                      <button type="button" class="opt" role="radio" aria-checked="false" data-opt="consultant">Consultant</button>
+                      <button type="button" class="opt" role="radio" aria-checked="false" data-opt="fractional">Fractional</button>
+                    </div>
+                  </div>
+
+                  <p class="nh-sec">Who</p>
+                  <div class="nh-grid">
+                    <label class="nh-field"><span>Name</span><input type="text" id="nhName"></label>
+                    <label class="nh-field"><span>Personal Gmail</span><input type="email" id="nhEmail"></label>
+                    <label class="nh-field"><span>Reports to</span><select id="nhReportsTo"><option value="">— Select —</option></select></label>
+                  </div>
+
+                  <p class="nh-sec">Role and pay</p>
+                  <div class="nh-grid">
+                    <label class="nh-field"><span>Designation</span><input type="text" id="nhDesignation"></label>
+                    <label class="nh-field"><span>Team</span><select id="nhDept"><option value="">— Select —</option></select></label>
+                    <label class="nh-field"><span id="nhCompLabel">CTC (annual, ₹)</span><input type="number" id="nhComp" min="0" step="1000"></label>
+                    <label class="nh-field" id="nhNoticeField"><span>Notice period</span>
+                      <select id="nhNotice"><option value="">— Select —</option><option value="7" data-not-salaried>7 days</option><option value="30">30 days</option><option value="60">60 days</option></select></label>
+                  </div>
+
+                  <p class="nh-sec">Dates</p>
+                  <div class="nh-grid nh-dates">
+                    <label class="nh-field"><span>Start date</span><input type="date" id="nhStartDate"></label>
+                    <div class="nh-field nh-contract hidden" id="nhContractWrap">
+                      <span>Contract</span>
+                      <div class="opt-group" role="radiogroup" aria-label="Contract" data-opt-group="nhContract">
+                        <button type="button" class="opt is-on" role="radio" aria-checked="true" data-opt="ongoing">Ongoing</button>
+                        <button type="button" class="opt" role="radio" aria-checked="false" data-opt="fixed">Fixed term</button>
+                      </div>
+                      <div class="nh-end hidden" id="nhEndRow">
+                        <input type="date" id="nhEndDate" aria-label="End date">
+                        <button type="button" class="opt-chip" data-term-months="3">3 mo</button>
+                        <button type="button" class="opt-chip is-on" data-term-months="6">6 mo</button>
+                        <button type="button" class="opt-chip" data-term-months="12">12 mo</button>
+                        <span class="nh-term-len" id="nhTermLen"></span>
+                      </div>
+                    </div>
+                    <!-- Not everyone needs a Google licence (30 Oct 2026). Not needed
+                         unless the manager asked for a seat (4 Nov 2026). -->
+                    <div class="nh-field nh-contract" id="nhAccountWrap">
+                      <span>@youragency.com account</span>
+                      <div class="opt-group" role="radiogroup" aria-label="@youragency.com account" data-opt-group="nhAccount">
+                        <button type="button" class="opt" role="radio" aria-checked="false" data-opt="needed">Manager asked for one</button>
+                        <button type="button" class="opt is-on" role="radio" aria-checked="true" data-opt="not-needed">Not needed</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="hidden" id="nhClientsWrap">
+                    <p class="nh-sec">Clients</p>
+                    <div class="check-grid" id="nhClients"></div>
+                  </div>
+
+                  <p class="nh-sec">Scope of work</p>
+                  <textarea id="nhScope" class="nh-scope" rows="12"></textarea>
+
+                  <div class="nh-foot"><button id="startHireBtn" class="primary" type="button">Open hire</button></div>
+                </div>
+                </div>
+              </div>
+              <p id="hiringNotice" class="mini-meta"></p>
+              <div id="hiringList"></div>
+              <p class="mini-meta" id="hiringFilters" style="margin-top:16px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="opt-chip is-on" data-hire-filter="active">In progress</button>
+                <button type="button" class="opt-chip" data-hire-filter="completed">Completed</button>
+                <button type="button" class="opt-chip" data-hire-filter="cancelled">Cancelled</button>
+                <button type="button" class="opt-chip" data-hire-filter="all">All</button>
+              </p>
+            </div>
+          </div>
+          </div>
+          <!-- People who signed in with no hire behind them (accounts made
+               outside Colony). Hires are switched on from their own hire now
+               (8 Oct 2026); this is the leftover, Alex only, hidden when empty. -->
+          <div class="panel" id="pendingSetupPanel" style="display:none;">
+            <div>
+              <p class="hire-list-heading">Signed in without a hire</p>
+              <div id="pendingSetupList"></div>
+            </div>
+          </div>
         </section>
 
         <section id="hiring-only" class="screen hiring-crew-screen hidden">
@@ -480,10 +606,19 @@
           <div id="hiringOnlyPanelSlot"></div>
         </section>
 
+        <!-- The secret page (8 Oct 2026): fun facts and team analytics
+             that would crowd Home. Not in the menu; the date at the top of Home
+             opens it. -->
+        <section id="after-hours" class="screen">
+          <h2 class="sr-only">Colony, after hours</h2>
+          <div id="secretBody" class="secret-body"></div>
+        </section>
+
         <section id="home-feed" class="screen">
           <div class="screen-head screen-head-tight">
             <div class="screen-head-top">
               <p class="eyebrow" id="homeGreeting">Overview</p>
+              <span class="home-yourday" id="homeYourDay"></span>
             </div>
           </div>
           <div id="homeStatCards" class="home-stats"></div>
@@ -491,24 +626,22 @@
                sustainability strips below. A stat card was too cramped to hold
                a leaderboard as well (26 Aug 2026). -->
           <div id="homeStreakPanel" class="hidden"></div>
-          <div id="homeBirthdayPanel" class="birthday-panel hidden"></div>
-          <div id="homeSustainabilityPanel" class="sus-cal-panel hidden"></div>
-          <div id="homeFeedList" class="feed-list"></div>
-          <p id="homeFeedEmpty" class="mini-meta hidden">Nothing to show yet.</p>
+          <!-- Coming up · Wins · Colony updates (28 Sep 2026). Birthdays and the
+               climate calendar live inside Coming up now. -->
+          <div id="homeFeedList" class="home-feed"></div>
         </section>
 
         <section id="daily-tasklist" class="screen">
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Self View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
-            <h2>My Work</h2>
+            <h2>My week</h2>
+            <div class="screen-tabs" role="tablist"><button type="button" class="screen-tab is-on" data-tab-screen="daily-tasklist" role="tab" aria-selected="true">Daily tasks</button><button type="button" class="screen-tab" data-tab-screen="my-allocations" role="tab" aria-selected="false">Weekly allocation</button></div>
             <p>Plan your week and track daily progress. Move tasks to Today when ready to work on them.</p>
           </div>
+          <!-- Brief pieces that are mine to do (21 Oct 2026); empty when none. -->
+          <div id="myWeekPieces"></div>
 
           <div class="panel">
             <div class="editor-bar">
@@ -616,12 +749,9 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Self View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
-            <h2>My Allocation</h2>
+            <h2>My week</h2>
+            <div class="screen-tabs" role="tablist"><button type="button" class="screen-tab" data-tab-screen="daily-tasklist" role="tab" aria-selected="false">Daily tasks</button><button type="button" class="screen-tab is-on" data-tab-screen="my-allocations" role="tab" aria-selected="true">Weekly allocation</button></div>
             <p>Keep weekly distribution current so the team knows who's working on what.</p>
           </div>
 
@@ -682,193 +812,196 @@
             <p id="allocWeekNote" class="mini-meta"></p>
           </div>
 
-          <div class="panel">
-            <h3>Allocation Archive</h3>
+          <!-- Past weeks: folded by default, one line per week (8 Oct 2026).
+               The "Recent Leadership Overrides" placeholder below it was never
+               filled by anything and is gone. -->
+          <details class="panel alloc-archive">
+            <summary><h3>Past weeks</h3><span class="mini-meta">last 8 weeks</span></summary>
             <div id="allocArchiveContainer"></div>
-          </div>
-
-          <div class="panel leadership-only">
-            <h3>Recent Leadership Overrides</h3>
-            <ul class="timeline">
-              <li>No overrides yet.</li>
-            </ul>
-          </div>
+          </details>
         </section>
 
         <section id="leave-center" class="screen">
-          <div class="screen-head">
+          <div class="screen-head screen-head-tight">
             <div class="screen-head-top">
-              <p class="eyebrow">Self View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
-            </div>
-            <h2>My Leave</h2>
-            <p>Submit requests, track status, and manage approvals through a policy-compliant workflow.</p>
-            <div id="onLeaveTodayBadge" class="leadership-only hidden" style="margin-top:8px">
-              <span class="chip info" id="onLeaveTodayCount">No one on leave today</span>
+              <h2>Leave</h2>
             </div>
           </div>
 
+          <!-- Leave, simplified (13 Oct 2026; mock WCB6QeHJ3QKZP2WQgs7oER).
+               Requests waiting on THIS person sit on top, only when there are
+               any (the email link lands here). Left: three balances and the
+               form, one width. Right: the next 30 days, then everything else
+               folded. No explanatory text. -->
           <div id="leaveCenterContent">
-            <div class="kpi-grid leave-grid">
-              <article class="kpi-card">
-                <p>Privilege Leave (PL)</p>
-                <h3 id="leavePlHeadline">Remaining 0</h3>
-                <small id="leavePlMeta">Allocated 0 | Taken 0</small>
-              </article>
-              <article class="kpi-card">
-                <p>Casual / Period Leave (CL)</p>
-                <h3 id="leaveClHeadline">Remaining 0</h3>
-                <small id="leaveClMeta">Allocated 0 | Taken 0</small>
-              </article>
-              <article class="kpi-card">
-                <p>Sick Leave (SL)</p>
-                <h3 id="leaveSlHeadline">Remaining 0</h3>
-                <small id="leaveSlMeta">Allocated 0 | Taken 0</small>
-              </article>
-              <article class="kpi-card">
-                <p>Cycle Summary</p>
-                <h3 id="leaveCycleLabel">Apr-Mar</h3>
-                <small id="leaveCycleMeta">Configured from policy settings</small>
-              </article>
-            </div>
-            <p id="leaveBalanceNotice" class="mini-meta">Leave balances are loaded from the active leave cycle.</p>
-
-            <div class="panel split">
-              <form id="leaveForm" class="leave-form">
-                <h3>Apply for Leave</h3>
-                <label>Leave Type
-                  <select id="leaveType">
-                    <option value="PL">Privilege Leave (PL)</option>
-                    <option value="CL">Casual / Period Leave (CL)</option>
-                    <option value="SL">Sick Leave (SL)</option>
-                  </select>
-                </label>
-                <div class="leave-date-row">
-                  <label>Start Date
-                    <input id="leaveStart" type="date" />
-                  </label>
-                  <label>End Date
-                    <input id="leaveEnd" type="date" />
-                  </label>
-                </div>
-                <label class="leave-halfday-label" style="display:flex;align-items:center;gap:8px;">
-                  <input id="leaveHalfDay" type="checkbox" style="width:auto;" />
-                  <span>Half day (single-day requests — counts as 0.5)</span>
-                </label>
-                <label>Reason
-                  <textarea id="leaveReason" rows="2" placeholder="Short reason"></textarea>
-                </label>
-                <label id="medCertLabel" class="hidden">Medical Certificate (SL 3+ days)
-                  <input id="leaveMedicalCertificateUrl" type="url" placeholder="Certificate URL" />
-                </label>
-                <p id="leaveRuleHint" class="status"></p>
-                <button id="submitLeaveBtn" type="button" class="primary">Submit Leave Request</button>
-                <p id="leaveEmailNotice" class="mini-meta"></p>
-              </form>
-
-              <div>
-                <div class="section-header-row">
-                  <h3 id="holidayHeading">Upcoming Public Holidays</h3>
-                  <button id="holidayToggleBtn" class="ghost small" type="button">See all holidays</button>
-                </div>
-                <table id="holidayCalendarTable" class="m-card-table">
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Holiday</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td colspan="3">No upcoming holidays.</td>
-                    </tr>
-                  </tbody>
-                </table>
-
-                <div class="section-header-row team-leave-header">
-                  <h3 id="teamLeaveHeading">Team Leave (Next 30 Days)</h3>
-                  <button id="teamLeaveToggleBtn" class="ghost small hidden" type="button">See all team leave</button>
-                </div>
-                <table id="teamLeaveCalendarTable" class="m-card-table">
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Person</th>
-                      <th>Type</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td colspan="4">No upcoming team leave.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div class="panel leadership-only">
-              <h3>Leave Approvals <span id="pendingApprovalCount" class="mini-meta"></span></h3>
-              <table id="leaveApprovalTable" class="m-card-table">
-                <thead>
-                  <tr>
-                    <th>Employee</th>
-                    <th>Type</th>
-                    <th>Dates</th>
-                    <th>Status</th>
-                    <th>Action</th>
-                    <th>Decision</th>
-                  </tr>
-                </thead>
+            <div class="panel leadership-only hidden" id="leaveApprovalsPanel">
+              <div class="leave-fold-head"><h3>Waiting for you</h3><span id="pendingApprovalCount" class="mini-meta"></span></div>
+              <table id="leaveApprovalTable" class="m-card-table leave-waiting-table">
                 <tbody id="leaveApprovalTableBody"></tbody>
               </table>
-              <button id="leaveApprovalToggle" class="ghost small hidden" type="button">Show all history</button>
               <p id="leaveApprovalNotice" class="status hidden"></p>
             </div>
 
-            <div class="panel leadership-only" id="reporteeLeaveSnapshotPanel">
-              <h3>Reportee Leave Balances</h3>
-              <table id="reporteeLeaveSnapshotTable" class="m-card-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>PL Rem.</th>
-                    <th>CL Rem.</th>
-                    <th>SL Rem.</th>
-                    <th>Total Taken</th>
-                    <th>Total Rem.</th>
-                    <th>Next Leave</th>
-                  </tr>
-                </thead>
-                <tbody id="reporteeLeaveSnapshotBody">
-                  <tr><td colspan="7">Loading reportee balances...</td></tr>
-                </tbody>
-              </table>
-              <button id="seeAllLeavesBtn" class="ghost small" type="button">See all employees</button>
-            </div>
+            <div class="leave-layout">
+              <div class="leave-main">
+                <div class="leave-balances">
+                  <article class="leave-bal">
+                    <strong><span id="leavePlHeadline">0</span> <small id="leavePlMeta">/ 0</small></strong>
+                    <span>Privilege left</span>
+                    <i class="leave-bar"><b id="leavePlBar"></b></i>
+                  </article>
+                  <article class="leave-bal">
+                    <strong><span id="leaveClHeadline">0</span> <small id="leaveClMeta">/ 0</small></strong>
+                    <span>Casual left</span>
+                    <i class="leave-bar"><b id="leaveClBar"></b></i>
+                  </article>
+                  <article class="leave-bal">
+                    <strong><span id="leaveSlHeadline">0</span> <small id="leaveSlMeta">/ 0</small></strong>
+                    <span>Sick left</span>
+                    <i class="leave-bar"><b id="leaveSlBar"></b></i>
+                  </article>
+                </div>
+                <p id="leaveBalanceNotice" class="mini-meta"></p>
 
-            <div class="panel">
-              <h3>Leave Year Archive</h3>
-              <table id="leaveArchiveTable" class="m-card-table">
+                <form id="leaveForm" class="panel leave-form" onsubmit="return false">
+                  <h3>Apply for leave</h3>
+                  <label id="leaveForLabel" class="hidden">For
+                    <select id="leaveFor"></select>
+                  </label>
+                  <label class="sr-only" for="leaveType">Type</label>
+                  <select id="leaveType" class="sr-only" tabindex="-1">
+                    <option value="PL">Privilege</option>
+                    <option value="CL">Casual</option>
+                    <option value="SL">Sick</option>
+                    <option value="SR" hidden disabled>Streak reward (½ day)</option>
+                  </select>
+                  <div class="leave-type-pick" id="leaveTypePick" role="radiogroup" aria-label="Type"></div>
+                  <p id="streakRewardNote" class="mini-meta hidden"></p>
+                  <div class="leave-date-row">
+                    <label>From
+                      <input id="leaveStart" type="date" />
+                    </label>
+                    <label>To
+                      <input id="leaveEnd" type="date" />
+                    </label>
+                  </div>
+                  <div class="leave-note-row">
+                    <input id="leaveReason" type="text" placeholder="Note for your manager (optional)" aria-label="Note for your manager" />
+                    <label class="leave-halfday-label"><input id="leaveHalfDay" type="checkbox" /> Half day</label>
+                  </div>
+                  <label id="medCertLabel" class="hidden">Medical certificate link
+                    <input id="leaveMedicalCertificateUrl" type="url" placeholder="https://" />
+                  </label>
+                  <p id="leaveRuleHint" class="status"></p>
+                  <div><button id="submitLeaveBtn" type="button" class="primary">Request leave</button></div>
+                  <p id="leaveEmailNotice" class="mini-meta"></p>
+                </form>
+
+                <!-- Out of office (4 Nov 2026): for people the leave form is
+                     closed to (fractional, leave not tracked). No balance, no
+                     approval; their manager gets an FYI. -->
+                <form id="oooForm" class="panel leave-form hidden" onsubmit="return false">
+                  <h3>Out of office</h3>
+                  <div class="leave-date-row">
+                    <label>From
+                      <input id="oooStart" type="date" />
+                    </label>
+                    <label>To
+                      <input id="oooEnd" type="date" />
+                    </label>
+                  </div>
+                  <div class="leave-note-row">
+                    <input id="oooNote" type="text" maxlength="200" placeholder="Note for your manager (optional)" aria-label="Note for your manager" />
+                    <label class="leave-halfday-label"><input id="oooHalfDay" type="checkbox" /> Half day</label>
+                  </div>
+                  <div><button id="oooSubmitBtn" type="button" class="primary">Mark me out</button></div>
+                  <p id="oooNotice" class="mini-meta"></p>
+                  <ul id="oooMineList" class="leave-mine-list"></ul>
+                </form>
+              </div>
+
+              <div class="leave-side">
+                <div class="panel leave-next">
+                  <h3>Next 30 days</h3>
+                  <ul id="leaveNext30List" class="leave-next-list"></ul>
+                </div>
+
+                <details class="panel leave-fold" id="leaveMinePanel">
+                  <summary><span>Your leave this year</span><span id="leaveMineMeta" class="mini-meta"></span></summary>
+                  <ul id="leaveMineList" class="leave-mine-list"></ul>
+                  <div class="leave-archive hidden">
+                    <p class="mini-meta">Earlier years</p>
+                    <ul id="leaveArchiveBody" class="leave-mine-list"></ul>
+                  </div>
+                </details>
+
+                <details class="panel leave-fold" id="leaveHolidaysPanel">
+                  <summary><span>Holidays this year</span><span id="leaveCycleLabel" class="mini-meta"></span></summary>
+                  <table id="holidayCalendarTable" class="m-card-table">
+                    <tbody></tbody>
+                  </table>
+                </details>
+
+                <details class="panel leave-fold hidden" id="reporteeLeaveSnapshotPanel">
+                  <summary><span>Team balances</span><span id="reporteeLeaveSnapshotMeta" class="mini-meta"></span></summary>
+                  <div class="leave-balances-year">
+                    <select id="leaveBalancesYear" aria-label="Financial year">
+                      <option value="current">This year</option>
+                      <option value="previous">Last year</option>
+                    </select>
+                  </div>
+                  <table id="reporteeLeaveSnapshotTable" class="m-card-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>PL</th>
+                        <th>CL</th>
+                        <th>SL</th>
+                        <th>Taken</th>
+                        <th>Left</th>
+                        <th>Next leave</th>
+                      </tr>
+                    </thead>
+                    <tbody id="reporteeLeaveSnapshotBody">
+                      <tr><td colspan="7">Loading…</td></tr>
+                    </tbody>
+                  </table>
+                  <button id="seeAllLeavesBtn" class="ghost small" type="button">See all employees</button>
+                </details>
+
+                <details class="panel leave-fold leadership-only" id="leaveDecisionsPanel">
+                  <summary><span>Past decisions</span></summary>
+                  <table class="m-card-table">
+                    <tbody id="leaveDecidedTableBody"></tbody>
+                  </table>
+                  <div id="leaveApprovalToggle" class="hidden"></div>
+                </details>
+                <!-- Public holidays editor (leadership), folded. -->
+          <details class="panel leave-fold leadership-only" id="publicHolidaysPanel">
+            <summary><span>Edit holidays</span></summary>
+            <div>
+              <table class="m-card-table">
                 <thead>
                   <tr>
-                    <th>Cycle</th>
-                    <th>PL Remaining</th>
-                    <th>CL Remaining</th>
-                    <th>SL Remaining</th>
-                    <th>Archived On</th>
+                    <th>Date</th>
+                    <th>Holiday</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
-                <tbody id="leaveArchiveBody">
-                  <tr>
-                    <td colspan="5">No archived leave cycles yet.</td>
-                  </tr>
+                <tbody id="holidaysAdminTableBody">
+                  <tr><td colspan="3">Loading…</td></tr>
                 </tbody>
               </table>
+
+              <div class="editor-bar action-row">
+                <input type="date" id="newHolidayDate" aria-label="Holiday date">
+                <input type="text" id="newHolidayName" placeholder="Holiday name" aria-label="Holiday name">
+                <button id="addHolidayBtn" class="primary" type="button">Add holiday</button>
+              </div>
+              <p id="holidaysAdminNotice" class="mini-meta"></p>
+            </div>
+          </details>
+              </div>
             </div>
           </div>
 
@@ -882,12 +1015,9 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Leadership View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
-            <h2>Resource Planner</h2>
+            <h2>Overview</h2>
+            <div class="screen-tabs" role="tablist"><button type="button" class="screen-tab" data-tab-screen="executive-dashboard" role="tab" aria-selected="false">Agency</button><button type="button" class="screen-tab is-on" data-tab-screen="leadership-planner" role="tab" aria-selected="true">Resource planner</button></div>
             <p>Resource allocation matrix — who's working on what, and who has capacity.</p>
           </div>
 
@@ -920,10 +1050,8 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Self View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
+              <!-- NDAs (22 Oct 2026): the NDA team only (app.is_nda_crew). -->
+              <button id="ndasBtn" class="primary hidden" type="button">NDAs</button>
             </div>
             <h2>Clients</h2>
           </div>
@@ -960,8 +1088,12 @@
             <p id="clientFormNotice" class="mini-meta"></p>
           </div>
 
-          <div class="panel leadership-only" id="archivedClientsPanel">
-            <h3>Archived Clients</h3>
+          <!-- Folded by default (28 Sep 2026): finished work, opened rarely.
+               Not leadership-only since 29 Sep: owners see (and unarchive) the
+               clients they own; renderArchivedClientsTable filters by
+               canArchiveClient and hides the panel when that leaves nothing. -->
+          <details class="panel" id="archivedClientsPanel">
+            <summary><h3 style="display:inline">Archived Clients <span class="muted" id="archivedClientsCount"></span></h3></summary>
             <table id="archivedClientsTable" class="m-card-table">
               <thead>
                 <tr>
@@ -973,7 +1105,7 @@
               </thead>
               <tbody id="archivedClientsBody"></tbody>
             </table>
-          </div>
+          </details>
 
           <!-- Client Detail View (hidden by default) -->
           <div id="clientDetailView" class="hidden">
@@ -1002,6 +1134,18 @@
           </div>
         </section>
 
+        <!-- NDAs (22 Oct 2026): opened from Clients, which stays lit in the menu. -->
+        <section id="ndas" class="screen">
+          <div class="screen-head">
+            <div class="screen-head-top">
+              <button id="ndasBackBtn" class="ghost small" type="button">← Clients</button>
+              <button id="ndaNewBtn" class="primary" type="button">New NDA</button>
+            </div>
+            <h2>NDAs</h2>
+          </div>
+          <div class="panel"><div id="ndaList" class="nda-list"></div></div>
+        </section>
+
         <section id="client-analytics" class="screen">
           <div class="screen-head">
             <div class="analytics-header-row">
@@ -1024,6 +1168,10 @@
             <button class="analytics-inner-tab" data-analytics-tab="instagram" type="button">Instagram</button>
             <button class="analytics-inner-tab" data-analytics-tab="facebook" type="button">Facebook</button>
             <button class="analytics-inner-tab" data-analytics-tab="community" type="button">Community Pulse</button>
+            <button class="analytics-inner-tab" data-analytics-tab="website" type="button">Website</button>
+            <button class="analytics-inner-tab" data-analytics-tab="search" type="button">Google Search</button>
+            <button class="analytics-inner-tab" data-analytics-tab="newsletter" type="button">Newsletter</button>
+            <button class="analytics-inner-tab" data-analytics-tab="registrations" type="button">Registrations</button>
           </div>
 
           <div class="analytics-tab-panel active" id="analyticsTabOverview"></div>
@@ -1035,6 +1183,10 @@
           <div class="analytics-tab-panel" id="analyticsTabInstagram"></div>
           <div class="analytics-tab-panel" id="analyticsTabFacebook"></div>
           <div class="analytics-tab-panel" id="analyticsTabCommunity"></div>
+          <div class="analytics-tab-panel" id="analyticsTabWebsite"></div>
+          <div class="analytics-tab-panel" id="analyticsTabSearch"></div>
+          <div class="analytics-tab-panel" id="analyticsTabNewsletter"></div>
+          <div class="analytics-tab-panel" id="analyticsTabRegistrations"></div>
 
           <!-- Uploaded files (Rhea's request, 29 Jul 2026): every raw report
                file ever uploaded for this client, from the storage bucket.
@@ -1122,12 +1274,8 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Self View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
-            <h2>Team Directory</h2>
+            <h2>People</h2>
             <p>All employees can view directory details. Only leadership/admin can edit records.</p>
           </div>
 
@@ -1139,78 +1287,12 @@
             <div id="orgChartCanvas" class="org-chart-canvas"></div>
           </div>
 
-          <!-- Hiring pipeline (crew only: Alex, Nadia + Leo, Blake).
-               For Leo's hiring-only login this node is relocated into
-               #hiring-only. Candidate PII lives here — crew eyes only. -->
-          <div class="panel hidden" id="hiringPanel">
-            <div>
-              <p class="hire-section-heading">New hire</p>
-              <div class="editor-bar action-row" id="hiringCreateBar">
-                <label class="inline-filter">Candidate name
-                  <input type="text" id="nhName" placeholder="First and last name">
-                </label>
-                <label class="inline-filter">Personal Gmail
-                  <input type="email" id="nhEmail" placeholder="name@example.com">
-                </label>
-                <label class="inline-filter">Start date
-                  <input type="date" id="nhStartDate">
-                </label>
-                <!-- The job title, at open: it goes into the agreement and onto
-                     their profile at first sign-in (15 Sep 2026). -->
-                <label class="inline-filter">Designation
-                  <input type="text" id="nhDesignation" placeholder="e.g. Senior Strategist">
-                </label>
-                <label class="inline-filter">Hire type
-                  <select id="nhType">
-                    <option value="full-time">Full-time</option>
-                    <option value="fractional">Fractional</option>
-                    <option value="consultant">Consultant</option>
-                  </select>
-                </label>
-                <!-- Compensation is known when a hire is opened (11 Sep
-                     2026) and is what Finance and Legal both work from. The
-                     label follows the type: CTC for employees, a monthly fee
-                     for anyone who invoices. -->
-                <label class="inline-filter"><span id="nhCompLabel">CTC (annual, ₹)</span>
-                  <input type="number" id="nhComp" min="0" step="1000" placeholder="e.g. 1200000">
-                </label>
-                <!-- Only two notice periods exist here, by decision (11 Sep 2026). -->
-                <label class="inline-filter">Notice period
-                  <select id="nhNotice">
-                    <option value="">— Select —</option>
-                    <option value="30">30 days</option>
-                    <option value="60">60 days</option>
-                  </select>
-                </label>
-                <!-- Who they report to, set at open by whoever hires (Alex or
-                     Nadia). Copied onto their employee profile at first
-                     sign-in so the joiner never picks their own boss. -->
-                <label class="inline-filter">Reports to
-                  <select id="nhReportsTo"><option value="">— Select —</option></select>
-                </label>
-              </div>
-              <!-- Fractionals: tick any number now, none is fine; more can be
-                   added later from the hire's Details once they have joined. -->
-              <div class="form-field hidden" id="nhClientsWrap" style="margin:8px 0 0;">
-                <span>Clients they cover <span class="mini-meta">(tick any, add more later)</span></span>
-                <div class="check-grid" id="nhClients"></div>
-              </div>
-              <label class="form-field" style="margin:8px 0 10px;"><span>Scope of work</span>
-                <textarea id="nhScope" rows="2" placeholder="What this role covers — goes into the agreement."></textarea>
-              </label>
-              <div class="action-row" style="margin-bottom:6px;">
-                <button id="startHireBtn" class="primary" type="button">Open hire</button>
-              </div>
-              <p id="hiringNotice" class="mini-meta"></p>
-              <div id="hiringList"></div>
-              <p class="mini-meta" style="margin-top:16px;"><label style="display:inline-flex;align-items:center;gap:6px;"><input type="checkbox" id="hiringShowDone" style="width:auto;"> Show completed &amp; cancelled</label></p>
-            </div>
-          </div>
-
           <div class="panel">
             <div class="toolbar">
               <input type="search" id="directorySearch" class="matrix-search" placeholder="Search people" autocomplete="off" />
               <span style="flex:1"></span>
+              <!-- Employment type as a mark, not a word (8 Oct 2026). -->
+              <span class="emp-legend"><span class="emp-mark is-full" aria-hidden="true"></span>Full-time <span class="emp-mark is-fractional" aria-hidden="true"></span>Fractional</span>
               <button id="toggleOrgChartBtn" class="ghost" type="button">Org Chart</button>
             </div>
             <table id="peopleDirectoryTable" class="m-card-table">
@@ -1220,9 +1302,6 @@
                   <th>Email</th>
                   <th>Department</th>
                   <th>Reports To</th>
-                  <th>Employment Type</th>
-                  <th>Access Role</th>
-                  <th>Current Utilization</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -1254,16 +1333,13 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow" id="profileEyebrow">Self View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
             <h2 id="profileMainHeading">My Profile</h2>
-            <p>Manage your details and utilization. Leadership/admin can inspect and update any employee profile.</p>
+            <p id="profileIntro">Utilization, leave and today's tasks for this person.</p>
             <p class="profile-meta-pills" id="profileMetaLine"></p>
           </div>
 
+          <div id="profileWorkSections">
           <div id="profileStatCards" class="profile-stats"></div>
           <p id="profileLeaveSummaryNotice" class="mini-meta leadership-only"></p>
 
@@ -1313,36 +1389,46 @@
             </table>
           </div>
 
-          <!-- Invoice upload (own profile, non-finance only) -->
-          <div class="panel collapsible-panel collapsed" id="profileInvoicePanel" style="display:none;">
-            <button class="collapsible-toggle" type="button" aria-expanded="false">
-              <span class="collapsible-icon">&#9654;</span>
-              <h3>Submit Invoice / Reimbursement</h3>
-            </button>
-            <div class="collapsible-content">
-              <div class="profile-invoice-row">
-                <label class="invoice-file-btn" id="profileInvoiceDropzone">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-                  <span id="profileInvoiceFileLabel">Choose file</span>
-                  <input type="file" id="profileInvoiceFileInput" multiple accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx" hidden>
-                </label>
-                <select id="profileInvoiceType">
-                  <option value="invoice">Invoice</option>
-                  <option value="reimbursement">Reimbursement</option>
-                </select>
-                <input type="month" id="profileInvoiceMonth">
-                <button id="profileInvoiceUploadBtn" class="primary" type="button" disabled>Upload</button>
-                <div id="profileInvoiceStatus" class="mini-meta"></div>
+          </div>
+
+          <!-- Reimbursements waiting for you (5 Nov 2026): the ones this person
+               approves as someone's manager. Shows only while something is
+               waiting; the bell and the month-end email land here. -->
+          <div class="panel" id="reimbApprovalsPanel" style="display:none;">
+            <div class="leave-fold-head"><h3>Reimbursements waiting for you</h3><span id="reimbApprovalsCount" class="mini-meta"></span></div>
+            <table class="m-card-table leave-waiting-table">
+              <tbody id="reimbApprovalsBody"></tbody>
+            </table>
+          </div>
+
+          <!-- Pay: this month's invoice, reimbursements and salary slips (own
+               profile only; 28 Oct 2026). Only the person and Finance can read
+               any of it; the database enforces that, not this page. -->
+          <div class="panel" id="profileInvoicePanel" style="display:none;">
+            <div class="pay-now">
+              <div>
+                <h3 id="payMonthTitle"></h3>
+                <p id="payMonthStatus" class="mini-meta"></p>
               </div>
-              <p id="profileInvoiceNotice" class="mini-meta"></p>
-              <div id="profileInvoiceHistory"></div>
+              <div class="pay-actions">
+                <label class="primary pay-btn" id="payInvoiceBtn">Upload invoice<input type="file" id="payInvoiceInput" multiple accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.doc,.docx,.xls,.xlsx" hidden></label>
+                <label class="ghost pay-btn">Add reimbursement<input type="file" id="payReimbursementInput" multiple accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,.webp,.doc,.docx,.xls,.xlsx" hidden></label>
+              </div>
             </div>
+            <p class="mini-meta pay-hint">PDF, photo or image, Word or Excel · up to 20 MB each</p>
+            <p id="profileInvoiceNotice" class="mini-meta"></p>
+            <div id="payErrors" class="pay-errors" role="alert" hidden></div>
+            <table class="m-card-table pay-table">
+              <thead><tr><th>Month</th><th class="pay-inv-col">Invoice</th><th>Reimbursements</th><th class="pay-slip-col">Salary slip</th></tr></thead>
+              <tbody id="payHistoryBody"></tbody>
+            </table>
+            <p class="mini-meta pay-foot">You can delete an upload until the end of the month you added it. After that, ask Finance. Only you and Finance can see this.</p>
           </div>
 
           <div class="panel collapsible-panel collapsed" id="profileWorkPanel">
             <button class="collapsible-toggle" type="button" aria-expanded="false">
               <span class="collapsible-icon">&#9654;</span>
-              <h3>Edit Profile</h3>
+              <h3>Your details</h3>
             </button>
             <div class="collapsible-content">
               <div class="profile-grid">
@@ -1353,6 +1439,11 @@
                   <!-- Seeded from the hire's designation; leadership can change it. -->
                   <label>Designation
                     <input id="profileJobTitle" value="" maxlength="60" placeholder="—" />
+                  </label>
+                  <!-- The day they joined Your Agency, for work anniversaries on
+                       Coming up (8 Oct 2026). Leadership sets it. -->
+                  <label>Joined Your Agency
+                    <input id="profileJoinedOn" type="date" value="" />
                   </label>
                   <label>Email
                     <input id="profileEmailInput" value="" readonly />
@@ -1377,6 +1468,17 @@
                       <option value="consultant">Consultant</option>
                     </select>
                   </label>
+                  <!-- A fractional person only sees the clients ticked here
+                       (app.employee_client_scope). Leadership edits it any time
+                       after activation (25 Sep 2026: adding clients for
+                       Asha had no screen at all). -->
+                  <div class="leadership-only hidden">
+                    <div id="profileClientScopeWrap" class="profile-client-scope hidden">
+                      <span>Clients they work on</span>
+                      <div id="profileClientScope" class="check-grid"></div>
+                      <small class="mini-meta">Fractional people only see these clients in Colony.</small>
+                    </div>
+                  </div>
                   <label>Birthday
                     <input id="profileBirthday" type="date" value="" />
                   </label>
@@ -1421,6 +1523,7 @@
 
           <div class="editor-bar profile-save-row">
             <p id="profileSaveNotice" class="mini-meta">Update fields and click save.</p>
+            <button id="profileOffboardBtn" class="ghost hidden" type="button">Offboard</button>
             <button id="saveProfileBtn" class="primary" type="button">Save Profile</button>
           </div>
         </section>
@@ -1429,12 +1532,8 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Leadership View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
-            <h2>Admin &amp; Leadership Settings</h2>
+            <h2>Settings</h2>
             <p>Manage access levels, policy guardrails, and operational defaults.</p>
           </div>
 
@@ -1496,33 +1595,6 @@
             </div>
           </div>
 
-          <!-- Public Holidays (leadership-editable, used across leave/home/allocation) -->
-          <div class="panel" id="publicHolidaysPanel">
-            <div>
-              <h3>Public Holidays</h3>
-              <p class="mini-meta">Shown on Home, the Leave calendar, and allocation week math. The yearly list is a team decision — add the next year's dates after your team exercise.</p>
-              <table class="m-card-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Holiday</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="holidaysAdminTableBody">
-                  <tr><td colspan="3">Loading…</td></tr>
-                </tbody>
-              </table>
-
-              <div class="editor-bar action-row">
-                <input type="date" id="newHolidayDate" aria-label="Holiday date">
-                <input type="text" id="newHolidayName" placeholder="Holiday name" aria-label="Holiday name">
-                <button id="addHolidayBtn" class="primary" type="button">Add holiday</button>
-              </div>
-              <p id="holidaysAdminNotice" class="mini-meta"></p>
-            </div>
-          </div>
-
           <!-- Operational Config (superadmin-only: visibility lists + approver/manager routing) -->
           <div class="panel superadmin-only" id="appConfigPanel">
             <div>
@@ -1533,13 +1605,6 @@
             </div>
           </div>
 
-          <!-- New joiners awaiting setup (approvers only: Alex + Nadia) -->
-          <div class="panel" id="pendingSetupPanel" style="display:none;">
-            <div>
-              <h3>Awaiting Setup</h3>
-              <div id="pendingSetupList"></div>
-            </div>
-          </div>
 
           <!-- Scheduled Jobs Health (cron heartbeats) -->
           <div class="panel" id="cronHealthPanel">
@@ -1555,47 +1620,6 @@
                 </tbody>
               </table>
             </div>
-          </div>
-
-          <!-- Policy Documents Editor (admin only) -->
-          <div class="panel" id="policyDocumentsPanel" style="display:none;">
-            <div class="editor-bar">
-              <h3>Policy Documents</h3>
-              <p class="mini-meta">Edit company policies. All employees see the latest version via footer links.</p>
-            </div>
-            <div id="policyDocsList"></div>
-            <!-- Policy editor (hidden until a policy is selected) -->
-            <div id="policyEditorWrap" class="policy-editor-wrap" style="display:none;">
-              <div class="policy-editor-header">
-                <h4 id="policyEditorTitle"></h4>
-                <span class="mini-meta" id="policyEditorMeta"></span>
-              </div>
-              <div id="policyEditorToolbar"></div>
-              <div id="policyEditorContainer" class="policy-editor-container"></div>
-              <div class="editor-bar action-row" style="margin-top:12px;">
-                <button id="savePolicyBtn" class="primary" type="button">Save Policy</button>
-                <button id="cancelPolicyBtn" class="ghost" type="button">Cancel</button>
-                <button id="viewPolicyHistoryBtn" class="ghost" type="button">Version History</button>
-              </div>
-              <p id="policyEditorNotice" class="mini-meta"></p>
-            </div>
-            <!-- Policy version history modal -->
-            <div id="policyHistoryWrap" style="display:none;">
-              <div class="policy-editor-header">
-                <h4>Version History</h4>
-                <button id="closePolicyHistoryBtn" class="ghost small" type="button">Back to Editor</button>
-              </div>
-              <div id="policyHistoryList"></div>
-            </div>
-          </div>
-
-          <!-- Onboarding Templates (admin only) -->
-          <div class="panel" id="onboardingTemplatesPanel" style="display:none;">
-            <div class="editor-bar">
-              <h3>Onboarding Checklist</h3>
-              <p class="mini-meta">Default checklist items that get created for every new hire. Items are grouped by phase.</p>
-            </div>
-            <div id="onboardingTemplatesList"></div>
           </div>
 
         </section>
@@ -1657,16 +1681,36 @@
             <div class="screen-head-top">
               <p class="eyebrow">Finance</p>
             </div>
-            <h2>Invoice Center</h2>
-            <p>Track monthly invoice submissions across the team.</p>
+            <h2>Invoices</h2>
           </div>
-
-          <div class="panel" style="max-width:700px;">
-            <div class="invoice-month-row">
-              <label for="invoiceFilterMonth">Month</label>
-              <input type="month" id="invoiceFilterMonth">
+          <!-- Second lock (28 Oct 2026): a code emailed to the person, per
+               session, checked by the database (app.finance_unlocked). -->
+          <div class="panel invoice-gate" id="invoiceGate" hidden>
+            <h3>Invoices</h3>
+            <p class="mini-meta" id="invoiceGateNote"></p>
+            <input id="invoiceGateCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="······">
+            <div><button class="primary pay-btn" type="button" id="invoiceGateOpen">Open</button></div>
+            <p class="mini-meta"><button class="link-btn" type="button" id="invoiceGateResend">Send a new code</button></p>
+          </div>
+          <div id="invoiceBody" hidden>
+            <div class="inv-head">
+              <div class="month-nav">
+                <button type="button" id="invoicePrevMonth" aria-label="Previous month">‹</button>
+                <strong id="invoiceMonthLabel"></strong>
+                <button type="button" id="invoiceNextMonth" aria-label="Next month">›</button>
+              </div>
+              <span class="mini-meta" id="invoiceCounts"></span>
+              <div class="pay-actions">
+                <label class="primary pay-btn">Upload salary slips<input type="file" id="payslipFilesInput" multiple accept=".pdf" hidden></label>
+                <button class="ghost pay-btn" type="button" id="invoiceDownloadAll">Download all</button>
+              </div>
             </div>
-            <div id="invoiceTeamChecklist"></div>
+            <div class="panel">
+              <table class="m-card-table inv-table">
+                <thead><tr><th>Name</th><th>Invoice</th><th>Reimbursements</th><th>Salary slip</th></tr></thead>
+                <tbody id="invoiceTeamChecklist"></tbody>
+              </table>
+            </div>
           </div>
         </section>
 
@@ -1675,9 +1719,13 @@
           <div class="screen-head screen-head-tight">
             <div class="screen-head-top">
               <p class="eyebrow">Briefs — Example Collective</p>
-              <label class="mini-meta" style="display:inline-flex;align-items:center;gap:6px;">
-                <input type="checkbox" id="briefAssignedToMe" style="width:auto;"> Assigned to me
-              </label>
+              <div style="display:inline-flex;align-items:center;gap:12px;">
+                <label class="mini-meta" style="display:inline-flex;align-items:center;gap:6px;">
+                  <input type="checkbox" id="briefAssignedToMe" style="width:auto;"> Assigned to me
+                </label>
+                <!-- A brief the client mentioned but didn't raise (21 Oct 2026). -->
+                <button id="staffNewBriefBtn" class="primary hidden" type="button">New brief</button>
+              </div>
             </div>
             <p class="mini-meta" id="briefBoardMeta"></p>
           </div>
@@ -1685,36 +1733,18 @@
                scrolling flex row, so a banner placed in it becomes a column. -->
           <div id="briefWaitingBanner"></div>
           <div id="briefQuickLane"></div>
-          <div id="briefBoard" class="deal-board"></div>
+          <div id="briefBoard" class="brief-list-wrap"></div>
           <div id="briefDrawer" class="hidden"></div>
-
-          <!-- the client stakeholder map (org_contacts) — shared with partners; the
-               panel node relocates to the partner screen for partner sessions. -->
-          <div class="panel hidden" id="orgContactsPanel">
-            <div>
-              <h3 id="orgContactsTitle">Client stakeholders</h3>
-              <p class="mini-meta">The client's own team — who owns what, who covers whom. Editable by the client's team (and Your Agency's brief reviewers).</p>
-              <div id="orgContactsList"></div>
-              <div class="editor-bar action-row" id="orgContactsForm">
-                <input type="text" id="ocName" placeholder="Full name" aria-label="Name">
-                <input type="text" id="ocRole" placeholder="Team / role" aria-label="Team or role">
-                <input type="email" id="ocEmail" placeholder="Email" aria-label="Email">
-                <input type="text" id="ocOversees" placeholder="Oversees (team/people)" aria-label="Oversees">
-                <input type="text" id="ocBackup" placeholder="In their absence, contact…" aria-label="Backup contact">
-                <select id="ocReportsTo" aria-label="Reports to" style="width:auto;"><option value="">Reports to…</option></select>
-                <button id="ocSaveBtn" class="primary" type="button">Add</button>
-                <button id="ocCancelBtn" class="ghost small hidden" type="button">Cancel</button>
-              </div>
-              <p id="orgContactsNotice" class="mini-meta"></p>
-            </div>
-          </div>
 
           <!-- Partners (invite-only external users) — managed by the account
                leads (brief reviewers: Rhea, Mara) + leadership. -->
           <div class="panel hidden" id="partnersAdminPanel">
-            <div>
-              <h3>Partners</h3>
-              <p class="mini-meta">Client-side collaborators with a Colony login. Invite-only: sign-in works only after their exact email is added here (any domain — it just needs to be a Google account). Partners see only the partner surface — no internal Colony data. Deactivate stops their sign-in immediately.</p>
+            <div class="collapsible-panel collapsed">
+              <button class="collapsible-toggle" type="button" aria-expanded="false" aria-controls="partnersAdminContent">
+                <span class="collapsible-icon">&#9654;</span><h3>Partner access list</h3>
+              </button>
+              <div class="collapsible-content" id="partnersAdminContent">
+              <p class="mini-meta">Client people who can sign in to Circle (clients.youragency.com). Sign-in works only for the exact email added here; any Google account works. They see only their own organisation's briefs, feedback and files, never anything internal. Deactivating someone stops their sign-in immediately.</p>
               <table class="m-card-table">
                 <thead>
                   <tr>
@@ -1733,7 +1763,9 @@
               <div class="editor-bar action-row">
                 <input type="text" id="newPartnerName" placeholder="Full name" aria-label="Partner name">
                 <input type="email" id="newPartnerEmail" placeholder="email@org.com" aria-label="Partner email">
-                <input type="text" id="newPartnerOrg" placeholder="Org" value="Example Collective" aria-label="Partner org">
+                <!-- Never pre-filled: the org decides what the partner can read (S3). -->
+                <input type="text" id="newPartnerOrg" placeholder="Client organisation" list="partnerOrgOptions" required aria-label="Client organisation">
+                <datalist id="partnerOrgOptions"></datalist>
                 <!-- Options are rebuilt from PARTNER_ROLE_OPTIONS in app.js so
                      this bar and the per-row role editor cannot drift apart.
                      These are the no-JS fallback and the initial value. -->
@@ -1745,6 +1777,33 @@
                 <button id="addPartnerBtn" class="primary" type="button">Add partner</button>
               </div>
               <p id="partnersAdminNotice" class="mini-meta"></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Client team directory (org_contacts) — shared with partners; the
+               panel node relocates to the partner screen for partner sessions,
+               where it opens unfolded (it is their page). -->
+          <div class="panel hidden" id="orgContactsPanel">
+            <div class="collapsible-panel collapsed" id="orgContactsCollapsible">
+              <button class="collapsible-toggle" type="button" aria-expanded="false" aria-controls="orgContactsContent">
+                <span class="collapsible-icon">&#9654;</span><h3 id="orgContactsTitle">Client contacts</h3>
+              </button>
+              <div class="collapsible-content" id="orgContactsContent">
+              <p class="mini-meta">The client's org chart: who owns what, who covers whom. No login needed to be listed. The client's team edits it on Circle; Your Agency's brief reviewers can too.</p>
+              <div id="orgContactsList"></div>
+              <div class="editor-bar action-row" id="orgContactsForm">
+                <input type="text" id="ocName" placeholder="Full name" aria-label="Name">
+                <input type="text" id="ocRole" placeholder="Team / role" aria-label="Team or role">
+                <input type="email" id="ocEmail" placeholder="Email" aria-label="Email">
+                <input type="text" id="ocOversees" placeholder="Oversees (team/people)" aria-label="Oversees">
+                <input type="text" id="ocBackup" placeholder="In their absence, contact…" aria-label="Backup contact">
+                <select id="ocReportsTo" aria-label="Reports to" style="width:auto;"><option value="">Reports to…</option></select>
+                <button id="ocSaveBtn" class="primary" type="button">Add</button>
+                <button id="ocCancelBtn" class="ghost small hidden" type="button">Cancel</button>
+              </div>
+              <p id="orgContactsNotice" class="mini-meta"></p>
+              </div>
             </div>
           </div>
         </section>
@@ -1806,12 +1865,9 @@
           <div class="screen-head">
             <div class="screen-head-top">
               <p class="eyebrow">Leadership View</p>
-              <div class="screen-nav-arrows">
-                <button class="screen-arrow prev" type="button" aria-label="Previous screen">&lsaquo;</button>
-                <button class="screen-arrow next" type="button" aria-label="Next screen">&rsaquo;</button>
-              </div>
             </div>
-            <h2>Agency Overview</h2>
+            <h2>Overview</h2>
+            <div class="screen-tabs" role="tablist"><button type="button" class="screen-tab is-on" data-tab-screen="executive-dashboard" role="tab" aria-selected="true">Agency</button><button type="button" class="screen-tab" data-tab-screen="leadership-planner" role="tab" aria-selected="false">Resource planner</button></div>
             <p>Agency state at a glance — team, pipeline, clients, and activity.</p>
           </div>
 
@@ -1835,6 +1891,8 @@
               <div class="panel" id="execOnboardingCard"></div>
             </div>
           </div>
+          <!-- Plan vs reality per client, last 4 weeks (T3, 8 Oct 2026). -->
+          <div class="panel" id="execPlanVsDoneCard"></div>
 
           <div class="split" style="margin-top:var(--space-3)">
             <div class="panel" id="execPipelineCard"></div>
@@ -1927,11 +1985,13 @@
           </label>
           <label><span>Manager <span class="required">*</span></span>
             <select id="onbProfileManager"><option value="">Select your manager</option></select>
-            <span class="mini-meta">If you're unsure, ask Nadia at am-lead@youragency.com</span>
+            <span class="mini-meta" data-onb-ask-hint>If you're unsure, ask Nadia at am-lead@youragency.com</span>
+            <span class="mini-meta hidden" data-onb-set-by-hire>Set when you were hired.</span>
           </label>
           <label><span>Team <span class="required">*</span></span>
             <select id="onbProfileDept"></select>
-            <span class="mini-meta">Nadia or Alex will confirm this when they set you up.</span>
+            <span class="mini-meta" data-onb-ask-hint>Nadia or Alex will confirm this when they set you up.</span>
+            <span class="mini-meta hidden" data-onb-set-by-hire>Set when you were hired.</span>
           </label>
           <label><span>How do you work with Your Agency? <span class="required">*</span></span>
             <select id="onbProfileEmploymentType">
@@ -2007,11 +2067,16 @@
   </div>
 
   <script src="vendor/supabase.js?v=20260409a"></script>
-  <script src="vendor/xlsx.js?v=20260409a"></script>
+  <!-- SheetJS (288kB compressed) loads only when someone uploads analytics —
+       loadSheetJS() in js/analytics.js (24 Sep 2026). A <template> is inert:
+       nothing inside it is fetched, but the build still content-versions the
+       URL, and loadSheetJS reads it from here. -->
+  <template id="lazySheetJS"><script src="vendor/xlsx.js?v=20260409a"></script></template>
   <script src="vendor/chart.js?v=20260409a"></script>
   <script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
-  <!-- ?v= is rewritten to the git hash by the Netlify build (like every other
-       asset). Without it, version.js sits in the browser's immutable cache for
+  <!-- ?v= is rewritten to a hash of the file's content by the Netlify build
+       (_build/hash-assets.mjs, like every other asset); version.js changes
+       every deploy, so its hash does too. Without it, version.js sits in the browser's immutable cache for
        a year and every fresh page load reports a STALE version — which made
        the deploy watcher nag "updated, refresh" forever on current code. -->
   <script src="version.js?v=dev0" onerror="window.APP_VERSION='dev'"></script>
@@ -2027,5 +2092,6 @@
   <script src="js/hires.js?v=20260409a"></script>
   <script src="js/modal.js?v=20260409a"></script>
   <script src="app.js?v=20260409a"></script>
+  <script src="js/email-login.js?v=1"></script>
 </body>
 </html>

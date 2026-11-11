@@ -17,6 +17,30 @@
    Cancel / Esc / backdrop-click resolve to null (false for confirm,
    undefined for alert). */
 
+/* ── Outside clicks: one rule for every panel, dialog and popover ──
+   A browser fires `click` on whatever is under the pointer at RELEASE. So
+   selecting text inside a panel and letting go outside it looks like an
+   outside click, and the panel closed mid-edit (deal panel, Oct 2026).
+   Remember where each press began; a click only counts as outside when the
+   press began outside too. Use these instead of a bare contains() check. */
+let _pressTarget = null;
+document.addEventListener('pointerdown', (e) => { _pressTarget = e.target; }, true);
+
+// True when both the press and the release happened outside `el`, which is
+// an element or a selector (outside every match).
+function isOutsideClick(e, el) {
+  const inside = (node) => node instanceof Element
+    && (typeof el === 'string' ? !!node.closest(el) : !!el && el.contains(node));
+  if (!el || inside(e.target)) return false;
+  return !(_pressTarget && _pressTarget.isConnected && inside(_pressTarget));
+}
+
+// True when the press and the release both landed on `el` itself
+// (a <dialog>'s backdrop, or a full-screen overlay).
+function isBackdropClick(e, el) {
+  return e.target === el && (!_pressTarget || _pressTarget === el);
+}
+
 function _appModalOpen({ title, message, buildBody, resolveCancel }) {
   return new Promise((resolve) => {
     const dialog = document.createElement('dialog');
@@ -47,7 +71,7 @@ function _appModalOpen({ title, message, buildBody, resolveCancel }) {
     // Esc key fires the dialog `cancel` event (reliable cross-browser).
     dialog.addEventListener('cancel', (e) => { e.preventDefault(); finish(resolveCancel()); });
     // Backdrop click = cancel.
-    dialog.addEventListener('mousedown', (e) => { if (e.target === dialog) finish(resolveCancel()); });
+    dialog.addEventListener('click', (e) => { if (isBackdropClick(e, dialog)) finish(resolveCancel()); });
 
     dialog.showModal();
   });
@@ -124,4 +148,24 @@ function appChoice(message, { title = '', choices = [], cancelLabel = 'Cancel' }
       cancelBtn.addEventListener('click', () => finish(null));
     }
   });
+}
+
+// ── Failures people can see (29 Oct 2026) ───────────────────────────────────
+// A click that fails must say so on screen, never only in the console: Kira's
+// reimbursement "just didn't upload" with nothing to tell anyone why.
+// tests/no-silent-actions.test.mjs keeps new buttons on these helpers.
+function _failHelp() {
+  return /^circle\./.test(location.hostname) ? 'let your Your Agency team know' : 'tell Alex';
+}
+// Something the code didn't expect (a dropped connection, a bug).
+function actionFailed(e) {
+  console.error(e);
+  const why = e?.message || (typeof e === 'string' ? e : '') || 'unknown error';
+  appAlert(`That didn't work (${why}). Try again; if it keeps happening, ${_failHelp()}.`, { title: 'Something went wrong' }).catch(() => {});
+}
+// The database refused or skipped a save: say what didn't happen.
+function notSaved(what, error) {
+  console.error(what, error);
+  const why = error?.message ? ` (${error.message})` : '';
+  return appAlert(`${what}${why}. Try again; if it keeps happening, ${_failHelp()}.`, { title: 'Not saved' }).catch(() => {});
 }

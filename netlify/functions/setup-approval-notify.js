@@ -16,7 +16,6 @@ const { sendEmail } = require('./lib/email');
 const { logNotification } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
 
-const FALLBACK_APPROVERS = ['admin@youragency.com', 'am-lead@youragency.com'];
 
 function jsonResponse(statusCode, body) {
   return { statusCode, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
@@ -56,11 +55,37 @@ exports.handler = async (event) => {
   // activation can't re-ping the approvers.
   if (!emp.setup_pending) return jsonResponse(200, { skipped: 'not pending' });
 
-  const { data: cfg } = await supabase.from('app_config').select('value').eq('key', 'setup_approver_emails').maybeSingle();
-  const recipients = (Array.isArray(cfg?.value) && cfg.value.length ? cfg.value : FALLBACK_APPROVERS)
-    .map((e) => String(e).trim()).filter(Boolean);
-
   const { appBaseUrl } = getConfig();
+
+  // A hire behind this account (8 Oct 2026): switching them on is a step in
+  // their hire, the hiring manager's to press, so the ping goes to them (Alex
+  // copied) and lands on the hire, not on Admin Settings.
+  const { data: hire } = await supabase.from('hires').select('id, full_name').eq('work_email', String(emp.email || '').trim().toLowerCase()).maybeSingle();
+  if (hire) {
+    const { data: terms } = await supabase.from('hire_offer_terms').select('hiring_manager_email').eq('hire_id', hire.id).maybeSingle();
+    const manager = String(terms?.hiring_manager_email || '').trim();
+    const to = manager || 'admin@youragency.com';
+    const cc = manager && manager.toLowerCase() !== 'admin@youragency.com' ? ['admin@youragency.com'] : [];
+    const first = String(emp.full_name || hire.full_name || 'Your new joiner').split(' ')[0];
+    const link = `${appBaseUrl}?open=hire:${hire.id}#hiring`;
+    const hSubject = `${first} signed in to Colony: switch their access on`;
+    const hHtml = `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:520px">
+      <p><strong>${escapeHtml(emp.full_name || first)}</strong> signed in to Colony as ${escapeHtml(emp.email || '')}.</p>
+      <p>Their access is off until you switch it on. Activate it now, or schedule it for their start date.</p>
+      <p><a href="${link}">Open their hire →</a></p></div>`;
+    const hText = `${emp.full_name || first} signed in to Colony as ${emp.email || ''}.\n\nTheir access is off until you switch it on. Activate it now, or schedule it for their start date.\n\n${link}`;
+    try {
+      const r = await sendEmail({ to, cc, subject: hSubject, html: hHtml, text: hText });
+      await logNotification({ kind: 'new_employee_joined', recipientEmail: to, subject: hSubject,
+        payload: { employee_id: emp.id, hire_id: hire.id, setup_approval: true }, status: r.skipped ? 'skipped' : 'sent' });
+      return jsonResponse(200, { ok: true, notified: 1 + cc.length });
+    } catch (error) {
+      return jsonResponse(500, { error: error.message });
+    }
+  }
+
+  // No hire behind it (an account made outside Colony): Alex sets them up.
+  const recipients = ['admin@youragency.com'];
   const name = emp.full_name || 'A new joiner';
   const isProject = emp.employment_type === 'fractional';
   // full-time | fractional | consultant since 31 Aug 2026. The old two-way
@@ -81,13 +106,13 @@ exports.handler = async (event) => {
       ${isProject
         ? '<p><strong>They cannot see any clients until you activate them.</strong> Set their capacity and pick the clients they work on.</p>'
         : '<p>Confirm their team and capacity — their team only applies once you activate them.</p>'}
-      <p><a href="${appBaseUrl}?open=setup#admin-settings">Open Awaiting Setup →</a></p>
+      <p><a href="${appBaseUrl}#hiring">Open Hiring →</a></p>
     </div>`;
   const text = [
     `${name}${emp.email ? ` (${emp.email})` : ''} finished onboarding and needs setting up.`,
     `Says they are: ${typeLabel}. Asked for team: ${team}.`,
     isProject ? 'They cannot see any clients until you activate them.' : 'Their team only applies once you activate them.',
-    `${appBaseUrl}?open=setup#admin-settings`
+    `${appBaseUrl}#hiring`
   ].join('\n');
 
   try {

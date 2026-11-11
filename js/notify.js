@@ -26,7 +26,7 @@ function daysBetweenIso(aIso, bIso) {
 }
 
 // ctx: { myEmail, myEmployeeId, isSuperadmin, leaveRows, todayIso,
-//        signals: { invoiceDue, policyAckPending, featureReplies } }
+//        signals: { invoiceDue, policyAckPending, featureReplies, emergencyContactMissing, … } }
 // Returns [{ key, icon, text, detail, screen }]. Sources (all personal):
 //  1. pending approvals routed to me        4. my invoice missing (25th→eom)
 //  2. my own leave decided (last 3 days)    5. policy ack pending
@@ -110,8 +110,22 @@ function buildActionItems({ myEmail, myEmployeeId, isSuperadmin, leaveRows, toda
       sortKey: 'zz2'
     });
   }
-  // 7. new joiners awaiting setup (approvers only — the loader supplies rows
-  //    only to Alex/Nadia). Sorts FIRST: a project-based person is locked out
+  // 9. my own emergency contact is missing (S7, 24 Sep 2026). Until 21 Sep
+  //    every profile save blanked it, so six people have none on file and
+  //    the old values are gone. Vanishes the moment they save one.
+  if (s.emergencyContactMissing) {
+    items.push({
+      key: 'emergency-contact-missing',
+      icon: '📞',
+      text: 'Add an emergency contact to your profile',
+      detail: 'who we call if something happens to you · tap to open your profile',
+      screen: 'employee-profile',
+      anchor: 'personalDataBlock',
+      sortKey: 'zz3'
+    });
+  }
+  // 7. new joiners waiting to be switched on (8 Oct 2026: the hire's hiring
+  //    manager or Alex; the loader filters). Sorts FIRST: a project-based person is locked out
   //    of every client until this is actioned, so it must not sit below a
   //    fortnight-old board reply. Vanishes the moment they're activated —
   //    computed, never stored, so it can't rot into a stale to-do.
@@ -121,12 +135,14 @@ function buildActionItems({ myEmail, myEmployeeId, isSuperadmin, leaveRows, toda
     items.push({
       key: `setup-pending-${p.id}`,
       icon: blocked ? '🔒' : '🧑‍💼',
-      text: `Set up ${who} — ${employmentTypeLabel(p.employmentType).toLowerCase()}, awaiting approval`,
+      text: p.hireId
+        ? `${who} signed in to Colony: switch their access on`
+        : `Set up ${who} — ${employmentTypeLabel(p.employmentType).toLowerCase()}, signed in without a hire`,
       detail: blocked
         ? `no client access until activated${p.requestedTeam ? ` · asked for ${p.requestedTeam}` : ''}`
-        : `confirm their team${p.requestedTeam ? ` (asked for ${p.requestedTeam})` : ''}`,
-      screen: 'admin-settings',
-      anchor: 'pendingSetupPanel',
+        : (p.hireId ? 'activate now or schedule it on their hire' : `confirm their team${p.requestedTeam ? ` (asked for ${p.requestedTeam})` : ''}`),
+      screen: 'hiring',
+      anchor: p.hireId ? 'hiringPanel' : 'pendingSetupPanel',
       sortKey: `!${p.createdAt || ''}`
     });
   }
@@ -162,24 +178,41 @@ function buildActionItems({ myEmail, myEmployeeId, isSuperadmin, leaveRows, toda
       sortKey: 'zz3'
     });
   }
-  if (s.briefAssignedToMe) {
-    items.push({
-      key: `briefs-mine-${s.briefAssignedToMe}`,
-      icon: '🎨',
-      text: `${s.briefAssignedToMe} brief deliverable${s.briefAssignedToMe > 1 ? 's' : ''} assigned to you`,
-      detail: 'tap to open the briefs board',
-      screen: 'briefs-pipeline',
-      sortKey: 'zz3'
-    });
+  // Brief pieces waiting on ME (21 Oct 2026): to assign (creative leads),
+  // my part to do, lead review, and the AM check before the client sees it.
+  const pc = s.pieceCounts || {};
+  const pieceItem = (kind, n, icon, text, screen = 'briefs-pipeline') => {
+    if (n) items.push({ key: `pieces-${kind}-${n}`, icon, text, detail: 'tap to open', screen, sortKey: 'zz2' });
+  };
+  const pcs = (n) => `${n} piece${n > 1 ? 's' : ''}`;
+  pieceItem('assign', pc.assign, '🧩', `${pcs(pc.assign)} to assign`);
+  pieceItem('mine', pc.mine, '🎨', `${pcs(pc.mine)} for you`, 'daily-tasklist');
+  pieceItem('lead', pc.lead_review, '👀', `${pcs(pc.lead_review)} to review`);
+  pieceItem('am', pc.am_review, '✅', `${pcs(pc.am_review)} to check before the client sees ${pc.am_review > 1 ? 'them' : 'it'}`);
+  // NDAs I started that are ready to send (22 Oct 2026).
+  (s.ndasToSend || []).forEach((name) => {
+    items.push({ key: `nda-send-${name}`, icon: '✍️', text: `NDA with ${name} is ready to send`, detail: 'tap to open', screen: 'ndas', sortKey: 'zz2' });
+  });
+  // Reimbursements (5 Nov 2026): ones I approve as a manager, and mine that
+  // were sent back. Both land on my own profile.
+  if (s.reimbursementsToApprove) {
+    const n = s.reimbursementsToApprove;
+    items.push({ key: `reimb-approve-${n}`, icon: '🧾', text: `${n} reimbursement${n > 1 ? 's' : ''} waiting for your approval`, detail: 'tap to open', screen: 'employee-profile', anchor: 'reimbApprovalsPanel', sortKey: 'zz2' });
   }
+  (s.reimbursementsSentBack || []).forEach((r) => {
+    items.push({ key: `reimb-back-${r.id}`, icon: '↩️', text: `Your reimbursement${r.notes ? ` "${r.notes}"` : ''} was sent back${r.decision_note ? `: ${r.decision_note}` : ''}`, detail: 'tap to open Pay', screen: 'employee-profile', anchor: 'profileInvoicePanel', sortKey: 'zz2' });
+  });
   // 9. hiring pipeline — hires at a stage that's waiting on ME.
   if (s.hiresMyTurn) {
     items.push({
       key: `hires-turn-${s.hiresMyTurn}`,
       icon: '🧑‍💼',
       text: `${s.hiresMyTurn} hire${s.hiresMyTurn > 1 ? 's' : ''} waiting on you`,
-      detail: 'tap to open Hiring in Team Directory',
-      screen: 'people-directory',
+      // Hiring became its own screen on 11 Sep 2026; this still sent you to Team
+      // Directory, which no longer holds the panel — so the notification landed
+      // on a page with nothing on it (7 Oct 2026).
+      detail: 'tap to open Hiring',
+      screen: 'hiring',
       anchor: 'hiringPanel',
       sortKey: '!hiring'
     });

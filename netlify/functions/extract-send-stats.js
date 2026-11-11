@@ -85,6 +85,10 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }, body: JSON.stringify({ stats }) };
   } catch (err) {
     console.error('extract-send-stats error:', err.message);
-    return { statusCode: 502, headers: CORS_HEADERS, body: JSON.stringify({ error: 'Extraction failed' }) };
+    // Say why (27 Oct 2026): "Extraction failed" alone left Rhea's upload
+    // undiagnosable. The SDK's status + message carry no key or user data.
+    const why = err.status === 401 ? 'the AI service refused Colony\'s key'
+      : `${err.status ? `${err.status} ` : ''}${String(err.message || '').slice(0, 140)}`.trim();
+    return { statusCode: 502, headers: CORS_HEADERS, body: JSON.stringify({ error: `Extraction failed${why ? `: ${why}` : ''}` }) };
   }
 };

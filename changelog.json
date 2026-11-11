@@ -1,19 +1,972 @@
 [
-  { "date": "2026-03-29", "text": "Company policies now accessible from any screen via footer links" },
-  { "date": "2026-03-29", "text": "New hire onboarding: guided profile setup and policy acknowledgments" },
-  { "date": "2026-03-20", "text": "Deal Flow: track BD pipeline from qualifying to contracted" },
-  { "date": "2026-03-10", "text": "Location on profiles: share your current city with the team" },
-  { "date": "2026-03-10", "text": "Reimbursements: upload separately from invoices in your profile" },
-  { "date": "2026-03-10", "text": "Home dashboard now available to all employees" },
-  { "date": "2026-03-09", "text": "Analytics: LinkedIn performance insights per client" },
-  { "date": "2026-03-05", "text": "Invoice Center: monthly upload tracking with reminders" },
-  { "date": "2026-03-04", "text": "Personalized Home greeting by time of day" },
-  { "date": "2026-03-04", "text": "Leave approvals: recent history with expandable view" },
-  { "date": "2026-03-04", "text": "Reportee leave balances: total remaining, own team first" },
-  { "date": "2026-03-04", "text": "People page: live utilization data" },
-  { "date": "2026-03-04", "text": "Collapsible Edit Profile section" },
-  { "date": "2026-03-03", "text": "Home dashboard with team stats and timeline" },
-  { "date": "2026-03-03", "text": "Email notifications when someone comments/likes your request" },
-  { "date": "2026-02-28", "text": "Bugs & Features board with upvotes, replies, and status tracking" },
-  { "date": "2026-02-25", "text": "Daily task archive with calendar view" }
+  {
+    "date": "2026-11-11",
+    "text": "Deal Flow: New Deal works again, and so does reviving a cold deal. Both were failing with a database error.",
+    "audience": "leadership",
+    "area": "Deal Flow"
+  },
+  {
+    "date": "2026-11-06",
+    "text": "Example Collective analytics now has a Registrations tab: how many artists have registered, read each morning from Rishi's media dashboard. It shows the total, what's new since the last update and the last 7 days, with a card on the Overview too.",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-11-05",
+    "text": "Reimbursements: each one now goes to your manager to approve. They approve it, or send it back with a note, from their own profile. You see where yours is on your Pay table, and Finance sees it too. Anything still waiting on the last day of the month gets your manager one reminder email. Invoices work as before.",
+    "audience": "everyone",
+    "area": "Invoices"
+  },
+  {
+    "date": "2026-11-04",
+    "text": "Birthdays: the birthday email now goes to leadership and the person's own manager, once. It used to go to a fixed list, and some days twice.",
+    "audience": "everyone",
+    "area": "Home"
+  },
+  {
+    "date": "2026-11-04",
+    "text": "Invoices: an invoice uploaded in the first 7 days of a month now files under the month before, the one being paid, instead of the new month. Reimbursements still file under the month you upload them.",
+    "audience": "everyone",
+    "area": "Invoices"
+  },
+  {
+    "date": "2026-11-04",
+    "text": "Invoices: in the first week of a month, Finance's Invoices page now opens on the month just gone, the one being paid, instead of the new month where everyone shows as Not in.",
+    "audience": "everyone",
+    "area": "Invoices"
+  },
+  {
+    "date": "2026-11-04",
+    "text": "Hiring: new hires no longer get a @youragency.com account unless their manager asked for one. When Google is out of licences, Colony now asks you first and only emails Example Reseller for a seat once you say yes.",
+    "audience": "everyone",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-11-04",
+    "text": "Leave: fractional people, and anyone whose leave Colony doesn't track, can now mark themselves out of office on the Leave page. No balance and no approval: their manager gets an FYI email, and they show as on leave on Home and in Who's out.",
+    "audience": "everyone",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "Analytics: charts and audience bars now read properly in day mode. Axis labels, legends and the dashed comparison lines were near invisible, the audience bars were filled the wrong way round, long labels (\"Program and Project Ma…\") were cut off, and the impressions axis repeated \"1k\". Charts also redraw when you switch day or night mode. Thanks, Maya.",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "Analytics: new Newsletter tab for Your Agency's Antenna: subscribers, new sign-ups and unsubscribes by week and month, where sign-ups came from, open and click rates, with links to the LinkedIn DM tracker and Beehiiv, plus a card on Overview. Filled every Monday from the Beehiiv export; Colony keeps counts only, no email addresses.",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "Hiring: 15 days before a full-time hire's 3-month probation ends, their hiring manager gets an email asking whether to confirm them (Alex copied). The monthly fee field now says GST is extra, as the agreement does. Fixed-term contracts ask for a notice period again: the contract ends on its date with no notice, and the notice is for ending it early.",
+    "audience": "everyone",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "Hiring: consultant and fractional agreements now use Leo's November templates. The notice period you pick (7, 30 or 60 days) prints in the agreement, and the term reads \"until <end date>\" or \"on an ongoing basis\".",
+    "audience": "everyone",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "Clients: only Alex can rename a client now. Everyone who could edit a client before can still change its owner, type or archive it; the name shows read-only for them.",
+    "audience": "everyone",
+    "area": "Clients"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "Analytics: new Google Search tab, next to Website (clicks from Google, times shown, click rate, average position, what people searched and which pages they landed on), pulled every Monday with the website numbers, plus a Google Search card on Overview. Your Agency first.",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-11-03",
+    "text": "LinkedIn uploads now merge day by day, so an export that starts mid-week no longer wipes the earlier days of that week. All LinkedIn data in Colony was rebuilt from the original exports, and some impression totals went up as lost days came back.",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-11-02",
+    "text": "LinkedIn engagement rate is now calculated the way LinkedIn defines it: total clicks, reactions, comments and reposts divided by total impressions for the period. The same goes for post groups (by content type, by weekday, all posts). Earlier figures were averages of daily or per-post rates and could read higher or lower by several points.",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-11-02",
+    "text": "Hiring: the hire's manager is now copied on Finance's 'agreement signed' email and on the hire's account email",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-31",
+    "text": "Hiring: consultants can now have a 7-day notice period too, like fractionals; employees stay at 30 or 60 days",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-31",
+    "text": "Hiring: a start date on a weekend or office holiday shows a warning with the next working day, and New hire and Offer terms ask before keeping it",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: the checklist shows the youragency.com account before Finance, the order they now happen in",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: the Slack invite to new joiners also asks them to install Slack on their computer and phone",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: the refresh circle also picks up sign-ins and switched-on access, and the welcome email line never shows a day that has passed",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: a link to a hire (from an email or the bell) now opens that hire and stays on it; refreshing the list no longer folds what you had open",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: the Signing step names both signers, Alex and the hire",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: a hire can go without a @youragency.com account (New hire, or Not needed on the account step); they get no Colony, welcome email, meetings or Slack, and the hire completes once Finance is told",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: 7 days' notice for fractional hires; New hire lists Full-time, Consultant, Fractional",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: creating a @youragency.com account no longer fails when the joiner typed their phone without +91",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: Refresh is now a small circle on each hire's row, beside Hide details",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: when an agreement is signed, the @youragency.com account is created first, so Finance's email carries the real work email",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: Sent for signature now says who sent it, and if someone else sent it while your page was open, Approve & send refreshes the hire instead of failing",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: a Refresh button on the hires list reloads them without reloading Colony, and keeps open hires open; Review the draft names Alex, Leo or Nadia, and Signing only Alex",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: Nadia is now a reviewer on agreement drafts, so the draft-ready email reaches her too and the step names her",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: Draft agreement and Send for signing show they're working and can't be clicked twice; the review step says the draft is ready and who was emailed, and the draft-ready email now goes to both Alex and Leo",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: the 'joining details in' email shows a fractional or consultant hire's monthly fee (not a missing CTC) and their contract end date",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: the details step says the invite was emailed (to whom, when), and Draft agreement only appears once the joiner has sent their details",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "Hiring: fractional and consultant joiners are no longer asked for (or blocked on) a tax regime, and their welcome email no longer mentions it or salary slips",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-30",
+    "text": "New hire: a fixed-term contract has no notice period, so the field goes away when you pick Fixed term (New hire form and Offer terms)",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-29",
+    "text": "Christmas Break is now 25 Dec to 3 Jan, shown as one break in Holidays, Coming up and the Leave page",
+    "audience": "everyone",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-29",
+    "text": "When something doesn't save or a button fails, Colony now tells you what went wrong instead of quietly doing nothing",
+    "audience": "everyone",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-10-29",
+    "text": "Fixed: Add reimbursement did nothing after you said what it was for. Reimbursements upload again",
+    "audience": "everyone",
+    "area": "Profile"
+  },
+  {
+    "date": "2026-10-29",
+    "text": "Pay: while a file uploads the button says so (\"Uploading 1 of 2…\"), you get a green line when it's in, the new file is highlighted in the table, and leaving mid-upload asks first",
+    "audience": "everyone",
+    "area": "Profile"
+  },
+  {
+    "date": "2026-10-29",
+    "text": "Home: Coming up no longer lists the weekly All Hands, and shows festivals on their own day even on a weekend (Diwali, Sun 8 Nov)",
+    "audience": "everyone",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-29",
+    "text": "Pay on your profile: files up to 20 MB, iPhone photos (HEIC) and WebP accepted, and if a file doesn't go up you now see why and what to do",
+    "audience": "everyone",
+    "area": "Profile"
+  },
+  {
+    "date": "2026-10-28",
+    "text": "Leave: Blake now has the Leave link in his menu, which opens straight to everyone's Team balances",
+    "audience": "admin",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-28",
+    "text": "Your profile is now your details and your pay: upload this month's invoice or a reimbursement, and download your salary slips (full-time). You can delete an upload until the month ends; after that, ask Finance",
+    "audience": "everyone",
+    "area": "Profile"
+  },
+  {
+    "date": "2026-10-28",
+    "text": "Invoices: month arrows, everyone's invoice, reimbursements and salary slip on one row, upload a month's slips at once (each person gets an email), download the whole month as a zip. The PIN is replaced by a code emailed to you",
+    "audience": "admin",
+    "area": "Invoices"
+  },
+  {
+    "date": "2026-10-28",
+    "text": "Leave: Team balances can show last financial year as well as this one, and Blake (accounts) can now see everyone's balances, read-only",
+    "audience": "leadership",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-27",
+    "text": "Home: tasks done show once a week, for the week just finished, instead of a running count that changed every day",
+    "audience": "everyone",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-27",
+    "text": "Analytics: AI summaries say when they were written, are rewritten once new data comes in, and show an error instead of last week's summary if they can't be",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-10-27",
+    "text": "Community Pulse: the comms report uploads as it is, straight from the Google Doc download. Pick each send's date and type on the review screen, and sends already in Colony are skipped",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-10-26",
+    "text": "Analytics: text on every tab is a size bigger and easier to read",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-10-26",
+    "text": "Analytics: a Website tab. Colony pulls the website's visitors, top pages and where people came from out of Google Analytics every Monday, nothing to upload. Your Agency's is on",
+    "audience": "everyone",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-10-26",
+    "text": "Client of the week is now the client with the most hours allocated that week, not the most people",
+    "audience": "everyone",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-26",
+    "text": "Leave: you can't add leave on days the person is already off, so a double save no longer counts twice",
+    "audience": "everyone",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-26",
+    "text": "Wins: a signed deal and the new client it brings now show as one line, \"New client signed\"",
+    "audience": "everyone",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-22",
+    "text": "NDAs: the NDAs button on Clients. Start one, send the other side a one-time link to fill in their details (or fill them in yourself), then press Send. Alex signs first, and the signed copy files itself in Legal",
+    "size": "big",
+    "audience": "leadership",
+    "area": "Clients"
+  },
+  {
+    "date": "2026-10-22",
+    "text": "The previous/next arrows at the top of each page are gone; use the menu",
+    "audience": "everyone",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "Briefs: New brief in Colony for something a client mentioned but didn't raise. It skips their approval, and every brief that reaches Your Agency starts with its pieces filled in from what was asked for",
+    "audience": "briefs",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "The bell is easier to spot, and turns pink while something is waiting for you",
+    "audience": "everyone",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "Briefs are split into pieces. Each needs copy, design or both. Dev and Vera assign people, owners mark their part done, the lead approves, then Rhea or Mara shares it with the client. Your pieces show in My week, and the bell tells you what's waiting. No Slack, no extra emails",
+    "size": "big",
+    "audience": "everyone",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "The bell keeps itself up to date without a refresh. When something needs you, the tab shows the count, like \"(2) Agency Colony\", with a dot on its icon, and the bell gives a little shake",
+    "size": "big",
+    "audience": "everyone",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "Deal Flow moved up in the menu, under You",
+    "audience": "leadership",
+    "area": "Menu"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "Briefs: links can be removed (Remove, for brief reviewers), and the same link can't be added twice",
+    "audience": "briefs",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "Briefs: when a date moves, Rhea, Mara, Nadia or Alex can set a new date for the client. Circle shows it with the original struck through, and the brief's approver gets one email",
+    "size": "big",
+    "audience": "briefs",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-21",
+    "text": "Briefs: add a Drive or Canva link next to Upload, in Colony and on Circle, with the same client visibility as files",
+    "audience": "everyone",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-20",
+    "text": "In a brief, you can change only the deliverables you can actually save: your own status and link, or any of them if you review briefs. A save that fails now says so, and sends no email",
+    "audience": "everyone",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-14",
+    "text": "Selecting text in a deal, or any pop-up, and letting go outside it no longer closes it without saving",
+    "audience": "everyone",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-10-14",
+    "text": "Leave: a manager can mark one of their own team out (say, off sick) from Apply for leave. It's approved at once and the person gets an email",
+    "audience": "leadership",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-13",
+    "text": "Briefs: Delete moves a brief to the new Archive tab (with completed ones), where it can be restored; only leadership and account managers can delete",
+    "audience": "briefs",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-13",
+    "text": "Briefs is one list instead of stage columns: Active, On pause, Completed and Quick requests as tabs, each brief with a five-step track showing where it is and who has it",
+    "size": "big",
+    "audience": "briefs",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-10-13",
+    "text": "A simpler Leave page: what you have left in three small boxes, apply in one place, the next 30 days at a glance, and your past leave folded away",
+    "size": "big",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-13",
+    "text": "Leave: requests waiting for your decision sit at the top, with Approve and Decline on the row, and the email link lands there",
+    "audience": "leadership",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Home: Wins shows the client of the week",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Overview: plan vs reality, each client's share of planned time next to its share of finished tasks",
+    "audience": "leadership",
+    "area": "Overview"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "A simpler menu: You, Your Agency and Running Your Agency, in the same order for everyone. My week holds your tasks and allocation, and Team Directory is now People",
+    "size": "big",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Overview holds the agency view and the resource planner as two tabs, and shows new joiners from Hiring",
+    "audience": "leadership",
+    "area": "Overview"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Settings is down to access and scheduled jobs; public holidays moved to Leave and policies are edited on the Policies page",
+    "audience": "admin",
+    "area": "Settings"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Hiring: a hire ends when the joiner is on Slack: one Slack row that says when the invite went out, then ticks when they join",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Team Directory: a full or half disc beside each name shows full-time or fractional; the access role and utilization columns are gone",
+    "area": "Team Directory"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Team Directory: the yellow dot now means a new joiner's hire still has steps open; the old onboarding checklist is retired",
+    "audience": "leadership",
+    "area": "Team Directory"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Profiles: a Joined Your Agency date, set by leadership, so work anniversaries show on Coming up",
+    "audience": "leadership",
+    "area": "Profiles"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Home: Coming up shows who's joining, who's back from leave, All Hands and Thirsty Thursday, and work anniversaries",
+    "size": "big",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Home: Wins shows how much work got done each week, every streak milestone, and the month's busiest day, and scrolls back through 20",
+    "size": "big",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "Home: What's new shows the big changes on their own line and groups the smaller ones by area",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-08",
+    "text": "New joiners: their hiring manager switches their Colony access on from the hire, and the meeting and Slack invites follow by themselves",
+    "audience": "hiring",
+    "size": "big",
+    "area": "New joiners"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Team Directory: Offboard moved into each person's edit page, where Alex can also pause or resume their access",
+    "audience": "leadership",
+    "area": "Team Directory"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Access can be paused in an emergency, and anyone still missing an emergency contact after the deadline is paused until they add one",
+    "audience": "admin",
+    "size": "big",
+    "area": "Access"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: steps still to come say when they happen, like the day the welcome email goes out",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "New joiners: when Google has no free licence, Colony asks the reseller for one and creates the account as soon as it arrives",
+    "audience": "hiring",
+    "size": "big",
+    "area": "New joiners"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: each step names the person it is waiting on, consultants move past Finance by themselves, and Finance's email carries the bank details",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: every hire reads as one list of steps: who it's waiting on, what happened when, and what comes next",
+    "audience": "hiring",
+    "size": "big",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: each step's buttons now sit on the step's own line, lined up and the same size",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: new joiners are added to All Hands and Thirsty Thursday after their first Colony sign-in",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "New joiners get a welcome email two working days before they start",
+    "audience": "hiring",
+    "size": "big",
+    "area": "New joiners"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: sending an agreement keeps you on the hire and says \"Sent for signature\" right there",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: the review and signing steps are owned by \"Signatories\" — the left column now names roles all the way down",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: a step only offers to expand when it has something to show — and a signed agreement links to the document",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: Colony can pick a free @youragency.com address itself instead of someone typing one",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring emails: the hiring manager is on the thread, Nadia is off it, and there are five emails instead of eight",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: the Papersign webhook now records why it ignored an event instead of failing silently",
+    "audience": "admin",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: Finance gets an FYI for people who invoice, and a real task only when there's payroll to run",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: no uploading or redrafting an agreement once it has gone out for signature",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: offer terms lock once the agreement has been drafted from them",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: the joiner's details expand on their own row, with Approve on the same line — the separate check step is gone",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: a step's buttons sit directly under its label instead of floating in empty space",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Joining checklist: a multi-line address is folded into one line, and you're shown how it will read before saving",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Joining checklist: consultants are no longer asked for salary slips or a tax regime",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Notifications: 'hires waiting on you' opens Hiring instead of an empty Team Directory",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: a step's buttons sit under its row instead of inside a large empty box",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: no stray divider above a step's buttons when the buttons are all it holds",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: a step you can act on opens by itself, so its button is never hidden behind a collapsed row",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: checking a joiner's details is Alex's or Leo's, and only they are emailed about it",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: changing a new hire's type clears the pay amount, so an annual CTC can't become a monthly fee",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: Review draft opens the actual Papersign document instead of Papersign's front door",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: a new hire needs its team, designation, pay, manager and start date before it can be opened",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Home: adding a deal no longer shows up as a win — only a stage it moves to later does",
+    "area": "Home"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: one drawer per hire instead of two — every step opens where it stands and carries its own action",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: reviewing and signing an agreement is Alex's or Leo's — either one, on every agreement",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: Legal checks a new joiner's details and approves them before the agreement is drafted",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Joining checklist: the mobile number a new joiner enters is actually saved now — it had been discarded since 8 September",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: change a hire's employment type after they're created, and set their team on the New hire form",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-07",
+    "text": "Hiring: filter new hires by In progress, Completed or Cancelled, each with a count",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-06",
+    "text": "Hiring: a cleaner New hire form, and fixed-term contracts with an end date for fractionals and consultants",
+    "audience": "hiring",
+    "size": "big",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-10-06",
+    "text": "Bugs & Features shows Your Agency's own posts only; client feedback stays on Circle",
+    "area": "Clients"
+  },
+  {
+    "date": "2026-10-05",
+    "text": "Streaks: \"streak freeze\" is now the streak saver, and saving your streak lights the row up",
+    "area": "Streaks"
+  },
+  {
+    "date": "2026-10-01",
+    "text": "Sign-in: one short 'No access' message for any email that isn't authorised",
+    "audience": "admin",
+    "area": "Emails"
+  },
+  {
+    "date": "2026-10-01",
+    "text": "Streak saver: missed a working day? Save your streak the next morning (one a month)",
+    "size": "big",
+    "area": "Streaks"
+  },
+  {
+    "date": "2026-09-30",
+    "text": "Briefs: the client approves deliveries on Circle; ones they don't answer close after 7 days",
+    "audience": "briefs",
+    "size": "big",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-09-30",
+    "text": "Briefs: delivered briefs no longer show red dates; Wins shows the latest 10",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-09-30",
+    "text": "Hiring: open someone's hiring record from their profile, and a back button out of a hire's details",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-09-30",
+    "text": "Deal Flow: link a deal to an archived client (returning clients no longer get duplicates)",
+    "audience": "leadership",
+    "area": "Deal Flow"
+  },
+  {
+    "date": "2026-09-29",
+    "text": "Client owners can now see and unarchive the clients they archived",
+    "area": "Clients"
+  },
+  {
+    "date": "2026-09-28",
+    "text": "Approved leave never breaks your streak, on anyone's screen; slimmer streak bar",
+    "area": "Streaks"
+  },
+  {
+    "date": "2026-09-28",
+    "text": "New home page: Coming up and Wins, one line each",
+    "size": "big",
+    "area": "Home"
+  },
+  {
+    "date": "2026-09-27",
+    "text": "Briefs board folds empty stages and fits on one screen",
+    "audience": "briefs",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-09-27",
+    "text": "Allocations: pick a real client (Internal is gone); Pitches/BD now under Misc/Bizdev",
+    "area": "Allocations"
+  },
+  {
+    "date": "2026-09-27",
+    "text": "Streak rewards: a half-day off every 50 days in a row",
+    "size": "big",
+    "area": "Streaks"
+  },
+  {
+    "date": "2026-09-25",
+    "text": "Birthdays show without the year; people lists sorted A to Z by first name",
+    "area": "Profiles"
+  },
+  {
+    "date": "2026-09-25",
+    "text": "Add an emergency contact: the bell reminds you if yours is empty",
+    "area": "Profiles"
+  },
+  {
+    "date": "2026-09-24",
+    "text": "Daily tasks roll over properly again",
+    "area": "Tasks"
+  },
+  {
+    "date": "2026-09-20",
+    "text": "Links in briefs, comments and Bugs & Features are clickable",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-09-20",
+    "text": "Pasting a link into a task edit no longer loses your update",
+    "area": "Tasks"
+  },
+  {
+    "date": "2026-09-15",
+    "text": "Every workflow email now opens straight to the thing it's about",
+    "area": "Emails"
+  },
+  {
+    "date": "2026-09-07",
+    "text": "Briefs can be put on pause, and deadline reminders reach the right people",
+    "audience": "briefs",
+    "size": "big",
+    "area": "Briefs"
+  },
+  {
+    "date": "2026-09-02",
+    "text": "Weekly repeating tasks: set a task to come back every week",
+    "size": "big",
+    "area": "Tasks"
+  },
+  {
+    "date": "2026-08-26",
+    "text": "Streaks: tick off a task every working day and watch the flame grow",
+    "size": "big",
+    "area": "Streaks"
+  },
+  {
+    "date": "2026-03-29",
+    "text": "Company policies now accessible from any screen via footer links",
+    "size": "big",
+    "area": "Policies"
+  },
+  {
+    "date": "2026-03-29",
+    "text": "New hire onboarding: guided profile setup and policy acknowledgments",
+    "size": "big",
+    "area": "Onboarding"
+  },
+  {
+    "date": "2026-03-20",
+    "text": "Deal Flow: track BD pipeline from qualifying to contracted",
+    "audience": "leadership",
+    "size": "big",
+    "area": "Deal Flow"
+  },
+  {
+    "date": "2026-03-10",
+    "text": "Location on profiles: share your current city with the team",
+    "area": "Profiles"
+  },
+  {
+    "date": "2026-03-10",
+    "text": "Reimbursements: upload separately from invoices in your profile",
+    "area": "Invoices"
+  },
+  {
+    "date": "2026-03-10",
+    "text": "Home dashboard now available to all employees",
+    "size": "big",
+    "area": "Home"
+  },
+  {
+    "date": "2026-03-09",
+    "text": "Analytics: LinkedIn performance insights per client",
+    "audience": "leadership",
+    "size": "big",
+    "area": "Analytics"
+  },
+  {
+    "date": "2026-03-05",
+    "text": "Invoice Center: monthly upload tracking with reminders",
+    "size": "big",
+    "area": "Invoices"
+  },
+  {
+    "date": "2026-03-04",
+    "text": "Personalized Home greeting by time of day",
+    "area": "Colony"
+  },
+  {
+    "date": "2026-03-04",
+    "text": "Leave approvals: recent history with expandable view",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-03-04",
+    "text": "Reportee leave balances: total remaining, own team first",
+    "audience": "leadership",
+    "area": "Leave"
+  },
+  {
+    "date": "2026-03-04",
+    "text": "People page: live utilization data",
+    "area": "Team Directory"
+  },
+  {
+    "date": "2026-03-04",
+    "text": "Collapsible Edit Profile section",
+    "area": "Profiles"
+  },
+  {
+    "date": "2026-03-03",
+    "text": "Home dashboard with team stats and timeline",
+    "size": "big",
+    "area": "Home"
+  },
+  {
+    "date": "2026-03-03",
+    "text": "Email notifications when someone comments/likes your request",
+    "area": "Emails"
+  },
+  {
+    "date": "2026-02-28",
+    "text": "Bugs & Features board with upvotes, replies, and status tracking",
+    "size": "big",
+    "area": "Bugs & Features"
+  },
+  {
+    "date": "2026-02-25",
+    "text": "Daily task archive with calendar view",
+    "size": "big",
+    "area": "Tasks"
+  }
 ]

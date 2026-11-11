@@ -25,7 +25,9 @@ function awaitsPickup(brief, deliverables = []) {
   if (brief.paused_at) return false;
   // A deliverable with an owner is a human saying "mine". Unowned ones do not
   // count — they can be created by the intake form with nobody behind them.
-  return !deliverables.some((d) => d.brief_id === brief.id && d.assignee_employee_id);
+  // Since 21 Oct 2026 a piece has a copy and a design owner.
+  return !deliverables.some((d) => d.brief_id === brief.id
+    && (d.assignee_employee_id || d.copy_assignee_id || d.design_assignee_id));
 }
 
 // `approvedIso` is the day it entered ready_for_review, from status history —
@@ -49,4 +51,20 @@ function pickupNudgeFor(brief, deliverables, approvedIso, todayIso, holidays = [
 
 function pickupNudgeKey(briefId, todayIso) { return `${briefId}|${todayIso}`; }
 
-module.exports = { awaitsPickup, pickupNudgeFor, pickupNudgeKey, NUDGE_AFTER_WORKING_DAYS, URGENT_WITHIN_WORKING_DAYS };
+// Quick requests nobody has acknowledged (27 Sep 2026). A quick request
+// ("notify_only") never goes on the board, so one the client sent on 10 Sep sat as
+// "New" for over two weeks with nothing chasing it. Same cadence as a brief:
+// after one working day, once per working day, until someone acknowledges or
+// closes it. The clock starts when the client sent it — there is no approval step.
+function awaitsAcknowledgement(brief) {
+  return Boolean(brief) && brief.request_type === 'notify_only'
+    && brief.status === 'submitted' && !brief.paused_at;
+}
+function quickRequestNudgeFor(brief, todayIso, holidays = []) {
+  if (!awaitsAcknowledgement(brief) || !brief.created_at) return null;
+  const waited = waitingWorkingDays(String(brief.created_at).slice(0, 10), todayIso, holidays);
+  return waited >= NUDGE_AFTER_WORKING_DAYS ? { waited } : null;
+}
+function quickRequestNudgeKey(briefId, todayIso) { return `quick|${briefId}|${todayIso}`; }
+
+module.exports = { awaitsPickup, pickupNudgeFor, pickupNudgeKey, awaitsAcknowledgement, quickRequestNudgeFor, quickRequestNudgeKey, NUDGE_AFTER_WORKING_DAYS, URGENT_WITHIN_WORKING_DAYS };

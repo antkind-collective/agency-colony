@@ -7,12 +7,13 @@ const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
 const { logNotification } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
-const { callerCanSee } = require('./lib/caller');
+const { callerCanSee, callerCanWorkBrief } = require('./lib/caller');
+const { approverRecipients, shortDate } = require('./lib/brief-approvers');
 
 const FALLBACK_REVIEWERS = ['rhea@youragency.com', 'mara@youragency.com'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const EVENTS = ['submitted', 'ga_approved', 'changes_requested', 'locked', 'delivered', 'reopened', 'revision_requested', 'deliverable_assigned', 'deliverable_ready'];
+const EVENTS = ['submitted', 'ga_approved', 'changes_requested', 'locked', 'delivered', 'reopened', 'revision_requested', 'deliverable_assigned', 'deliverable_ready', 'date_changed'];
 // What a client's own buttons fire (submit, approve, ask for a revision). The
 // rest are Your Agency's moves; a partner token announcing "Delivered" is forged.
 const PARTNER_EVENTS = ['submitted', 'ga_approved', 'revision_requested'];
@@ -58,15 +59,21 @@ exports.handler = async (event) => {
   if (callerPartner.data && !PARTNER_EVENTS.includes(briefEvent)) {
     return jsonResponse(403, { error: 'Not allowed to send this.' });
   }
+  // Audit 11 Nov 2026: staff fire these only after moving the brief, so they
+  // must be able to move it. Read-only brief viewers passed the check above
+  // and could email the client "Delivered" for a brief nobody had delivered.
+  if (!callerPartner.data && !await callerCanWorkBrief(token, briefId)) {
+    return jsonResponse(403, { error: 'Not allowed to send this.' });
+  }
 
   const briefRes = await supabase.from('briefs')
-    .select('id, title, org, status, request_type, priority, submitted_by_partner_id, on_behalf_of_name, on_behalf_of_email')
+    .select('id, title, org, status, request_type, priority, submitted_by_partner_id, on_behalf_of_name, on_behalf_of_email, approver_name, deadline, revised_deadline, revised_deadline_at')
     .eq('id', briefId).single();
   if (briefRes.error || !briefRes.data) return jsonResponse(404, { error: 'Brief not found.' });
   const brief = briefRes.data;
 
   const partnersRes = await supabase.from('partners')
-    .select('id, email, full_name, partner_role, is_active')
+    .select('id, email, full_name, partner_role, is_active, email_opt_out')
     .eq('org', brief.org).eq('is_active', true);
   const partners = partnersRes.data || [];
   const submitter = partners.find(p => p.id === brief.submitted_by_partner_id) || null;
@@ -79,7 +86,9 @@ exports.handler = async (event) => {
 
   // recipient -> which surface their link points at
   const recipients = new Map(); // email -> {name, side}
-  const addPartner = (p) => { if (p?.email) recipients.set(p.email.toLowerCase(), { name: p.full_name, side: 'partner' }); };
+  // email_opt_out: a client-side login that gets no Circle emails (Alex's and
+  // Rhea's Gmail, which approve on the client's behalf; 30 Sep 2026).
+  const addPartner = (p) => { if (p?.email && !p.email_opt_out) recipients.set(p.email.toLowerCase(), { name: p.full_name, side: 'partner' }); };
   const addInternal = (email) => { if (email) recipients.set(String(email).toLowerCase(), { name: null, side: 'internal' }); };
 
   const title = brief.title;
@@ -149,6 +158,23 @@ exports.handler = async (event) => {
         const empRes = await supabase.from('employees').select('email').eq('id', assigneeEmployeeId).single();
         if (!empRes.error) addInternal(empRes.data?.email);
       }
+      break;
+    }
+    case 'date_changed': {
+      // A new date for the client (21 Oct 2026). Only the people who can set
+      // one may announce it, only just after it was set, and the dates come
+      // from the brief, never the payload.
+      const admin = 'admin@youragency.com';
+      const allowed = actorEmail === admin || reviewers.map((e) => String(e).toLowerCase()).includes(actorEmail);
+      const setAt = Date.parse(brief.revised_deadline_at || '');
+      if (!allowed || !brief.revised_deadline || !(Date.now() - setAt < 10 * 60 * 1000)) {
+        return jsonResponse(403, { error: 'Not allowed to send this.' });
+      }
+      subject = `📅 New date: ${title}`;
+      line = brief.deadline && brief.deadline !== brief.revised_deadline
+        ? `The date for this brief has moved to ${shortDate(brief.revised_deadline)} (was ${shortDate(brief.deadline)}).`
+        : `The date for this brief is now ${shortDate(brief.revised_deadline)}.`;
+      approverRecipients(brief.approver_name, partners).forEach(addPartner);
       break;
     }
     case 'deliverable_ready':

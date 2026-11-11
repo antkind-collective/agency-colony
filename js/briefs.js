@@ -37,6 +37,21 @@ function briefAwaitsClientApproval(brief) {
   return Boolean(brief.submitted_by_partner_id);
 }
 
+// May this partner edit, comment on, upload to or request a revision of this
+// brief? Mirrors the DB exactly: app.partner_can_edit_brief (coordinator ⇒ any
+// brief in their org, otherwise only their own) AND the role test every
+// partner write policy adds (submitter or coordinator; client_viewer never).
+// Reading is wider — every partner sees the whole org's briefs — so the
+// controls must follow this, not visibility. No partner profile (staff on
+// Circle) ⇒ false: they act from Colony.
+function partnerCanWriteBrief(brief, partner) {
+  if (!brief || !partner || !partner.id) return false;
+  if (partner.org && brief.org && partner.org !== brief.org) return false;
+  if (partner.partner_role === 'coordinator') return true;
+  if (partner.partner_role !== 'submitter') return false;
+  return brief.submitted_by_partner_id === partner.id;
+}
+
 function isBriefPaused(brief) {
   return Boolean(brief && brief.paused_at);
 }
@@ -120,25 +135,52 @@ function allowedBriefActions(brief, requestType = 'brief') {
 // Required fields per request type — per the SLA doc's "Brief Requirement"
 // checklist merged with the intake form. Field keys match app.briefs columns.
 const BRIEF_REQUIRED_FIELDS = {
-  // v2 (10 Aug, Rhea): all substantive questions required. Still optional:
-  // links, media credits, publish date, notes, attachments.
+  // v3 (21 Sep 2026, Alex's plan, Mara's go): the form felt like a lot to
+  // fill in, so a brief now needs only its four questions: what do you need
+  // (a title plus the formats, which drive the turnaround), what's it for, who's
+  // it for, and by when. Everything else is under "Add more detail" and is
+  // optional; the team asks via Pending info if they need more.
   brief: [
-    { key: 'title', label: 'Title' },
-    { key: 'objective', label: 'Objective' },
-    { key: 'key_message', label: 'Key message' },
-    { key: 'audience', label: 'Audience' },
-    { key: 'content_text', label: 'Copy / content inputs' },
-    { key: 'key_dates', label: 'Key dates' },
-    { key: 'platforms', label: 'Platform(s)' },
-    { key: 'requested_deliverables', label: 'Deliverable(s)' },
-    { key: 'deadline', label: 'Deadline' },
-    { key: 'approver_name', label: 'Who approves this content' }
+    { key: 'title', label: 'What do you need' },
+    { key: 'requested_deliverables', label: 'Format(s)' },
+    { key: 'objective', label: "What it's for" },
+    { key: 'audience', label: "Who it's for" },
+    { key: 'deadline', label: 'By when' }
   ],
   notify_only: [
     { key: 'title', label: 'Title' },
     { key: 'content_text', label: 'Message' }
   ]
 };
+
+// "Needed first" only means something when a brief asks for two or more
+// formats, and only for formats it still asks for (unticking a format drops
+// its needed-first mark). The DB enforces the second rule too.
+function neededFirstFor(requested, ticked) {
+  const req = Array.isArray(requested) ? requested : [];
+  if (req.length < 2) return [];
+  return (Array.isArray(ticked) ? ticked : []).filter((t, i, all) => req.includes(t) && all.indexOf(t) === i);
+}
+
+// "Request something related": a new brief linked to this one. It carries over
+// the context that is usually the same (why, who for, message, platforms,
+// approver, who it is for) and leaves blank what a follow-up must decide for
+// itself (what, which formats, by when).
+function relatedBriefPrefill(parent) {
+  if (!parent?.id) return null;
+  return {
+    request_type: 'brief',
+    parent_brief_id: parent.id,
+    objective: parent.objective || '',
+    audience: parent.audience || '',
+    key_message: parent.key_message || '',
+    platforms: [...(parent.platforms || [])],
+    approver_name: parent.approver_name || '',
+    on_behalf_of_name: parent.on_behalf_of_name || '',
+    on_behalf_of_email: parent.on_behalf_of_email || '',
+    priority: 'P2'
+  };
+}
 
 function briefMissingFields(brief) {
   const type = brief?.request_type === 'notify_only' ? 'notify_only' : 'brief';
@@ -211,7 +253,19 @@ function deliverableDueAt(startedAtIso, slaDays, priority, holidays = []) {
   return `${dueIso}T23:59:59.999Z`;
 }
 
-function deliverableIsOverdue(deliverable, nowIso) {
+// A brief that has been handed over is past the point where a date can be
+// late: delivered, completed, acknowledged (quick requests) or closed. Its
+// dates stay visible but are never red (30 Sep 2026: five delivered
+// cards all showed red dates).
+const BRIEF_FINISHED_STATUSES = ['delivered', 'completed', 'acknowledged', 'closed'];
+function briefIsFinished(brief) {
+  return Boolean(brief && BRIEF_FINISHED_STATUSES.includes(brief.status));
+}
+
+// `brief` is optional: pass it so a finished brief's deliverables never read
+// as overdue, whatever their own status says.
+function deliverableIsOverdue(deliverable, nowIso, brief) {
+  if (briefIsFinished(brief)) return false;
   if (!deliverable || deliverable.status === 'delivered' || !deliverable.due_at) return false;
   const now = nowIso ? new Date(nowIso) : new Date();
   return now.getTime() > new Date(deliverable.due_at).getTime();
@@ -334,7 +388,7 @@ function briefApprovalWait(brief, todayIso, holidays = []) {
   const submitted = String(brief.created_at || '').slice(0, 10);
   const waited = submitted && submitted <= todayIso
     ? workingDaysBetween(submitted, todayIso, holidays) : 0;
-  const due = String(brief.deadline || '').slice(0, 10) || null;
+  const due = briefDueDate(brief);
   // Null means there is no runway left to measure — either no deadline, or it
   // has already gone. The two read very differently, so `overdue` separates
   // them rather than leaving the caller to guess.
@@ -385,4 +439,121 @@ function briefOnBehalfDetail(brief) {
   if (!on) return '';
   const email = String(brief?.on_behalf_of_email || '').trim();
   return email ? `${on} (${email})` : on;
+}
+
+// ── The brief list's track (13 Oct 2026: option B) ─────────────────
+// One line per brief instead of stage columns: five dots, each named, the
+// current one bold with "with <who>" under it. The team's view and the client's use the
+// same five positions with their own words. Off-track statuses sit on the dot they
+// belong to and say what they are: Pending info on the first, Under revision
+// on the third.
+const BRIEF_TRACK = {
+  team: ['New brief', 'With Your Agency', 'In creative', 'Delivered', 'Completed'],
+  client: ['Sent', 'Approved', 'In creative', 'Delivered', 'Completed']
+};
+const BRIEF_TRACK_STEP = { submitted: 0, pending_info: 0, ready_for_review: 1, in_creative: 2, under_revision: 2, delivered: 3, completed: 4 };
+const BRIEF_TRACK_OWN_LABEL = {
+  team: { pending_info: 'Pending info', under_revision: 'Under revision' },
+  client: { submitted: 'Sent', pending_info: 'Needs info', under_revision: 'Being revised' }
+};
+
+function briefTrack(brief, audience = 'team') {
+  const labels = (BRIEF_TRACK[audience] || BRIEF_TRACK.team).slice();
+  const step = BRIEF_TRACK_STEP[brief?.status] ?? 0;
+  const own = (BRIEF_TRACK_OWN_LABEL[audience] || {})[brief?.status];
+  if (own) labels[step] = own;
+  if (isBriefPaused(brief)) labels[step] = 'On pause';
+  return { labels, step };
+}
+
+// Due date for the list: "2 Oct", and how late an unfinished brief is.
+// The date a brief is due now. A new date agreed with the client wins over
+// the one they asked for; `deadline` itself never changes, so a slip stays
+// visible (Alex and Rhea, 21 Oct 2026).
+function briefDueDate(brief) {
+  return String(brief?.revised_deadline || brief?.deadline || '').slice(0, 10) || null;
+}
+
+// The date the client asked for, only when a new date replaced it.
+function briefWasDate(brief) {
+  const revised = String(brief?.revised_deadline || '').slice(0, 10);
+  const asked = String(brief?.deadline || '').slice(0, 10);
+  return revised && asked && revised !== asked ? asked : null;
+}
+
+function briefDueInfo(deadline, todayIso, finished) {
+  if (!deadline) return { text: '', late: false };
+  const d = new Date(`${String(deadline).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return { text: '', late: false };
+  const text = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  if (finished || String(deadline).slice(0, 10) >= todayIso) return { text, late: false };
+  const days = Math.round((Date.parse(`${todayIso}T00:00:00Z`) - d.getTime()) / 86400000);
+  return { text: `${text} · ${days} day${days === 1 ? '' : 's'} late`, late: true };
+}
+
+// Which tab a brief sits under on the list.
+function briefListTab(brief) {
+  if (brief?.request_type === 'notify_only') return 'quick';
+  if (isBriefPaused(brief)) return 'paused';
+  if (brief?.status === 'completed') return 'completed';
+  return 'active';
+}
+
+// ── Pieces (21 Oct 2026, Rhea's workflow) ──
+// A brief is split into pieces; each needs copy, design or both, with one
+// owner per part. The stage moves by itself in the database
+// (guard_brief_deliverable_update); these only read it.
+const PIECE_STAGE_LABEL = {
+  queued: 'To assign',
+  in_progress: 'In progress',
+  in_review: 'Lead review',
+  ready_to_share: 'AM review',
+  delivered: 'Shared'
+};
+
+function pieceStageLabel(piece, clientName) {
+  if (!piece) return '';
+  if (piece.status === 'in_progress' && piece.sent_back_at) return 'Changes needed';
+  if (piece.status === 'delivered') return `Shared with ${clientName || 'the client'}`;
+  return PIECE_STAGE_LABEL[piece.status] || piece.status;
+}
+
+// Creative leads by client name (app_config.creative_leads).
+function isCreativeLeadFor(org, email, leadsMap) {
+  const list = (leadsMap && leadsMap[org]) || [];
+  const me = String(email || '').trim().toLowerCase();
+  return Boolean(me) && list.some((e) => String(e).trim().toLowerCase() === me);
+}
+
+// What a piece is waiting on the viewer to do. Leads assign only once the
+// brief has gone to creative (Start creative = shared with the team), and
+// nothing waits on anyone while the brief is paused.
+// Returns any of: 'assign', 'copy', 'design', 'lead_review', 'am_review'.
+function pieceActionsFor(piece, brief, { me, reviewer = false, lead = false } = {}) {
+  const out = [];
+  if (!piece || !brief || brief.archived_at || isBriefPaused(brief)) return out;
+  const atCreative = ['in_creative', 'under_revision'].includes(brief.status);
+  if (piece.status === 'queued' && lead && atCreative) out.push('assign');
+  if (piece.status === 'in_progress') {
+    if (piece.needs_copy && me && piece.copy_assignee_id === me && !piece.copy_done_at) out.push('copy');
+    if (piece.needs_design && me && piece.design_assignee_id === me && !piece.design_done_at) out.push('design');
+  }
+  if (piece.status === 'in_review' && lead) out.push('lead_review');
+  if (piece.status === 'ready_to_share' && reviewer) out.push('am_review');
+  return out;
+}
+
+// Counts for the bell, one per kind of action.
+function pieceActionCounts(pieces, briefsById, ctx) {
+  const counts = { assign: 0, mine: 0, lead_review: 0, am_review: 0 };
+  (pieces || []).forEach((p) => {
+    const brief = briefsById[p.brief_id];
+    const lead = isCreativeLeadFor(brief?.org, ctx.email, ctx.leadsMap);
+    const acts = pieceActionsFor(p, brief, { me: ctx.me, reviewer: ctx.reviewer, lead });
+    if (acts.includes('assign')) counts.assign += 1;
+    if (acts.includes('copy') || acts.includes('design')) counts.mine += 1;
+    if (acts.includes('lead_review')) counts.lead_review += 1;
+    if (acts.includes('am_review')) counts.am_review += 1;
+  });
+  return counts;
 }

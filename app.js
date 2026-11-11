@@ -40,6 +40,7 @@ const state = {
   // An Your Agency reviewer signed in on Circle to answer client feedback. Never
   // true on Colony, and cleared on sign-out with the rest of the session.
   staffOnCircle: false,
+  // @circle-omit Deal Flow state: nothing on Circle reads it
   deals: [],
   dealSection: 'hot',
   dealFilter: 'open',
@@ -47,6 +48,7 @@ const state = {
   dealFilterPoc: '',
   dealSearch: '',
   dealCompany: 'Your Agency',
+  // @circle-omit-end
   inactiveEmployees: [],
   publicHolidays: null, // loaded from app.public_holidays; null = use PUBLIC_HOLIDAYS fallback
   accessOverrides: null, // loaded from app.access_overrides; null/empty = use ENFORCED_ACCESS_BY_EMAIL fallback
@@ -56,7 +58,7 @@ const state = {
   // see only those clients (enforced in RLS), and ALL of them are excluded from
   // agency-level capacity maths — they're not reassignable bandwidth. Their
   // capacity still counts at client level. null = not loaded yet.
-  homePulse: null, // home feed live signals: whosOut (RPC), doneTasks, dealMoves, myTasksDueToday
+  homePulse: null, // home feed live signals: whosOut (RPC), briefsDelivered (RPC), dealMoves, myTasksDueToday, streakRewards
   loadedAt: {} // loader freshness stamps (screen-switch cache; mutations call raw loaders which re-stamp)
 };
 
@@ -68,12 +70,30 @@ function getPublicHolidays() {
     : PUBLIC_HOLIDAYS;
 }
 
-async function loadPublicHolidaysFromSupabase() {
-  if (!state.supabase) return;
-  const { data, error } = await state.supabase
+// Back-to-back days with the same name are one break (Christmas Break runs
+// 25 Dec to 3 Jan, 29 Oct 2026): lists show it once, "till 3 Jan".
+function holidayRuns(list = getPublicHolidays()) {
+  const runs = [];
+  [...list].sort((a, b) => a.date.localeCompare(b.date)).forEach((h) => {
+    const last = runs[runs.length - 1];
+    if (last && last.name === h.name && shiftIsoDays(last.end, 1) === h.date) last.end = h.date;
+    else runs.push({ date: h.date, end: h.date, name: h.name });
+  });
+  return runs;
+}
+
+// Both holiday lists (state.publicHolidays and holidayCache) come from one
+// request; sign-in used to fetch the table twice (P1).
+function fetchPublicHolidayRows() {
+  return shareInFlight('publicHolidays', () => state.supabase
     .from('public_holidays')
     .select('holiday_date, name')
-    .order('holiday_date', { ascending: true });
+    .order('holiday_date', { ascending: true }));
+}
+
+async function loadPublicHolidaysFromSupabase() {
+  if (!state.supabase) return;
+  const { data, error } = await fetchPublicHolidayRows();
   if (error) { console.error('Public holidays load failed:', error); return; }
   // Normalize to the shape every consumer expects: { date, name }.
   state.publicHolidays = (data || []).map(r => ({ date: r.holiday_date, name: r.name }));
@@ -210,6 +230,31 @@ function updateAllLastEditLabels() {
 }
 
 const navButtons = [...document.querySelectorAll('.screen-link')];
+
+// Menu group labels (T2, 8 Oct 2026): a label shows only when at least one
+// item under it (up to the next label) is visible, so staff never see an
+// empty "Running Your Agency". Watches the buttons' classes, since many
+// visibility rules toggle `hidden` on them independently.
+function syncNavGroups() {
+  document.querySelectorAll('#screen-nav .nav-group').forEach((label) => {
+    let any = false;
+    for (let el = label.nextElementSibling; el && !el.classList.contains('nav-group'); el = el.nextElementSibling) {
+      if (el.classList.contains('screen-link') && !el.classList.contains('hidden')) { any = true; break; }
+    }
+    label.classList.toggle('hidden', !any);
+  });
+}
+{
+  const nav = document.getElementById('screen-nav');
+  if (nav) new MutationObserver(syncNavGroups).observe(nav, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  syncNavGroups();
+}
+// Tabs inside My week and Overview switch between the paired screens.
+document.addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-tab-screen]');
+  if (!tab || tab.classList.contains('is-on')) return;
+  navigateToScreen(tab.dataset.tabScreen);
+});
 const screens = [...document.querySelectorAll('.screen')];
 const loginNavButton = document.getElementById('loginNavButton') || navButtons.find((btn) => btn.dataset.screen === 'login') || null;
 
@@ -239,6 +284,27 @@ function teamLookupCandidates(value) {
   if (normalized === TEAM_AM) return [TEAM_AM, TEAM_AM_LEGACY];
   return [normalized];
 }
+
+// The menu's order (T2, 8 Oct 2026): You, Your Agency, Running Your Agency. Kept here,
+// not in config.js, which Circle serves to clients; Circle has none of these
+// screens, so it gets an empty list (5 Nov 2026, after audit S21/S23).
+let STATEFUL_SCREENS = [];
+// @circle-omit Colony's own screen ids
+STATEFUL_SCREENS = [
+  'home-feed',
+  'daily-tasklist',
+  'my-allocations',
+  'leave-center',
+  'people-directory',
+  'client-projects',
+  'employee-profile',
+  'executive-dashboard',
+  'leadership-planner',
+  'invoice-center',
+  'admin-settings',
+  'policy'
+];
+// @circle-omit-end
 
 function setAuthenticatedNavigation(enabled) {
   navButtons.forEach((btn) => {
@@ -459,11 +525,20 @@ function activateScreen(screenId) {
     return false;
   }
 
-  // Sub-screens keep their parent sidebar button highlighted
-  const PARENT_SCREEN = {
+  // Sub-screens keep their parent sidebar button highlighted. Circle has none
+  // of these screens, so it gets an empty map (audit S21: the ids are
+  // internal naming a client could read).
+  let PARENT_SCREEN = {};
+  // @circle-omit Colony's sub-screen ids
+  PARENT_SCREEN = {
     'employee-profile': 'people-directory',
     'client-analytics': 'client-projects',
+    ndas: 'client-projects',
+    // Tabs, not menu items (T2, 8 Oct 2026).
+    'my-allocations': 'daily-tasklist',
+    'leadership-planner': 'executive-dashboard',
   };
+  // @circle-omit-end
   const navTarget = PARENT_SCREEN[screenId] || screenId;
   navButtons.forEach((btn) => {
     const isActive = btn.dataset.screen === navTarget;
@@ -478,7 +553,6 @@ function activateScreen(screenId) {
   document.querySelector('.body').classList.toggle('no-sidebar', isLogin);
   document.querySelector('.global-header').classList.toggle('hidden', isLogin);
 
-  updateScreenArrows();
   scrollCanvasToTop();
   refreshScreenData(screenId);
   syncMobileNav();
@@ -506,8 +580,9 @@ function applyHomeGreeting() {
 }
 
 // Live signals for the home feed: who's out (all roles, via SECURITY DEFINER
-// RPC since leave_requests RLS is own-or-leadership), attributed task
-// completions, deal stage moves, and the viewer's own tasks due today.
+// RPC since leave_requests RLS is own-or-leadership), briefs delivered per
+// client (count-only RPC), deal stage moves, streak half-days, and the
+// viewer's own tasks due today.
 // Every query tolerates failure independently — a missing signal just leaves
 // its section empty, never blanks the page.
 async function loadHomePulse() {
@@ -519,20 +594,18 @@ async function loadHomePulse() {
   const until = new Date(today); until.setDate(today.getDate() + 7);
   const fromIso = toISODateLocal(from);
   const untilIso = toISODateLocal(until);
+  // Wins look back 30 days (29 Sep 2026); who's-out still spans ±7.
+  const winsFromIso = shiftIsoDays(todayIso, -30);
 
-  const [whosOutRes, doneRes, movesRes, dueRes] = await Promise.all([
+  const [whosOutRes, briefsRes, movesRes, dueRes, rewardRes, workRes, joinersRes, weeksRes, bestsRes] = await Promise.all([
     state.supabase.rpc('home_whos_out', { p_from: fromIso, p_until: untilIso }),
-    state.supabase.from('daily_tasks')
-      .select('task_title, updated_at, employee_id')
-      .eq('status', 'done')
-      .gte('updated_at', fromIso)
-      .order('updated_at', { ascending: false })
-      .limit(500),
+    // Wins: briefs delivered, a count per client (everyone sees the same).
+    state.supabase.rpc('home_briefs_delivered', { p_since: winsFromIso }),
     state.supabase.from('deal_stage_history')
-      .select('stage, entered_at, deal:deals(deal_name)')
-      .gte('entered_at', fromIso)
+      .select('stage, entered_at, deal:deals(deal_name, stage, created_at, client_id)')
+      .gte('entered_at', winsFromIso)
       .order('entered_at', { ascending: false })
-      .limit(50),
+      .limit(300),
     // Own tasks due today — always employee_id-filtered (critical pattern)
     state.currentEmployeeId
       ? state.supabase.from('daily_tasks')
@@ -540,28 +613,38 @@ async function loadHomePulse() {
           .eq('employee_id', state.currentEmployeeId)
           .eq('task_date', todayIso)
           .eq('status', 'in_progress')
-      : Promise.resolve({ count: 0, error: null })
+      : Promise.resolve({ count: 0, error: null }),
+    // Streak rewards earned this past week — the feed's shout-out (27 Sep 2026).
+    state.supabase.from('streak_rewards')
+      .select('employee_id, milestone, earned_on')
+      .gte('earned_on', winsFromIso)
+      .order('earned_on', { ascending: false })
+      .limit(50),
+    // Wins: work done each day — counts only (app.home_work_done, 8 Oct 2026).
+    state.supabase.rpc('home_work_done', { p_since: winsFromIso }),
+    // Coming up: signed hires starting this week (first name and team only).
+    state.supabase.rpc('home_joiners_starting', { p_from: todayIso, p_until: untilIso }),
+    // Wins: one line per week of work done (8 Oct 2026).
+    state.supabase.rpc('home_work_weeks', { p_since: winsFromIso }),
+    // Wins: personal bests — only weeks that beat a person's own record.
+    state.supabase.rpc('home_personal_bests', { p_since: winsFromIso })
   ]);
 
   const hidden = getHiddenEmployeeEmails();
   if (whosOutRes.error) console.warn('home_whos_out failed:', whosOutRes.error.message);
-  if (doneRes.error) console.warn('home pulse tasks failed:', doneRes.error.message);
+  if (briefsRes.error) console.warn('home_briefs_delivered failed:', briefsRes.error.message);
   if (movesRes.error) console.warn('home pulse deals failed:', movesRes.error.message);
-
-  // Done-cascade marks sibling copies done too — dedupe by employee + title key
-  const seenDone = new Set();
-  const doneTasks = (doneRes.data || []).filter(t => {
-    const key = `${t.employee_id}|${taskTitleKey(t.task_title)}`;
-    if (seenDone.has(key)) return false;
-    seenDone.add(key);
-    return true;
-  });
 
   state.homePulse = {
     whosOut: (whosOutRes.data || []).filter(r => !hidden.includes(normalizeEmail(r.email))),
-    doneTasks,
+    briefsDelivered: briefsRes.error ? [] : (briefsRes.data || []),
     dealMoves: movesRes.data || [],
-    myTasksDueToday: dueRes.error ? 0 : (dueRes.count || 0)
+    myTasksDueToday: dueRes.error ? 0 : (dueRes.count || 0),
+    streakRewards: rewardRes?.error ? [] : (rewardRes?.data || []),
+    workDone: workRes?.error ? [] : (workRes?.data || []),
+    joinersStarting: joinersRes?.error ? [] : (joinersRes?.data || []),
+    workWeeks: weeksRes?.error ? [] : (weeksRes?.data || []),
+    personalBests: bestsRes?.error ? [] : (bestsRes?.data || [])
   };
 }
 
@@ -705,6 +788,11 @@ function renderHomeStatCards() {
   }
   // The count is PEOPLE affected today, not leave-days consumed: someone on a
   // half day is still a person you can't fully reach. The ½ shows on the name.
+  // One line per person, however many rows they have (Carmen showed twice,
+  // 26 Oct 2026); a full day beats a half day.
+  const byPerson = new Map();
+  onLeaveToday.forEach((p) => { const prev = byPerson.get(p.name); if (!prev || (prev.half && !p.half)) byPerson.set(p.name, p); });
+  onLeaveToday.splice(0, onLeaveToday.length, ...byPerson.values());
   const leaveCountLabel = `${onLeaveToday.length}`;
   const leaveNameLabel = (p) => escapeHtml(p.name) + (p.half ? ' <span class="mini-meta">(½ day)</span>' : '');
 
@@ -849,524 +937,911 @@ function renderHomeStatCards() {
   `).join('');
 }
 
-/* ── Sustainability Calendar ── */
+/* ── Home feed: Coming up · Wins · Colony updates (28 Sep 2026) ──────
+   Replaces the day-bucketed stream, Team Pulse and the separate birthday and
+   climate strips. What was wrong with the old one:
+     * "This Week" held the past 7 days AND the next 7 in one bucket;
+     * Team Pulse counted done tasks by updated_at, so any edit re-counted a
+       task and a rolling window made the numbers drift daily;
+     * five differently-shaped blocks, so the page was never the same twice.
+   Now two fixed lists, one line per item, capped with "+N more":
+     Coming up = today .. +7 days (leave, holidays, birthdays, climate dates)
+     Wins      = last 30 days .. today (briefs delivered, deals, joiners, new
+                 clients, streak half-days, bugs & features closed)
+   and the Colony changelog folded underneath (collapsed-by-default rule).
+   Someone out TODAY stays on the On Leave Today card, not in Coming up. */
 
-const SUSTAINABILITY_CATEGORY_LABELS = {
-  un_international_day: 'UN Day',
-  awareness_campaign: 'Campaign',
-  conference: 'Conference',
-  climate_week: 'Climate Week',
-  policy_regulatory: 'Policy'
-};
+const LEAVE_TYPE_LABEL = { SL: 'sick leave', PL: 'planned leave', CL: 'casual leave', SR: 'streak-reward half-day', OOO: 'out of office' };
+// Each list shows at most this many lines, no "+N more" (30 Sep
+// 2026: the expander broke, and a list that grows on click isn't wanted).
+const HOME_LIST_CAP = 10;
 
-function formatSusCalBadge(entry, todayIso, weekEndIso) {
-  if (entry.start_date <= todayIso && entry.end_date >= todayIso) {
-    if (entry.duration_type === 'day') return { text: 'today', cls: 'today' };
-    if (entry.duration_type === 'month') return { text: 'all month', cls: '' };
-    return { text: 'this week', cls: '' };
+async function loadSustainabilityCalendar() {
+  if (state.sustainabilityCalendar) return;
+  try {
+    const resp = await fetch('/data/sustainability-calendar-2026.json');
+    if (!resp.ok) throw new Error(resp.statusText);
+    state.sustainabilityCalendar = await resp.json();
+  } catch (err) {
+    console.warn('Sustainability calendar load failed:', err);
+    state.sustainabilityCalendar = [];
   }
-  // Upcoming — show start date
-  const d = parseIsoDateLocal(entry.start_date);
-  if (!d) return { text: '', cls: '' };
-  const mon = d.toLocaleString('en-IN', { month: 'short' });
-  const day = d.getDate();
-  if (entry.start_date === entry.end_date) return { text: `${mon} ${day}`, cls: '' };
-  const ed = parseIsoDateLocal(entry.end_date);
-  if (!ed) return { text: `${mon} ${day}`, cls: '' };
-  const emon = ed.toLocaleString('en-IN', { month: 'short' });
-  if (mon === emon) return { text: `${mon} ${day}–${ed.getDate()}`, cls: '' };
-  return { text: `${mon} ${day} – ${emon} ${ed.getDate()}`, cls: '' };
+  renderHomeFeed();
 }
 
-function renderSusCalPill(entry, todayIso, weekEndIso) {
-  const badge = formatSusCalBadge(entry, todayIso, weekEndIso);
-  return `<span class="sus-pill ${badge.cls}" data-sus-id="${escapeHtml(entry.id)}">${entry.emoji || '📅'} ${escapeHtml(entry.name)} <span class="sus-pill-date">${badge.text}</span></span>`;
+// "Today", "Tomorrow", "Yesterday", else "Tue 29".
+function feedDayLabel(iso, todayIso) {
+  if (iso === todayIso) return 'Today';
+  if (iso === shiftIsoDays(todayIso, 1)) return 'Tomorrow';
+  if (iso === shiftIsoDays(todayIso, -1)) return 'Yesterday';
+  const d = parseIsoDateLocal(iso);
+  // Within a week either way a weekday reads best ("Thu 1"); further back,
+  // over a 30-day Wins list, "21 Sep" can't be mistaken for next week.
+  const gap = Math.abs(parseIsoDateLocal(todayIso) - d) / 86400000;
+  if (gap > 6) return `${d.getDate()} ${d.toLocaleDateString('en-IN', { month: 'short' })}`;
+  return `${d.toLocaleDateString('en-IN', { weekday: 'short' })} ${d.getDate()}`;
 }
 
-function renderSusCalDetail(entry) {
-  return `<div class="sus-pill-detail" data-sus-detail="${escapeHtml(entry.id)}">
-    <p>${escapeHtml(entry.description || '')}</p>
-    ${entry.content_hook ? `<p class="sus-pill-hook">${escapeHtml(entry.content_hook)}</p>` : ''}
-  </div>`;
+function shortDate(iso) {
+  const d = parseIsoDateLocal(iso);
+  return `${d.toLocaleDateString('en-IN', { weekday: 'short' })} ${d.getDate()}`;
 }
 
-async function renderSustainabilityCalendar() {
-  const panel = document.getElementById('homeSustainabilityPanel');
-  if (!panel) return;
+function buildComingUp(todayIso) {
+  const untilIso = shiftIsoDays(todayIso, 7);
+  const items = [];
 
-  // Load calendar data once
-  if (!state.sustainabilityCalendar) {
-    try {
-      const resp = await fetch('/data/sustainability-calendar-2026.json');
-      if (!resp.ok) throw new Error(resp.statusText);
-      state.sustainabilityCalendar = await resp.json();
-    } catch (err) {
-      console.warn('Sustainability calendar load failed:', err);
-      panel.classList.add('hidden');
-      return;
-    }
-  }
-
-  const cal = state.sustainabilityCalendar;
-  const todayIso = toISODateLocal();
-  const weekEnd = new Date();
-  weekEnd.setDate(weekEnd.getDate() + (7 - weekEnd.getDay()));
-  const weekEndIso = toISODateLocal(weekEnd);
-
-  // Active today: start <= today && end >= today
-  const activeToday = cal.filter(e => e.start_date <= todayIso && e.end_date >= todayIso);
-  // Coming this week: starts after today, starts <= weekEnd, not already active
-  const comingThisWeek = cal.filter(e => e.start_date > todayIso && e.start_date <= weekEndIso);
-
-  const allEvents = [...activeToday, ...comingThisWeek];
-  if (!allEvents.length) {
-    const future = cal.filter(e => e.start_date > todayIso).sort((a, b) => a.start_date.localeCompare(b.start_date));
-    if (future.length) {
-      const next = future[0];
-      const d = parseIsoDateLocal(next.start_date);
-      const dateStr = d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
-      panel.classList.remove('hidden');
-      panel.innerHTML = `<div class="sus-strip"><span class="sus-strip-label">Upcoming events</span><span class="sus-pill">${next.emoji || '📅'} ${escapeHtml(next.name)} <span class="sus-pill-date">${dateStr}</span></span></div>`;
-    } else {
-      panel.classList.add('hidden');
-    }
-    return;
-  }
-
-  panel.classList.remove('hidden');
-  const todayPills = activeToday.map(e => renderSusCalPill(e, todayIso, weekEndIso)).join('');
-  // Always lead with a label: the streak strip sits directly above, and without
-  // a header the events run straight on from it (26 Aug 2026).
-  const leadLabel = `<span class="sus-strip-label">${activeToday.length ? 'Events today' : 'Upcoming events'}</span>`;
-  // Only separate the two groups when both are present.
-  const weekLabel = activeToday.length && comingThisWeek.length ? '<span class="sus-strip-label">Upcoming</span>' : '';
-  const weekPills = comingThisWeek.map(e => renderSusCalPill(e, todayIso, weekEndIso)).join('');
-  const details = allEvents.map(e => renderSusCalDetail(e)).join('');
-  panel.innerHTML = `<div class="sus-strip">${leadLabel}${todayPills}${weekLabel}${weekPills}</div>${details}`;
-
-  panel.onclick = (e) => {
-    const pill = e.target.closest('.sus-pill');
-    if (!pill) return;
-    const id = pill.dataset.susId;
-    const detail = panel.querySelector(`[data-sus-detail="${id}"]`);
-    if (detail) detail.classList.toggle('open');
-  };
-}
-
-function buildTimelineEvents() {
-  const todayIso = toISODateLocal();
-  const today = new Date();
-  const events = [];
-
-  // Cutoff dates
-  const daysAgo14 = new Date(today);
-  daysAgo14.setDate(today.getDate() - 14);
-  const daysAgo14Iso = toISODateLocal(daysAgo14);
-  const daysAhead7 = new Date(today);
-  daysAhead7.setDate(today.getDate() + 7);
-  const daysAhead7Iso = toISODateLocal(daysAhead7);
-
-  // Holidays (today + next 7 days)
-  getPublicHolidays().forEach(h => {
-    if (h.date >= todayIso && h.date <= daysAhead7Iso) {
-      const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      const daysUntil = Math.round((parseIsoDateLocal(h.date) - todayMidnight) / 86400000);
-      const when = daysUntil === 0 ? 'today' : daysUntil === 1 ? 'tomorrow' : `in ${daysUntil} days`;
-      events.push({
-        type: 'holiday',
-        icon: '\uD83C\uDF89',
-        text: `${h.name} ${when}`,
-        detail: formatDateForLabel(h.date),
-        date: h.date,
-        sortDate: h.date
-      });
+  holidayRuns().forEach((h) => {
+    if (h.end >= todayIso && h.date <= untilIso) {
+      const till = h.end !== h.date ? ` till ${shortDate(h.end)}` : '';
+      items.push({ date: h.date < todayIso ? todayIso : h.date, icon: '🇮🇳', text: `${h.name} · office closed${till}` });
     }
   });
-
-  // Leave events (all roles, via home_whos_out RPC) flow into the day-by-day
-  // stream under their own date. Someone out TODAY lives on the "On Leave
-  // Today" stat card instead — no duplicate feed card. Pending sick days are
-  // shown (tagged "awaiting approval") rather than invisible.
-  if (state.homePulse?.whosOut) {
-    const seenLeave = new Set();
-    state.homePulse.whosOut.forEach(r => {
-      const key = `${r.email}|${r.start_date}|${r.end_date}`;
-      if (seenLeave.has(key)) return;
-      seenLeave.add(key);
-      if (r.start_date <= todayIso && r.end_date >= todayIso) return; // on the stat card
-
-      const name = displayPersonName(r.full_name, 'Someone').split(' ')[0];
-      const sick = r.leave_type === 'SL';
-      const typeLabel = LEAVE_TYPE_LABEL[r.leave_type] || 'leave';
-      const oneDay = r.start_date === r.end_date;
-      const range = oneDay
-        ? formatDateForLabel(r.start_date)
-        : `${formatDateForLabel(r.start_date)} - ${formatDateForLabel(r.end_date)}`;
-      const halfTag = r.is_half_day ? ' · half day' : '';
-      const pendingTag = r.status === 'pending' ? ' · awaiting approval' : '';
-      const past = r.end_date < todayIso;
-      const eventDate = past ? r.end_date : r.start_date;
-      const text = past
-        ? (sick ? `${name} was out sick` : `${name} was on ${typeLabel}`)
-        : (sick ? `${name} will be out sick` : `${name} off on ${typeLabel}`);
-      events.push({
-        type: sick ? 'whos-out-sick' : 'whos-out',
-        icon: sick ? '🤒' : '🏖️',
-        text,
-        detail: `${range}${halfTag}${pendingTag}`,
-        date: eventDate,
-        sortDate: eventDate
-      });
-    });
-  }
-
-  // New team members (last 14 days)
-  state.employeeDirectory.forEach(emp => {
-    if (emp.created_at) {
-      const createdIso = toISODateLocal(new Date(emp.created_at));
-      if (createdIso >= daysAgo14Iso && createdIso <= todayIso) {
-        events.push({
-          type: 'people',
-          icon: '\uD83D\uDC4B',
-          text: `${displayPersonName(emp.full_name, 'New member')} joined the team`,
-          detail: formatDateForLabel(emp.created_at),
-          date: createdIso,
-          sortDate: createdIso
-        });
-      }
-    }
+  (typeof FESTIVALS !== 'undefined' ? FESTIVALS : []).forEach((f) => {
+    if (f.date >= todayIso && f.date <= untilIso) items.push({ date: f.date, icon: '🪔', text: f.name });
   });
 
-  // New clients (last 14 days)
-  state.clients.forEach(client => {
-    if (client.created_at) {
-      const createdIso = toISODateLocal(new Date(client.created_at));
-      if (createdIso >= daysAgo14Iso && createdIso <= todayIso) {
-        events.push({
-          type: 'client',
-          icon: '\uD83C\uDD95',
-          text: `New client: ${client.name}`,
-          detail: formatDateForLabel(client.created_at),
-          date: createdIso,
-          sortDate: createdIso
-        });
-      }
-    }
-  });
-
-  // Feature/bug requests — aggregate by day into daily digest
-  const frByDate = {};
-  state.featureRequests.forEach(fr => {
-    let dateStr, category;
-    if (fr.status === 'done') {
-      dateStr = fr.updated_at || fr.created_at;
-      category = 'shipped';
-    } else if (fr.created_at) {
-      dateStr = fr.created_at;
-      category = 'new';
-    }
-    if (!dateStr) return;
-    const dateIso = toISODateLocal(new Date(dateStr));
-    if (dateIso < daysAgo14Iso || dateIso > todayIso) return;
-    if (!frByDate[dateIso]) frByDate[dateIso] = [];
-    const typeLabel = fr.request_type === 'bug' ? 'Bug fix' : 'Feature';
-    const snippet = fr.request_text.length > 60 ? fr.request_text.slice(0, 60) + '…' : fr.request_text;
-    frByDate[dateIso].push({ category, typeLabel, snippet, author: fr.author_name, requestType: fr.request_type });
-  });
-  Object.entries(frByDate).forEach(([dateIso, items]) => {
-    const shipped = items.filter(i => i.category === 'shipped');
-    const newItems = items.filter(i => i.category === 'new');
-    const parts = [];
-    if (shipped.length) parts.push(`${shipped.length} shipped`);
-    if (newItems.length) parts.push(`${newItems.length} new`);
-    const summary = parts.join(', ');
-    // Build bullet list for expand
-    const bullets = [];
-    shipped.forEach(i => bullets.push(`<li><span class="feed-bullet-tag shipped">Shipped</span> ${escapeHtml(i.snippet)}</li>`));
-    newItems.forEach(i => bullets.push(`<li><span class="feed-bullet-tag new">New ${i.typeLabel.toLowerCase()}</span> ${escapeHtml(i.snippet)}</li>`));
-    events.push({
-      type: shipped.length ? 'feature-done' : 'feature-new',
-      icon: shipped.length ? '\u2728' : '\uD83D\uDCA1',
-      text: `Bugs & Features — ${summary}`,
-      detail: formatDateForLabel(dateIso),
-      date: dateIso,
-      sortDate: dateIso,
-      expandable: `<ul class="feed-expand-list">${bullets.join('')}</ul><a class="feed-expand-viewall" data-link="feature-requests">View all →</a>`
+  const seenLeave = new Set();
+  (state.homePulse?.whosOut || []).forEach((r) => {
+    const key = `${r.email}|${r.start_date}|${r.end_date}`;
+    if (seenLeave.has(key)) return;
+    seenLeave.add(key);
+    if (r.start_date <= todayIso) return; // out today: the stat card; already started: old news
+    if (r.start_date > untilIso) return;
+    const name = displayPersonName(r.full_name, 'Someone').split(' ')[0];
+    const sick = r.leave_type === 'SL';
+    const tail = [
+      r.start_date !== r.end_date ? `till ${shortDate(r.end_date)}` : '',
+      r.is_half_day ? 'half-day' : '',
+      r.status === 'pending' ? 'awaiting approval' : ''
+    ].filter(Boolean).join(' · ');
+    items.push({
+      date: r.start_date,
+      icon: sick ? '🤒' : '🏖️',
+      text: `${name} ${sick ? 'out sick' : 'off'}${tail ? ` · ${tail}` : ''}`,
+      title: LEAVE_TYPE_LABEL[r.leave_type] || 'leave'
     });
   });
 
-  // Colony platform updates (last 30 days)
-  const daysAgo30 = new Date(today);
-  daysAgo30.setDate(today.getDate() - 30);
-  const daysAgo30Iso = toISODateLocal(daysAgo30);
-  APP_UPDATES.forEach(u => {
-    if (u.date >= daysAgo30Iso && u.date <= todayIso) {
-      events.push({
-        type: 'platform',
-        icon: '\uD83D\uDE80',
-        text: u.text,
-        detail: formatDateForLabel(u.date),
-        date: u.date,
-        sortDate: u.date
-      });
-    }
+  // Back from leave (8 Oct 2026): the first working day after it ends.
+  const holidaySet = new Set(getPublicHolidays().map((h) => h.date));
+  const isWorkday = (iso) => { const d = new Date(`${iso}T00:00:00Z`).getUTCDay(); return d !== 0 && d !== 6 && !holidaySet.has(iso); };
+  const seenBack = new Set();
+  (state.homePulse?.whosOut || []).forEach((r) => {
+    if (r.status === 'pending') return;
+    let back = shiftIsoDays(r.end_date, 1);
+    for (let i = 0; i < 10 && !isWorkday(back); i++) back = shiftIsoDays(back, 1);
+    if (back <= todayIso || back > untilIso || r.start_date > todayIso) return;
+    const name = displayPersonName(r.full_name, 'Someone').split(' ')[0];
+    if (seenBack.has(name)) return;
+    seenBack.add(name);
+    items.push({ date: back, icon: '👋', text: `${name} is back` });
   });
 
-  // Sort by date descending
-  events.sort((a, b) => b.sortDate.localeCompare(a.sortDate));
+  // New joiners starting: first name and team (app.home_joiners_starting).
+  (state.homePulse?.joinersStarting || []).forEach((j) => {
+    const date = String(j.start_date).slice(0, 10);
+    if (date < todayIso || date > untilIso) return;
+    items.push({ date, icon: '🌱', text: `${j.first_name} joins${j.team ? ` the ${j.team} team` : ''}`, hot: date === todayIso });
+  });
 
-  return events.slice(0, 30);
+  // Thirsty Thursday every other Thursday from 8 Oct 2026 (same as the
+  // welcome email). All Hands is weekly, so it sat in the list from Tuesday
+  // on and said nothing new; dropped 29 Oct 2026 (Alex).
+  for (let d = todayIso; d <= untilIso; d = shiftIsoDays(d, 1)) {
+    const dow = new Date(`${d}T00:00:00Z`).getUTCDay();
+    if (dow === 4 && !holidaySet.has(d) && Math.round((Date.parse(d) - Date.parse('2026-10-08')) / 86400000) % 14 === 0) {
+      items.push({ date: d, icon: '🍻', text: 'Thirsty Thursday · 5:30 pm' });
+    }
+  }
+
+  // Birthdays: month-day only, the year is private (S6, 202609250002).
+  const year = Number(todayIso.slice(0, 4));
+  (state.employeeDirectory || []).forEach((e) => {
+    if (!e.birthday_md || !e.is_active) return;
+    let iso = `${year}-${e.birthday_md}`;
+    if (iso < todayIso) iso = `${year + 1}-${e.birthday_md}`;
+    if (iso > untilIso) return;
+    const name = displayPersonName(e.full_name, 'Someone').split(' ')[0];
+    items.push({ date: iso, icon: '🎂', text: iso === todayIso ? `It's ${name}'s birthday` : `${name}'s birthday`, hot: iso === todayIso });
+  });
+
+  // Work anniversaries from the day they joined Your Agency (employees.joined_on).
+  (state.employeeDirectory || []).forEach((e) => {
+    if (!e.joined_on || !e.is_active) return;
+    const md = String(e.joined_on).slice(5, 10);
+    let iso = `${year}-${md}`;
+    if (iso < todayIso) iso = `${year + 1}-${md}`;
+    const years = Number(iso.slice(0, 4)) - Number(String(e.joined_on).slice(0, 4));
+    if (iso > untilIso || years < 1) return;
+    const name = displayPersonName(e.full_name, 'Someone').split(' ')[0];
+    items.push({ date: iso, icon: '🎉', text: `${name}: ${years} year${years === 1 ? '' : 's'} at Your Agency`, hot: iso === todayIso });
+  });
+
+  // Climate calendar: dates that START in the window. A month-long campaign
+  // appears once, the week it begins, rather than every day for a month.
+  (state.sustainabilityCalendar || []).forEach((c) => {
+    if (c.start_date < todayIso || c.start_date > untilIso) return;
+    const detail = [c.description, c.content_hook].filter(Boolean).map((t) => `<p>${escapeHtml(t)}</p>`).join('');
+    items.push({ date: c.start_date, icon: c.emoji || '🌍', text: c.name, detail });
+  });
+
+  return items.sort((a, b) => a.date.localeCompare(b.date) || a.text.localeCompare(b.text));
 }
 
-const LEAVE_TYPE_LABEL = { SL: 'sick leave', PL: 'planned leave', CL: 'casual leave' };
-// (Who's-out events are built inline in buildTimelineEvents - they live in the
-// day-by-day stream, not a pinned section. Ongoing-today leave is shown on the
-// "On Leave Today" stat card instead.)
-
-// "Team pulse" — attributed task completions (visible to everyone, per the
-// team's call) and deal-flow movement (forward stages for everyone; contracted
-// deals celebrated; stalled/closed-lost stay off the feed).
-function buildTeamPulseEvents() {
-  const pulse = state.homePulse;
-  if (!pulse) return [];
-  const todayIso = toISODateLocal();
-  const events = [];
-  const nameById = new Map();
-  state.employeeDirectory.forEach(e => nameById.set(e.id, displayPersonName(e.full_name, 'Someone').split(' ')[0]));
+function buildWins(todayIso) {
+  const sinceIso = shiftIsoDays(todayIso, -30);
+  const inWindow = (iso) => iso >= sinceIso && iso <= todayIso;
+  const pulse = state.homePulse || {};
   const hidden = getHiddenEmployeeEmails();
-  const emailById = new Map();
-  state.employeeDirectory.forEach(e => emailById.set(e.id, normalizeEmail(e.email)));
+  const visiblePeople = (state.employeeDirectory || []).filter((e) => !hidden.includes(normalizeEmail(e.email)));
+  const personById = new Map(visiblePeople.map((e) => [e.id, e]));
+  const items = [];
 
-  const visibleDone = (pulse.doneTasks || []).filter(t => !hidden.includes(emailById.get(t.employee_id) || ''));
+  // Work done: one line per FINISHED week (8 Oct 2026: the daily lines
+  // took over the feed; 27 Oct: the running "This week" count read as a daily
+  // report). A week shows from the Monday after it, with its final count,
+  // dated on its Friday. The 30 days before 8 Oct are estimates ("About").
+  (pulse.workWeeks || []).forEach((w) => {
+    const start = String(w.week_start).slice(0, 10);
+    if (shiftIsoDays(start, 6) >= todayIso) return; // still running
+    const end = shiftIsoDays(start, 4);
+    if (!inWindow(end) || !(w.tasks_done > 0)) return;
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const label = `Week of ${Number(start.slice(8, 10))} ${months[Number(start.slice(5, 7)) - 1]}`;
+    items.push({ date: end, icon: '✅', low: true,
+      text: `${label} · ${w.estimated ? 'about ' : ''}${w.tasks_done} task${w.tasks_done === 1 ? '' : 's'} done by ${w.people} ${w.people === 1 ? 'person' : 'people'}` });
+  });
 
-  // Today's completions — attributed, expandable to task titles
-  const doneToday = visibleDone.filter(t => toISODateLocal(new Date(t.updated_at)) === todayIso);
-  if (doneToday.length) {
-    const byPerson = new Map();
-    doneToday.forEach(t => {
-      const n = nameById.get(t.employee_id) || 'Someone';
-      if (!byPerson.has(n)) byPerson.set(n, []);
-      byPerson.get(n).push(t.task_title);
-    });
-    const names = [...byPerson.keys()];
-    const lead = names.slice(0, 3).join(', ') + (names.length > 3 ? ` +${names.length - 3}` : '');
-    const bullets = [];
-    byPerson.forEach((titles, n) => {
-      titles.slice(0, 4).forEach(title => bullets.push(`<li><span class="feed-bullet-tag shipped">${escapeHtml(n)}</span> ${escapeHtml(title)}</li>`));
-      if (titles.length > 4) bullets.push(`<li><span class="feed-bullet-tag shipped">${escapeHtml(n)}</span> +${titles.length - 4} more</li>`);
-    });
-    events.push({
-      type: 'pulse-today', icon: '✅',
-      text: `${doneToday.length} task${doneToday.length > 1 ? 's' : ''} shipped today — ${lead}`,
-      detail: 'tap to see what got done', date: todayIso, sortDate: `9-${todayIso}`,
-      expandable: `<ul class="feed-expand-list">${bullets.slice(0, 16).join('')}</ul>`
-    });
+  // A day earns its own line only when it stands out: the busiest day in the
+  // window, and only if it beat the average working day by a clear margin.
+  const days = (pulse.workDone || []).filter((w) => w.tasks_done > 0 && inWindow(String(w.day).slice(0, 10)));
+  if (days.length >= 5) {
+    const avg = days.reduce((n, w) => n + w.tasks_done, 0) / days.length;
+    const best = days.reduce((a, b) => (b.tasks_done > a.tasks_done ? b : a));
+    if (best.tasks_done >= avg * 1.3) {
+      items.push({ date: String(best.day).slice(0, 10), icon: '⚡', hot: true,
+        text: `Busiest day this month: ${best.estimated ? 'about ' : ''}${best.tasks_done} tasks done` });
+    }
   }
 
-  // Week momentum — per-person counts
-  if (visibleDone.length) {
-    const counts = new Map();
-    visibleDone.forEach(t => {
-      const n = nameById.get(t.employee_id) || 'Someone';
-      counts.set(n, (counts.get(n) || 0) + 1);
-    });
-    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-    const bullets = ranked.map(([n, c]) => `<li><span class="feed-bullet-tag shipped">${c}</span> ${escapeHtml(n)}</li>`);
-    events.push({
-      type: 'pulse-week', icon: '🔥',
-      text: `Team shipped ${visibleDone.length} tasks this week`,
-      detail: `${ranked.length} people contributing`, date: todayIso, sortDate: `8-${todayIso}`,
-      expandable: `<ul class="feed-expand-list">${bullets.join('')}</ul>`
-    });
+  // Client of the week: the client with the most hours allocated this week
+  // (26 Oct 2026; it used to count people). Same hours as the Hours
+  // card: % of a full week x WORK_HOURS_PER_WEEK. Misc, BD and Your Agency's own
+  // buckets never count.
+  const clientHours = new Map();
+  (state.homeAllocations || []).forEach((a) => {
+    const c = a.project?.client;
+    if (!c?.name || c.is_active === false || !(a.allocation_percent > 0) || !personById.has(a.employee_id)) return;
+    if (NON_CLIENT_BUCKETS.includes(String(c.name).trim().toLowerCase()) || /^youragency$/i.test(c.name.trim())) return;
+    clientHours.set(c.name, (clientHours.get(c.name) || 0) + (a.allocation_percent / 100) * WORK_HOURS_PER_WEEK);
+  });
+  const top = [...clientHours.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (top && top[1] >= 10) {
+    items.push({ date: todayIso, icon: '🎯', text: `Client of the week: ${top[0]} · ${Math.round(top[1])}h`, link: 'client-projects' });
   }
 
-  // Deal movement — forward stages only; contracted gets the confetti
+  // Streak milestones on the day they land (computed in loadStreaks). 50-day
+  // multiples are covered by the half-day reward line below.
+  (state.streakMilestoneWins || []).forEach((m) => {
+    const person = personById.get(m.employee_id);
+    if (!person || !inWindow(m.date)) return;
+    items.push({ date: m.date, icon: '🔥', text: `${displayPersonName(person.full_name, 'Someone').split(' ')[0]} reached a ${m.milestone}-day streak` });
+  });
+
+  (pulse.streakRewards || []).forEach((r) => {
+    const person = personById.get(r.employee_id);
+    const date = String(r.earned_on).slice(0, 10);
+    if (!person || !inWindow(date)) return;
+    items.push({ date, icon: '🔥', text: `${displayPersonName(person.full_name, 'Someone').split(' ')[0]} hit ${r.milestone} days and earned a half-day off`, hot: true });
+  });
+
+  // A count per client, never titles: most people can't see most briefs
+  // (app.home_briefs_delivered, 202609280004).
+  (pulse.briefsDelivered || []).forEach((b) => {
+    const date = String(b.last_day).slice(0, 10);
+    if (!inWindow(date)) return;
+    items.push({ date, icon: '📦', text: `${b.delivered} brief${b.delivered === 1 ? '' : 's'} delivered for ${b.org}`, link: 'briefs-pipeline' });
+  });
+
+  // Deals: the latest forward move per deal in the window (rows arrive newest
+  // first). Stalled / lost never make the feed.
   const FORWARD_STAGES = { qualified: 'Qualified', discovery: 'Discovery', proposal: 'Proposal', negotiated: 'Negotiation' };
   const seenDeal = new Set();
-  (pulse.dealMoves || []).forEach(m => {
-    const dealName = m.deal?.deal_name || '';
-    if (!dealName) return;
-    const moveIso = toISODateLocal(new Date(m.entered_at));
-    const key = `${dealName}|${moveIso}`;
-    if (seenDeal.has(key)) return; // latest stage per deal per day (rows arrive desc)
-    seenDeal.add(key);
+  // A signed deal and the client it becomes are one win, not two lines
+  // (26 Oct 2026): remembered here so the new-client line can merge.
+  const signedWins = [];
+  (pulse.dealMoves || []).forEach((m) => {
+    const dealName = m.deal?.deal_name;
+    if (!dealName || seenDeal.has(dealName)) return;
+    // A deal lost or stalled since is not a win, even if the change that
+    // killed it never reached deal_stage_history (Ajinomoto, 30 Sep 2026).
+    if (['closedlost', 'stalled'].includes(m.deal?.stage)) return;
+    // Adding a deal writes its first stage row at +0s, so every new deal used to
+    // post "moved to Qualified" into Wins (7 Oct 2026). Landing in a
+    // stage because you were just typed in is data entry, not a win; a move that
+    // happens later is real progress and still counts.
+    const createdAt = m.deal?.created_at ? Date.parse(m.deal.created_at) : null;
+    if (createdAt && Date.parse(m.entered_at) - createdAt < 120000) return;
+    const date = toISODateLocal(new Date(m.entered_at));
+    if (!inWindow(date)) return;
     if (m.stage === 'contracted') {
-      events.push({
-        type: 'deal-won', icon: '🎉',
-        text: `${dealName} signed — new business!`,
-        detail: formatDateForLabel(moveIso), date: moveIso, sortDate: `7-${moveIso}`
-      });
+      seenDeal.add(dealName);
+      const win = { date, icon: '🎉', text: `${dealName} signed`, hot: true };
+      items.push(win);
+      signedWins.push({ win, clientId: m.deal?.client_id || null, name: String(dealName).trim().toLowerCase() });
     } else if (FORWARD_STAGES[m.stage]) {
-      events.push({
-        type: 'deal-move', icon: '🤝',
-        text: `${dealName} moved to ${FORWARD_STAGES[m.stage]}`,
-        detail: formatDateForLabel(moveIso), date: moveIso, sortDate: `6-${moveIso}`
-      });
+      seenDeal.add(dealName);
+      items.push({ date, icon: '🤝', text: `${dealName} moved to ${FORWARD_STAGES[m.stage]}` });
     }
   });
 
-  events.sort((a, b) => b.sortDate.localeCompare(a.sortDate));
-  return events.slice(0, 8);
-}
-
-// Personal "Your day" strip — own tasks due + own allocation this week
-function buildYourDayEvent() {
-  const pulse = state.homePulse;
-  if (!pulse) return null;
-  const due = pulse.myTasksDueToday || 0;
-  let myAllocPct = 0;
-  (state.homeAllocations || []).forEach(a => {
-    if (a.employee_id === state.currentEmployeeId) myAllocPct += (a.allocation_percent || 0);
+  // Joined = the day their access was switched on, not their first sign-in
+  // (8 Oct 2026: Siva "joined Art" four days before his start).
+  visiblePeople.forEach((e) => {
+    if (!e.activated_at || e.setup_pending || e.is_active === false) return;
+    const date = toISODateLocal(new Date(e.activated_at));
+    if (!inWindow(date)) return;
+    items.push({ date, icon: '👋', text: `${displayPersonName(e.full_name, 'Someone')} joined${e.department?.name ? ` ${e.department.name}` : ''}` });
   });
-  const bits = [];
-  if (due > 0) bits.push(`${due} task${due > 1 ? 's' : ''} due today`);
-  else bits.push('no tasks due today');
-  if (myAllocPct > 0) bits.push(`you're ${Math.round(myAllocPct)}% allocated this week`);
-  return {
-    type: 'your-day', icon: '👋',
-    text: `Your day — ${bits.join(' · ')}`,
-    detail: 'open My Work →', link: 'daily-tasklist',
-    date: toISODateLocal(), sortDate: ''
-  };
-}
 
-function renderBirthdayStrip() {
-  const panel = document.getElementById('homeBirthdayPanel');
-  if (!panel) return;
+  (state.clients || []).forEach((c) => {
+    if (!c.created_at || c.is_active === false) return;
+    const date = toISODateLocal(new Date(c.created_at));
+    if (!inWindow(date)) return;
+    const same = signedWins.find((w) => (w.clientId && w.clientId === c.id) || w.name === String(c.name || '').trim().toLowerCase());
+    if (same) { same.win.text = `New client signed: ${c.name}`; return; }
+    items.push({ date, icon: '🆕', text: `New client: ${c.name}` });
+  });
 
-  const todayIso = toISODateLocal();
-  const todayMD = todayIso.slice(5); // "MM-DD"
-  const today = new Date();
-
-  // Collect birthdays from employee directory
-  const birthdays = state.employeeDirectory
-    .filter((e) => e.date_of_birth && e.is_active)
-    .map((e) => {
-      const md = e.date_of_birth.slice(5); // "MM-DD"
-      const thisYear = new Date(today.getFullYear(), parseInt(md.slice(0, 2)) - 1, parseInt(md.slice(3)));
-      if (thisYear < today && md !== todayMD) {
-        thisYear.setFullYear(thisYear.getFullYear() + 1);
-      }
-      const diffDays = Math.round((thisYear - new Date(today.getFullYear(), today.getMonth(), today.getDate())) / 86400000);
-      return { name: displayPersonName(e.full_name, 'Employee'), md, diffDays, date: thisYear };
-    })
-    .filter((b) => b.diffDays >= 0 && b.diffDays <= 7)
-    .sort((a, b) => a.diffDays - b.diffDays);
-
-  if (!birthdays.length) {
-    panel.classList.add('hidden');
-    return;
+  // Bugs & Features: shipped requests, newest first.
+  const closed = (state.featureRequests || [])
+    .filter((fr) => fr.status === 'done' && inWindow(toISODateLocal(new Date(fr.updated_at || fr.created_at))))
+    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  // Home keeps the count; the named list lives on the secret page.
+  if (closed.length) {
+    const date = toISODateLocal(new Date(closed[0].updated_at || closed[0].created_at));
+    items.push({ date, icon: '✨', text: `${closed.length} shipped on Bugs & Features`, link: 'feature-requests' });
   }
 
-  const hasToday = birthdays.some((b) => b.diffDays === 0);
-  panel.classList.remove('hidden');
-  const pills = birthdays.map((b) => {
-    const firstName = b.name.split(' ')[0];
-    const isToday = b.diffDays === 0;
-    const dateStr = b.date.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
-    const label = isToday ? `🎂 Today is ${escapeHtml(firstName)}'s birthday!` : `🎂 ${escapeHtml(firstName)} <span class="bday-pill-date">${dateStr}</span>`;
-    return `<span class="bday-pill${isToday ? ' bday-today' : ''}">${label}</span>`;
-  }).join('');
+  // Within a day: headline wins first, the day's work count last.
+  const rank = (it) => (it.hot ? 0 : it.low ? 2 : 1);
+  return items.sort((a, b) => b.date.localeCompare(a.date) || rank(a) - rank(b) || a.text.localeCompare(b.text));
+}
 
-  const stripLabel = hasToday ? 'Birthdays' : 'Upcoming birthdays';
-  panel.innerHTML = `<div class="bday-strip"><span class="bday-strip-label">${stripLabel}</span>${pills}</div>`;
+// Your day: folded into the date line rather than a card of its own.
+// @circle-omit the secret page is Colony's own
+// ── The secret page (8 Oct 2026) ───────────────────────────────────
+// "What if there was a secret button on the home page?" The date at the top of
+// Home opens it. The celebrate-never-rank rule holds: totals, records and fun
+// facts, never a comparison that shows someone's slow week. The one exception
+// Alex chose is the streak club, where everyone's streak is the point.
+document.getElementById('homeGreeting')?.addEventListener('click', () => navigateToScreen('after-hours'));
+document.addEventListener('click', (e) => { if (e.target.closest('[data-secret-back]')) navigateToScreen('home-feed'); });
+
+// The zine (8 Oct 2026, after three looks and a data-points round):
+// eight spreads scrolled top to bottom, one picture each. Age, words, clock,
+// record week, streak club, complaints department, leave, the river. Totals
+// come from app.secret_page_stats (counts only); streaks from the leaderboard
+// Home already computes. Each spread is drawn on a 1280×800 frame that scales
+// with the page (zu() turns frame pixels into container units).
+const ZINE = { ink: '#141414', paper: '#e9e7e1', red: '#ff6350', fluo: '#e8ff47', grey: '#8a8780', soft: '#c9c6be' };
+const ZINE_TINTS = ['#f2c3b8', '#cfe0d6', '#e7d6a8', '#c9cfe8', '#e4c6dc', '#d8e2b0', '#f0d0a0', '#bfdde0', '#e0c0c0', '#d3d3c3'];
+const zu = (px) => `${+(px / 12.8).toFixed(3)}cqw`;
+const zMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const zNice = (iso) => `${Number(iso.slice(8, 10))} ${zMonths[Number(iso.slice(5, 7)) - 1]}`;
+
+function zineSpread(n, label, dark, inner, aria) {
+  return `<section class="zine-spread ${dark ? 'is-ink' : 'is-paper'}" aria-label="${escapeHtml(aria)}">${inner}<span class="zine-folio" style="left:${zu(48)};bottom:${zu(28)};font-size:${zu(13)}">COLONY, AFTER HOURS · ${label}</span></section>`;
+}
+function zineTape(x, y, rot, text, bg = ZINE.paper, fg = ZINE.ink, size = 15) {
+  return `<span class="zine-tape" style="left:${zu(x)};top:${zu(y)};transform:rotate(${rot}deg);background:${bg};color:${fg};font-size:${zu(size)};padding:${zu(6)} ${zu(14)}">${escapeHtml(text)}</span>`;
+}
+// A face: their Google photo, or initials on a tint when there is none.
+function zineFace(svgX, svgY, r, person, i, dim) {
+  const photo = person?.photo;
+  const id = `zf${String(person?.id || i).replace(/[^a-z0-9]/gi, '').slice(0, 12)}${Math.round(svgX)}`;
+  if (photo) {
+    return `<clipPath id="${id}"><circle cx="${svgX}" cy="${svgY}" r="${r}"/></clipPath><image href="${escapeHtml(photo)}" x="${svgX - r}" y="${svgY - r}" width="${r * 2}" height="${r * 2}" clip-path="url(#${id})" preserveAspectRatio="xMidYMid slice" referrerpolicy="no-referrer"${dim ? ' class="zine-dim"' : ''}/><circle cx="${svgX}" cy="${svgY}" r="${r}" fill="none" stroke="${ZINE.ink}" stroke-width="2"/>`;
+  }
+  return `<circle cx="${svgX}" cy="${svgY}" r="${r}" fill="${dim ? '#6b6964' : ZINE_TINTS[i % ZINE_TINTS.length]}" stroke="${ZINE.ink}" stroke-width="2"/><text x="${svgX}" y="${svgY + r * 0.32}" text-anchor="middle" font-family="Anton, sans-serif" font-size="${Math.round(r * 0.82)}" fill="${ZINE.ink}">${escapeHtml(person?.short || '?')}</text>`;
+}
+
+function zineAge(d) {
+  const a = d.anniversary;
+  if (!a) return '';
+  const cx = 930, cy = 380;
+  const into = 365 - a.days;
+  const rings = [...Array(a.years)].map((_, k) => {
+    const r = 110 + k * 40 * (2 / Math.max(a.years - 1, 2));
+    const frac = k === a.years - 1 ? into / 365 : 1;
+    const c = 2 * Math.PI * r; const now = k === a.years - 1;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#242320" stroke-width="22"/><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${now ? ZINE.red : '#3a3936'}" stroke-width="22" stroke-dasharray="${(c * frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${cx} ${cy})"/><text x="${cx + 8}" y="${cy - r + 5}" font-family="'Special Elite', monospace" font-size="11" fill="${now ? '#0e0d0c' : '#9a978f'}">YEAR ${k + 1}</text>`;
+  }).join('');
+  const rOuter = 110 + (a.years - 1) * 40 * (2 / Math.max(a.years - 1, 2));
+  const ea = (-90 + 360 * into / 365) * Math.PI / 180;
+  const ex = cx + rOuter * Math.cos(ea), ey = cy + rOuter * Math.sin(ea);
+  const nth = a.years === 1 ? 'one' : a.years === 2 ? 'two' : a.years === 3 ? 'three' : a.years === 4 ? 'four' : a.years === 5 ? 'five' : String(a.years);
+  const founders = a.founders.length > 1 ? `${a.founders.slice(0, -1).join(', ')} and ${a.founders[a.founders.length - 1]}` : a.founders[0];
+  return zineSpread(1, 'AGE', true, `
+    ${zineTape(48, 44, -2, 'THIS COLONY HAS BEEN ALIVE FOR')}
+    <span class="zine-anton" style="left:${zu(40)};top:${zu(120)};font-size:${zu(330)};color:${ZINE.paper}">${a.age.toLocaleString('en-IN')}</span>
+    <span class="zine-marker" style="left:${zu(520)};top:${zu(400)};font-size:${zu(74)};color:${ZINE.red};transform:rotate(-6deg)">days</span>
+    <span class="zine-type" style="left:${zu(52)};top:${zu(470)};font-size:${zu(26)};color:${ZINE.soft}" data-zine-tick>+ 0 h 00 m <span style="color:${ZINE.paper}">00 s</span></span>
+    <svg class="zine-svg" viewBox="0 0 1280 800" role="img" aria-label="${a.years} rings, one per year; the last is ${Math.round(into / 3.65)} percent closed, ${a.days} days to go.">${rings}
+      <circle cx="${ex.toFixed(0)}" cy="${ey.toFixed(0)}" r="7" fill="${ZINE.fluo}"/>
+      <text x="${(ex - 12).toFixed(0)}" y="${(ey - 18).toFixed(0)}" text-anchor="end" font-family="'Special Elite', monospace" font-size="14" fill="${ZINE.fluo}">${escapeHtml(zNice(a.start).toUpperCase())}</text>
+      <text x="${cx}" y="${cy + 16}" text-anchor="middle" font-family="Anton, sans-serif" font-size="68" fill="${ZINE.paper}">${a.days === 0 ? '🎂' : a.days}</text>
+      <text x="${cx}" y="${cy + 44}" text-anchor="middle" font-family="'Special Elite', monospace" font-size="15" fill="${ZINE.soft}">${a.days === 0 ? `${nth} today` : `day${a.days === 1 ? '' : 's'} to ${nth}`}</text>
+    </svg>
+    <p class="zine-type" style="left:${zu(52)};top:${zu(590)};width:${zu(620)};font-size:${zu(19)};line-height:1.5;color:${ZINE.soft}">Born ${escapeHtml(zNice(a.start))} ${a.start.slice(0, 4)} to ${escapeHtml(founders)}. <mark style="background:${ZINE.fluo};color:${ZINE.ink};padding:0 ${zu(4)}">${d.stats.tasks_logged.toLocaleString('en-IN')} tasks</mark> logged since we started counting.</p>`,
+  `Colony is ${a.age} days old`);
+}
+
+function zineWords(d) {
+  const words = d.stats.words || [];
+  if (words.length < 6) return '';
+  const max = words[0].n, min = words[words.length - 1].n;
+  const styles = [
+    ["'Anton', sans-serif", ZINE.ink, ZINE.paper, 'none', 1],
+    ["'Abril Fatface', serif", '#fff', ZINE.ink, 'none', 0.9],
+    ["'Bungee', sans-serif", ZINE.red, ZINE.ink, 'none', 0.75],
+    ["'Special Elite', monospace", ZINE.paper, ZINE.ink, `2px solid ${ZINE.ink}`, 0.8],
+    ["'Rubik Mono One', sans-serif", ZINE.fluo, ZINE.ink, 'none', 0.62],
+    ["'Playfair Display', serif", 'transparent', ZINE.ink, 'none', 0.95],
+    ["'Permanent Marker', cursive", '#fff', ZINE.red, 'none', 0.85]
+  ];
+  const rots = [-5, 3, -2, 4, -3, 2, -4];
+  // A fixed shuffle so the wall reads like a collage, not a sorted list.
+  const order = words.map((w, i) => ({ ...w, k: (i * 7 + 3) % words.length })).sort((a, b) => a.k - b.k);
+  const spans = order.map((w, i) => {
+    const [font, bg, fg, border, k] = styles[i % styles.length];
+    const size = (22 + ((w.n - min) / Math.max(max - min, 1)) * 78) * k;
+    let word = w.word.replace(/_/g, ' ');
+    if (word === 'example materials') word = 'Example Materials';
+    if (/Anton|Bungee/.test(font)) word = word.toUpperCase();
+    return `<span style="font-family:${font};${/Playfair/.test(font) ? 'font-style:italic;font-weight:900;' : ''}font-size:${zu(size)};background:${bg};color:${fg};border:${border};padding:${zu(6)} ${zu(10)} ${zu(4)};transform:rotate(${rots[i % rots.length]}deg)" title="${w.n} times">${escapeHtml(word)}</span>`;
+  }).join('');
+  return zineSpread(2, 'WORDS', false, `
+    ${zineTape(48, 40, -1.5, 'WHAT WE KEPT TYPING · LAST 30 DAYS OF TASK TITLES', ZINE.ink, ZINE.paper)}
+    <div class="zine-wall" style="left:${zu(60)};top:${zu(110)};width:${zu(1160)};height:${zu(600)};gap:${zu(18)} ${zu(22)}">${spans}</div>
+    ${zineTape(930, 722, 2, 'bigger = said more often', ZINE.fluo, ZINE.ink, 13)}`,
+  `The words we typed most: ${words.slice(0, 5).map((w) => w.word.replace(/_/g, ' ')).join(', ')}`);
+}
+
+function zineClock(d) {
+  const hours = d.stats.hours || {};
+  const counts = Object.entries(hours).map(([h, n]) => [Number(h), n]);
+  if (!counts.length) return '';
+  const max = Math.max(...counts.map(([, n]) => n));
+  const peak = counts.find(([, n]) => n === max)[0];
+  const cx = 400, cy = 405, r0 = 64, L = 210;
+  let rays = '';
+  for (let h = 0; h < 24; h++) {
+    const a = (h * 15 + 90) * Math.PI / 180; const n = hours[h] || 0;
+    const l = r0 + (n ? (L * n) / max : 4);
+    const night = h >= 22 || h < 6;
+    const col = h === peak ? ZINE.fluo : night ? ZINE.red : ZINE.paper;
+    const op = h === peak || (night && n) ? 1 : n ? 0.85 : 0.18;
+    rays += `<line x1="${(cx + r0 * Math.cos(a)).toFixed(0)}" y1="${(cy + r0 * Math.sin(a)).toFixed(0)}" x2="${(cx + l * Math.cos(a)).toFixed(0)}" y2="${(cy + l * Math.sin(a)).toFixed(0)}" stroke="${col}" stroke-opacity="${op}" stroke-width="15" stroke-linecap="round"><title>${h}:00 · ${n}</title></line>`;
+  }
+  const labs = [[0, 'MIDNIGHT'], [6, '6 AM'], [12, 'NOON'], [18, '6 PM']].map(([h, t]) => {
+    const a = (h * 15 + 90) * Math.PI / 180;
+    return `<text x="${(cx + (r0 + L + 48) * Math.cos(a)).toFixed(0)}" y="${(cy + (r0 + L + 44) * Math.sin(a) + 5).toFixed(0)}" text-anchor="middle" font-family="'Special Elite', monospace" font-size="14" fill="${ZINE.grey}">${t}</text>`;
+  }).join('');
+  const clock12 = (h) => `${h % 12 || 12} ${h < 12 ? 'AM' : 'PM'}`;
+  const evening = counts.filter(([h]) => h >= 16 && h <= 21).sort((a, b) => b[1] - a[1])[0];
+  const late = counts.filter(([h]) => h >= 22).reduce((s, [, n]) => s + n, 0);
+  const early = counts.filter(([h]) => h < 9).reduce((s, [, n]) => s + n, 0);
+  return zineSpread(3, 'CLOCK', true, `
+    ${zineTape(48, 40, -2, 'WHEN THE COLONY WAKES UP')}
+    <svg class="zine-svg" viewBox="0 0 1280 800" role="img" aria-label="Tasks added by hour of the day. Busiest hour ${clock12(peak)} with ${max}.">
+      <circle cx="${cx}" cy="${cy}" r="${r0 - 12}" fill="none" stroke="#3a3936" stroke-width="2"/>
+      <text x="${cx}" y="${cy + 6}" text-anchor="middle" font-family="'Special Elite', monospace" font-size="15" fill="${ZINE.grey}">IST</text>${rays}${labs}
+    </svg>
+    <div class="zine-col" style="left:${zu(790)};top:${zu(120)};width:${zu(440)};gap:${zu(30)}">
+      <div><div class="zine-anton-i" style="font-size:${zu(120)};color:${ZINE.fluo}">${clock12(peak)}</div>
+      <div style="font-size:${zu(18)};color:${ZINE.soft};margin-top:${zu(8)}">is when we are loudest: ${max} tasks added in that one hour, this month</div></div>
+      ${d.stats.median_first ? `<div style="font-size:${zu(18)};line-height:1.5;color:${ZINE.soft}">A typical first move lands at <b style="color:${ZINE.paper};font-size:${zu(24)};font-weight:400">${escapeHtml(d.stats.median_first)}</b>.${evening ? ` Second wind at <b style="color:${ZINE.paper};font-size:${zu(24)};font-weight:400">${clock12(evening[0]).toLowerCase()}</b>.` : ''}</div>` : ''}
+      ${late ? `<div style="border-top:2px dashed #3a3936;padding-top:${zu(22)}">
+        <div style="font-family:'Permanent Marker', cursive;font-size:${zu(40)};color:${ZINE.red};transform:rotate(-2deg)">the night shift</div>
+        <div style="font-size:${zu(18)};color:${ZINE.soft};margin-top:${zu(6)}">${late} tasks added after 10 pm.${early ? ` ${early} before 9 am.` : ''} You know who you are.</div></div>` : ''}
+    </div>`,
+  `Busiest hour: ${clock12(peak)}`);
+}
+
+function zineRecord(d) {
+  const rec = d.stats.record_week; if (!rec) return '';
+  const now = d.stats.this_week || 0;
+  const beaten = now >= rec.n && rec.week === d.weekStart;
+  const top = 110, bot = 610, tx = 360;
+  const scaleMax = Math.ceil((Math.max(rec.n, now) * 1.12) / 20) * 20;
+  const ty = (v) => bot - ((bot - top) * v) / scaleMax;
+  let ticks = '';
+  for (let v = 0; v <= scaleMax; v += 20) ticks += `<line x1="${tx + 34}" y1="${ty(v).toFixed(0)}" x2="${tx + 52}" y2="${ty(v).toFixed(0)}" stroke="${ZINE.ink}" stroke-width="2"/><text x="${tx + 60}" y="${(ty(v) + 5).toFixed(0)}" font-family="'Special Elite', monospace" font-size="14" fill="${ZINE.ink}">${v}</text>`;
+  const togo = Math.max(rec.n + 1 - now, 0);
+  const recLabel = beaten ? 'NEW RECORD' : `RECORD ${rec.n}`;
+  return zineSpread(4, 'RECORD', false, `
+    ${zineTape(48, 40, -1.5, 'THE WEEK TO BEAT', ZINE.ink, ZINE.paper)}
+    <svg class="zine-svg" viewBox="0 0 1280 800" role="img" aria-label="This week ${now} tasks done; the record is ${rec.n}, week of ${zNice(rec.week)}.">
+      <rect x="${tx - 30}" y="${top - 30}" width="60" height="${bot - top + 60}" rx="30" fill="#fff" stroke="${ZINE.ink}" stroke-width="4"/>
+      <circle cx="${tx}" cy="${bot + 70}" r="62" fill="${ZINE.red}" stroke="${ZINE.ink}" stroke-width="4"/>
+      <rect x="${tx - 16}" y="${ty(now).toFixed(0)}" width="32" height="${(bot + 30 - ty(now)).toFixed(0)}" fill="${ZINE.red}"/>${ticks}
+      <line x1="${tx - 120}" y1="${ty(rec.n).toFixed(0)}" x2="${tx + 46}" y2="${ty(rec.n).toFixed(0)}" stroke="${ZINE.ink}" stroke-width="3" stroke-dasharray="10 7"/>
+      <text x="${tx - 128}" y="${(ty(rec.n) - 12).toFixed(0)}" text-anchor="end" font-family="Anton, sans-serif" font-size="34" fill="${ZINE.ink}">${recLabel}</text>
+      <text x="${tx - 128}" y="${(ty(rec.n) + 18).toFixed(0)}" text-anchor="end" font-family="'Special Elite', monospace" font-size="15" fill="${ZINE.ink}">week of ${escapeHtml(zNice(rec.week))}</text>
+      ${Math.abs(ty(now) - ty(rec.n)) > 50 ? `<text x="${tx - 128}" y="${(ty(now) + 12).toFixed(0)}" text-anchor="end" font-family="'Permanent Marker', cursive" font-size="30" fill="${ZINE.red}">this week: ${now}</text>` : ''}
+    </svg>
+    <div class="zine-col" style="left:${zu(700)};top:${zu(150)};width:${zu(520)}">
+      <div class="zine-anton-i" style="font-size:${zu(230)};line-height:.82;color:${ZINE.ink}">${beaten ? now : togo}</div>
+      <div class="zine-anton-i" style="font-size:${zu(64)};line-height:1;color:${ZINE.ink};text-transform:uppercase">${beaten ? 'tasks. a new record' : `task${togo === 1 ? '' : 's'} to go`}</div>
+      <div style="font-size:${zu(20)};line-height:1.5;margin-top:${zu(26)};max-width:${zu(440)}">${beaten ? 'This week is the most we have ever finished. That belongs to all of us.' : `The most we have ever finished in one week is ${rec.n}. Beat it and the record belongs to all of us.`}</div>
+      <span style="align-self:flex-start;margin-top:${zu(24)};background:${ZINE.fluo};padding:${zu(6)} ${zu(12)};font-size:${zu(15)};transform:rotate(-1.5deg)">the mercury rises every time anyone ticks a task</span>
+    </div>`,
+  `Record week: ${rec.n} tasks; this week ${now}`);
+}
+
+function zineCandle(x, base, p, i) {
+  const n = p.count; const bh = 150, bw = 50;
+  let out = `<rect x="${x - bw / 2}" y="${base - bh}" width="${bw}" height="${bh}" rx="4" fill="${n ? ZINE.paper : '#5a5853'}"/>`;
+  out += `<path d="M${x - bw / 2} ${base - bh + 6} q 8 10 0 20" fill="none" stroke="${n ? '#cfccc4' : '#4a4844'}" stroke-width="5" stroke-linecap="round"/>`;
+  out += zineFace(x, base - bh / 2 - 12, 22, p, i, !n);
+  out += `<line x1="${x}" y1="${base - bh}" x2="${x}" y2="${base - bh - 12}" stroke="#0a0a0a" stroke-width="3"/>`;
+  if (n) {
+    const fh = Math.min(26 + n * 2.6, 110); const t = base - bh - 12;
+    out += `<g class="zine-flame" style="transform-origin:${x}px ${base - bh - 10}px;animation-duration:${(1.1 + 0.1 * (i % 4)).toFixed(1)}s"><path d="M${x} ${t - fh} C ${x + fh * 0.42} ${t - fh * 0.45}, ${x + fh * 0.3} ${t + 2}, ${x} ${t + 2} C ${x - fh * 0.3} ${t + 2}, ${x - fh * 0.42} ${t - fh * 0.45}, ${x} ${t - fh} Z" fill="${ZINE.red}"/><path d="M${x} ${t - fh * 0.55} C ${x + fh * 0.18} ${t - fh * 0.3}, ${x + fh * 0.12} ${t}, ${x} ${t} C ${x - fh * 0.12} ${t}, ${x - fh * 0.18} ${t - fh * 0.3}, ${x} ${t - fh * 0.55} Z" fill="${ZINE.fluo}"/></g>`;
+    out += `<text x="${x}" y="${base - 14}" text-anchor="middle" font-family="Anton, sans-serif" font-size="34" fill="${ZINE.ink}">${n}</text>`;
+  } else {
+    out += `<path class="zine-smoke" d="M${x} ${base - bh - 14} c -8 -10 8 -16 0 -28 c -8 -10 6 -16 0 -26" fill="none" stroke="${ZINE.grey}" stroke-width="2" style="animation-duration:${(2.4 + 0.3 * (i % 3)).toFixed(1)}s"/>`;
+  }
+  out += `<text x="${x}" y="${base + 24}" text-anchor="middle" font-family="'Special Elite', monospace" font-size="14" fill="${n ? ZINE.paper : ZINE.grey}">${escapeHtml(p.first)}</text>`;
+  return out;
+}
+
+function zineStreaks(d) {
+  const lit = d.people.filter((p) => p.count > 0).sort((a, b) => b.count - a.count || a.first.localeCompare(b.first));
+  const unlit = d.people.filter((p) => !p.count).sort((a, b) => a.first.localeCompare(b.first));
+  if (!d.people.length) return '';
+  // Rows of up to 10; lit candles first, unlit on their own rows underneath.
+  const rowsOf = (list) => { const r = []; for (let i = 0; i < list.length; i += 10) r.push(list.slice(i, i + 10)); return r; };
+  const litRows = rowsOf(lit), unlitRows = rowsOf(unlit);
+  const rowH = 290; const firstBase = 400;
+  const H = Math.max(800, firstBase + (litRows.length + unlitRows.length - 1) * rowH + 100);
+  let svg = ''; let row = 0; let k = 0;
+  const drawRow = (list) => {
+    const step = Math.min(145, 1180 / Math.max(list.length, 1));
+    const start = 640 - (step * (list.length - 1)) / 2;
+    list.forEach((p, i) => { svg += zineCandle(start + i * step, firstBase + row * rowH, p, k++); });
+    row++;
+  };
+  litRows.forEach(drawRow);
+  const divider = firstBase + row * rowH - rowH + 32;
+  if (unlitRows.length && litRows.length) svg += `<line x1="40" y1="${divider}" x2="1240" y2="${divider}" stroke="#2a2926" stroke-width="2"/>`;
+  unlitRows.forEach(drawRow);
+  const note = unlitRows.length ? `<span class="zine-type" style="right:${zu(48)};bottom:${zu(28)};font-size:${zu(14)};color:${ZINE.grey}">unlit, for now · one finished task on a working day lights yours</span>` : '';
+  return `<section class="zine-spread is-ink" style="aspect-ratio:1280/${H}" aria-label="Streak club">
+    <span class="zine-marker" style="left:${zu(48)};top:${zu(30)};font-size:${zu(54)};color:${ZINE.paper};transform:rotate(-2deg)">streak club</span>
+    ${zineTape(370, 46, 1.5, "THE HACK: DOWN HERE YOU CAN SEE EVERYONE'S STREAK", ZINE.fluo, ZINE.ink, 14)}
+    <svg class="zine-svg" viewBox="0 0 1280 ${H}" role="img" aria-label="${escapeHtml(lit.map((p) => `${p.first} ${p.count}`).join(', ') || 'No streaks yet')}${unlit.length ? `; ${unlit.length} unlit` : ''}">${svg}</svg>
+    ${note}
+    <span class="zine-folio" style="left:${zu(48)};bottom:${zu(28)};font-size:${zu(13)}">COLONY, AFTER HOURS · STREAKS</span>
+  </section>`;
+}
+
+function zineFeedback(d) {
+  const rows = (d.stats.feedback || []).map((f) => ({ ...f, p: d.byId.get(f.id) })).filter((f) => f.p && f.bugs + f.ideas > 0).slice(0, 7);
+  if (!rows.length) return '';
+  const total = (d.stats.feedback || []).reduce((s, f) => s + f.bugs + f.ideas, 0);
+  const maxStack = Math.max(...rows.map((r) => r.bugs + r.ideas));
+  const tH = Math.min(30, 400 / maxStack);
+  const step = Math.min(160, 1100 / rows.length);
+  const x0 = 640 - (step * (rows.length - 1)) / 2;
+  let seed = 3; const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+  let svg = '';
+  rows.forEach((r, i) => {
+    const x = x0 + i * step, base = 600; let k = 0;
+    [['BUG', r.bugs, ZINE.red], ['IDEA', r.ideas, ZINE.fluo]].forEach(([kind, cnt, col]) => {
+      for (let j = 0; j < cnt; j++) {
+        const y = base - (k + 1) * tH; const rot = (rnd() * 8 - 4).toFixed(1); const dx = (rnd() * 10 - 5).toFixed(0);
+        svg += `<g transform="rotate(${rot} ${x} ${y + tH / 2})"><rect x="${x - 60 + Number(dx)}" y="${y}" width="120" height="${tH - 3}" fill="${col}"/><line x1="${x - 58 + Number(dx)}" y1="${y}" x2="${x - 58 + Number(dx)}" y2="${y + tH - 3}" stroke="${ZINE.paper}" stroke-width="3" stroke-dasharray="2 3"/><line x1="${x + 58 + Number(dx)}" y1="${y}" x2="${x + 58 + Number(dx)}" y2="${y + tH - 3}" stroke="${ZINE.paper}" stroke-width="3" stroke-dasharray="2 3"/>${tH >= 18 ? `<text x="${x - 48 + Number(dx)}" y="${y + tH / 2 + 3}" font-family="'Special Elite', monospace" font-size="12" fill="${ZINE.ink}">${kind}</text>` : ''}</g>`;
+        k++;
+      }
+    });
+    svg += zineFace(x, base + 37, 23, r.p, i, false);
+    svg += `<text x="${x}" y="${base + 82}" text-anchor="middle" font-family="'Special Elite', monospace" font-size="15" fill="${ZINE.ink}">${escapeHtml(r.p.first)}</text><text x="${x}" y="${base + 100}" text-anchor="middle" font-family="'Special Elite', monospace" font-size="12" fill="#5d5a54">${r.bugs} bug${r.bugs === 1 ? '' : 's'} · ${r.ideas} idea${r.ideas === 1 ? '' : 's'}</text>`;
+  });
+  return zineSpread(6, 'FEEDBACK', false, `
+    <span class="zine-abril" style="left:${zu(48)};top:${zu(36)};font-size:${zu(64)};color:${ZINE.ink}">The Complaints Department</span>
+    <span class="zine-type" style="left:${zu(52)};top:${zu(112)};font-size:${zu(18)};color:${ZINE.ink}">thank you for every bug and idea you sent in. each one made Colony better.</span>
+    <span class="zine-ticket" style="right:${zu(48)};top:${zu(36)};padding:${zu(10)} ${zu(16)}"><small style="font-size:${zu(12)}">NOW SERVING</small><b style="font-size:${zu(56)}">№ ${total + 1}</b></span>
+    <svg class="zine-svg" viewBox="0 0 1280 800" role="img" aria-label="Bugs and ideas sent in: ${escapeHtml(rows.map((r) => `${r.p.first} ${r.bugs} bugs, ${r.ideas} ideas`).join('; '))}">${svg}</svg>`,
+  'The complaints department');
+}
+
+function zineLeave(d) {
+  const by = d.stats.leave_by_dow || {};
+  const days = [[1, 'MON'], [2, 'TUE'], [3, 'WED'], [4, 'THU'], [5, 'FRI']].map(([k, l]) => ({ l, n: by[k] || 0, full: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'][k - 1] }));
+  const max = Math.max(...days.map((x) => x.n));
+  if (!max) return '';
+  const fav = days.find((x) => x.n === max);
+  const min = Math.min(...days.map((x) => x.n));
+  const sand = 650; let svg = '';
+  days.forEach((x, i) => {
+    const cx = 150 + i * 240; const R = 52 + ((x.n - min) / Math.max(max - min, 1)) * 86; const top = sand - 150 - R * 0.35; const seg = 8;
+    for (let s = 0; s < seg; s++) {
+      const a1 = Math.PI + (Math.PI * s) / seg, a2 = Math.PI + (Math.PI * (s + 1)) / seg;
+      svg += `<path d="M${cx} ${top} L${(cx + R * Math.cos(a1)).toFixed(1)} ${(top + R * Math.sin(a1) * 0.7).toFixed(1)} A ${R.toFixed(1)} ${(R * 0.7).toFixed(1)} 0 0 1 ${(cx + R * Math.cos(a2)).toFixed(1)} ${(top + R * Math.sin(a2) * 0.7).toFixed(1)} Z" fill="${s % 2 ? ZINE.paper : ZINE.red}"/>`;
+    }
+    svg += `<line x1="${cx}" y1="${(top - R * 0.7 - 10).toFixed(0)}" x2="${cx + 8}" y2="${sand + 10}" stroke="${ZINE.paper}" stroke-width="4"/>`;
+    svg += `<text x="${cx}" y="${sand + 60}" text-anchor="middle" font-family="Anton, sans-serif" font-size="${x === fav ? 40 : 30}" fill="${x === fav ? ZINE.fluo : ZINE.paper}">${x.l} ${x.n}</text>`;
+  });
+  svg += `<path d="M0 ${sand + 10} Q 320 ${sand - 4} 640 ${sand + 10} T 1280 ${sand + 10}" fill="none" stroke="#3a3936" stroke-width="3"/>`;
+  const q = Number(d.stats.leave_90d || 0);
+  return zineSpread(7, 'LEAVE', true, `
+    ${zineTape(48, 40, -2, 'OUT OF OFFICE · DAYS OFF, BY WEEKDAY')}
+    <div class="zine-col" style="right:${zu(48)};top:${zu(36)};align-items:flex-end;text-align:right">
+      <div class="zine-anton-i" style="font-size:${zu(92)};line-height:.9;color:${ZINE.paper}">${fav.full} wins.</div>
+      ${q ? `<div style="font-size:${zu(18)};color:${ZINE.soft};margin-top:${zu(10)}">${q % 1 ? q.toFixed(1) : q} days off taken in the last 90 days. Rest is part of the work.</div>` : ''}
+    </div>
+    <svg class="zine-svg" viewBox="0 0 1280 800" role="img" aria-label="Days off by weekday: ${days.map((x) => `${x.full} ${x.n}`).join(', ')}">${svg}</svg>`,
+  `Favourite day off: ${fav.full}`);
+}
+
+function zineRiver(d) {
+  const today = d.todayIso;
+  const list = (d.stats.clients || []).filter((c) => !['youragency', ...NON_CLIENT_BUCKETS].includes(String(c.name).trim().toLowerCase()));
+  if (!list.length) return '';
+  const d0 = list.reduce((m, c) => (c.first < m ? c.first : m), list[0].first);
+  const end = shiftIsoDays(today, 4);
+  const X0 = 250, X1 = 1200;
+  const span = (Date.parse(end) - Date.parse(d0)) / 86400000;
+  const xd = (iso) => X0 + ((X1 - X0) * (Date.parse(iso < end ? iso : end) - Date.parse(d0))) / 86400000 / span;
+  const rowH = Math.min(46, 540 / list.length);
+  const H = 800;
+  let svg = '';
+  for (let m = new Date(`${d0.slice(0, 7)}-01T00:00:00Z`); ; m.setUTCMonth(m.getUTCMonth() + 1)) {
+    const iso = m.toISOString().slice(0, 10);
+    if (iso > end) break;
+    if (iso < d0) continue;
+    // Monthly ticks for a short river; quarters with the year for a long one.
+    const long = span > 400;
+    if (long && m.getUTCMonth() % 3) continue;
+    const x = xd(iso);
+    const label = `${zMonths[m.getUTCMonth()].toUpperCase()}${long ? ` ’${String(m.getUTCFullYear()).slice(2)}` : ''}`;
+    svg += `<line x1="${x.toFixed(0)}" y1="120" x2="${x.toFixed(0)}" y2="${120 + list.length * rowH + 20}" stroke="#cfccc4" stroke-width="1"/><text x="${(x + 4).toFixed(0)}" y="${120 + list.length * rowH + 42}" font-family="'Special Elite', monospace" font-size="13" fill="#5d5a54">${label}</text>`;
+  }
+  // Still flowing = allocated in the last three weeks (or booked ahead).
+  const recent = shiftIsoDays(today, -21);
+  list.forEach((c, i) => {
+    const y = 140 + i * rowH; const ongoing = c.last >= recent;
+    const xa = xd(c.first); const xb = Math.max(xd(c.last) + (ongoing ? 30 : 8), xa + 14);
+    const th = Math.min(6 + c.people * 2.4, rowH - 8);
+    const col = ongoing ? ZINE.ink : '#a19d95';
+    svg += `<path d="M${xa.toFixed(0)} ${y} L${Math.min(xb, X1 + 20).toFixed(0)} ${y}" stroke="${col}" stroke-width="${th.toFixed(0)}" stroke-linecap="round"><title>${escapeHtml(c.name)} · ${c.people} people · since ${zNice(c.first)}</title></path>`;
+    if (ongoing) svg += `<path d="M${(Math.min(xb, X1 + 20) + 6).toFixed(0)} ${(y - th / 2 - 2).toFixed(0)} l 12 ${(th / 2 + 2).toFixed(0)} l -12 ${(th / 2 + 2).toFixed(0)}" fill="${ZINE.red}"/>`;
+    svg += `<text x="${X0 - 16}" y="${y + 5}" text-anchor="end" font-family="'Special Elite', monospace" font-size="16" fill="${ongoing ? ZINE.ink : '#7a766f'}">${escapeHtml(c.name)}</text>`;
+  });
+  const newest = list.reduce((a, c) => (c.first > a.first ? c : a));
+  const oldest = list.filter((c) => c.last >= recent).reduce((a, c) => (!a || c.first < a.first ? c : a), null);
+  return zineSpread(8, 'CLIENTS', false, `
+    <span class="zine-anton" style="left:${zu(48)};top:${zu(34)};font-size:${zu(64)};line-height:1;color:${ZINE.ink}">THE RIVER</span>
+    <span class="zine-type" style="left:${zu(330)};top:${zu(46)};width:${zu(520)};font-size:${zu(17)};color:${ZINE.ink}">every client we work with, from the day the contract started. black still flowing, grey done for now. thicker = more ants on it.</span>
+    <svg class="zine-svg" viewBox="0 0 1280 ${H}" role="img" aria-label="Clients over time. Still flowing: ${escapeHtml(list.filter((c) => c.last >= recent).map((c) => c.name).join(', '))}">${svg}</svg>
+    ${oldest ? zineTape(930, 30, -1.5, `longest running: ${oldest.name}, since ${zMonths[Number(oldest.first.slice(5, 7)) - 1]} ${oldest.first.slice(0, 4)}`, ZINE.fluo, ZINE.ink, 14) : ''}
+    ${zineTape(960, 72, 2, `newest: ${newest.name}, ${zNice(newest.first)}`, ZINE.ink, ZINE.paper, 14)}`,
+  'The river of clients');
+}
+
+function secretData(stats) {
+  const todayIso = toISODateLocal();
+  const hidden = getHiddenEmployeeEmails();
+  const photos = stats.photos || {};
+  const streak = new Map((streakLeaderboard || []).map((s) => [s.id, s.count]));
+  const people = (state.employeeDirectory || [])
+    // The shared studio@ inbox is not a person.
+    .filter((e) => e.is_active !== false && !e.setup_pending && !hidden.includes(normalizeEmail(e.email)) && !/^studio@/i.test(e.email || ''))
+    .map((e) => {
+      const first = displayPersonName(e.full_name, 'Someone').split(' ')[0];
+      return { id: e.id, first: first.charAt(0).toUpperCase() + first.slice(1), short: first.slice(0, 2).toUpperCase(), photo: photos[e.id] || null, count: streak.get(e.id) || 0, joined_on: e.joined_on };
+    });
+  const byId = new Map(people.map((p) => [p.id, p]));
+  // Founders: the earliest joined date, and the next anniversary of it.
+  const joined = people.filter((p) => p.joined_on && p.joined_on <= todayIso).sort((a, b) => a.joined_on.localeCompare(b.joined_on));
+  let anniversary = null;
+  if (joined.length) {
+    const start = joined[0].joined_on;
+    const y = Number(todayIso.slice(0, 4));
+    let next = `${y}-${start.slice(5)}`;
+    if (next < todayIso) next = `${y + 1}-${start.slice(5)}`;
+    anniversary = {
+      start,
+      years: Number(next.slice(0, 4)) - Number(start.slice(0, 4)),
+      days: Math.round((Date.parse(next) - Date.parse(todayIso)) / 86400000),
+      age: Math.round((Date.parse(todayIso) - Date.parse(start)) / 86400000),
+      founders: joined.filter((p) => p.joined_on === start).map((p) => p.first)
+    };
+  }
+  const dow = (new Date(`${todayIso}T00:00:00Z`).getUTCDay() + 6) % 7;
+  return { stats, people, byId, anniversary, todayIso, weekStart: shiftIsoDays(todayIso, -dow) };
+}
+
+// The live seconds on the age spread: time since midnight IST today.
+setInterval(() => {
+  const el = document.querySelector('[data-zine-tick]');
+  if (!el) return;
+  const ist = new Date(Date.now() + 330 * 60000);
+  const h = ist.getUTCHours(), m = ist.getUTCMinutes(), s = ist.getUTCSeconds();
+  el.innerHTML = `+ ${h} h ${String(m).padStart(2, '0')} m <span style="color:${ZINE.paper}">${String(s).padStart(2, '0')} s</span>`;
+}, 1000);
+
+// ── Finding it (8 Oct 2026: "not overt, but someone spending time in
+// Colony should be able to figure it out") ─────────────────────────────────
+// Two trails lead to the date at the top of Home: (1) hovering it shows a
+// dotted underline and a peeking ant; (2) once a day an ant walks across the
+// top of Home and disappears into the date. Nothing names the page. (A third,
+// an odd line in Coming up after 6 pm, was dropped 28 Oct 2026: most people
+// had found it, Alex.)
+let secretDiscovery = null; // app.secret_discovery: { maker, found, rank, total, first_name, first_at }
+function loadSecretDiscovery(mark) {
+  if (!state.supabase) return Promise.resolve();
+  return state.supabase.rpc('secret_discovery', { p_mark: !!mark })
+    .then(({ data, error }) => { if (!error && data) secretDiscovery = data; })
+    .catch(() => {});
+}
+
+const SECRET_ANT_SVG = '<svg viewBox="0 0 24 16" width="22" height="15" aria-hidden="true"><g fill="currentColor"><ellipse cx="5" cy="8" rx="3.2" ry="2.6"/><ellipse cx="11" cy="8" rx="2.4" ry="2"/><ellipse cx="18" cy="8" rx="4.2" ry="3"/></g><g class="ant-legs" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round"><path d="M10 7 L7 2 M11 7 L11 1.5 M12 7 L15 2"/><path d="M10 9 L7 14 M11 9 L11 14.5 M12 9 L15 14"/><path d="M3 6 L0.5 3.5 M3 7 L0.3 6"/></g></svg>';
+function secretAntWalk() {
+  const greet = document.getElementById('homeGreeting');
+  const row = greet?.closest('.screen-head');
+  if (!greet || !row || secretAntWalk.done) return;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+  const today = toISODateLocal();
+  try { if (localStorage.getItem('secretAntDay') === today) return; } catch (e) { return; }
+  secretAntWalk.done = true;
+  setTimeout(() => {
+    if (getActiveScreenId() !== 'home-feed') { secretAntWalk.done = false; return; }
+    try { localStorage.setItem('secretAntDay', today); } catch (e) { /* private mode */ }
+    const r = row.getBoundingClientRect(); const g = greet.getBoundingClientRect();
+    const ant = document.createElement('span');
+    ant.className = 'secret-ant';
+    ant.innerHTML = SECRET_ANT_SVG;
+    ant.style.top = `${g.top + g.height / 2 - 7}px`;
+    document.body.appendChild(ant);
+    const from = r.right - 30, to = g.right + 4;
+    const walk = ant.animate([
+      { transform: `translateX(${from}px)`, opacity: 0 },
+      { transform: `translateX(${from - 20}px)`, opacity: 0.85, offset: 0.05 },
+      { transform: `translateX(${(from + to) / 2}px) translateY(-3px)`, opacity: 0.85, offset: 0.5 },
+      { transform: `translateX(${to + 10}px)`, opacity: 0.85, offset: 0.92 },
+      { transform: `translateX(${to}px) scale(0.4)`, opacity: 0 }
+    ], { duration: Math.max(4000, (from - to) * 9), easing: 'linear' });
+    walk.onfinish = () => { ant.remove(); greet.classList.add('is-sniffed'); setTimeout(() => greet.classList.remove('is-sniffed'), 1600); };
+  }, 2500);
+}
+
+const zOrdinal = (n) => { const s = ['th', 'st', 'nd', 'rd']; const v = n % 100; return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`; };
+
+function zineCover(d) {
+  const disc = secretDiscovery || {};
+  let big, line, sub = '';
+  if (disc.maker) {
+    big = disc.total || '0';
+    line = disc.total === 1 ? 'person has found this page' : 'people have found this page';
+    sub = disc.first_name ? `first found by ${disc.first_name}, ${zNice(String(disc.first_at).slice(0, 10))}. you made it, so you don't count.` : 'nobody yet. you made it, so you don\'t count.';
+  } else if (disc.rank === 1) {
+    big = 'FIRST';
+    line = 'nobody found this before you';
+    sub = disc.total > 1 ? `${disc.total - 1} more ${disc.total === 2 ? 'has' : 'have'} followed you down here since.` : 'you are the very first ant down here.';
+  } else if (disc.rank) {
+    big = zOrdinal(disc.rank);
+    line = 'ant to find this page';
+    sub = disc.first_name ? `${disc.first_name} got here first, on ${zNice(String(disc.first_at).slice(0, 10))}.` : '';
+  } else {
+    big = '?'; line = 'you found it'; sub = '';
+  }
+  // Everyone who found it, in the order they did (9 Oct 2026).
+  const finders = disc.finders || [];
+  const shown = finders.slice(0, 12);
+  const finderStrip = finders.length ? `<div class="zine-finders" style="left:${zu(60)};top:${zu(575)};width:${zu(660)};gap:${zu(10)} ${zu(12)}">
+      <span class="zine-type" style="width:100%;font-size:${zu(12)};letter-spacing:.14em;color:${ZINE.grey}">THE FINDERS, IN ORDER</span>
+      ${shown.map((f, i) => {
+        const photo = d?.stats?.photos?.[f.id];
+        const me = f.id === state.currentEmployeeId;
+        const face = photo
+          ? `<img src="${escapeHtml(photo)}" alt="" referrerpolicy="no-referrer" style="width:${zu(30)};height:${zu(30)}">`
+          : `<b style="width:${zu(30)};height:${zu(30)};font-size:${zu(12)};background:${ZINE_TINTS[i % ZINE_TINTS.length]}">${escapeHtml(String(f.name).slice(0, 2).toUpperCase())}</b>`;
+        return `<span class="zine-finder${me ? ' is-me' : ''}" title="${escapeHtml(f.name)} · ${escapeHtml(zNice(String(f.at).slice(0, 10)))}" style="font-size:${zu(15)};padding:${zu(4)} ${zu(12)} ${zu(4)} ${zu(4)};gap:${zu(8)}"><i style="font-size:${zu(17)}">${i + 1}</i>${face}${escapeHtml(me ? `${f.name} (you)` : f.name)}</span>`;
+      }).join('')}
+      ${finders.length > shown.length ? `<span class="zine-type" style="align-self:center;font-size:${zu(14)};color:${ZINE.soft}">+ ${finders.length - shown.length} more</span>` : ''}
+    </div>` : '';
+  return `<section class="zine-spread is-ink" aria-label="Cover">
+    <span class="zine-marker" style="left:${zu(56)};top:${zu(56)};font-size:${zu(64)};color:${ZINE.paper};transform:rotate(-3deg)">you found it.</span>
+    <span class="zine-anton" style="left:${zu(52)};top:${zu(170)};font-size:${zu(String(big).length > 4 ? 250 : 300)};color:${ZINE.fluo}">${escapeHtml(String(big))}</span>
+    <span class="zine-type" style="left:${zu(60)};top:${zu(450)};font-size:${zu(28)};color:${ZINE.paper}">${escapeHtml(line)}</span>
+    ${sub ? `<span class="zine-type" style="left:${zu(60)};top:${zu(500)};width:${zu(560)};font-size:${zu(17)};line-height:1.5;color:${ZINE.soft}">${escapeHtml(sub)}</span>` : ''}
+    ${finderStrip}
+    <span class="zine-type" style="left:${zu(60)};top:${zu(745)};font-size:${zu(15)};color:${ZINE.grey}">colony, after hours. don't tell anyone. or do.</span>
+    <div class="zine-col" style="left:${zu(760)};top:${zu(120)};width:${zu(430)};gap:${zu(22)}">
+      <span class="zine-tape" style="position:static;align-self:flex-start;transform:rotate(-2deg);background:${ZINE.paper};color:${ZINE.ink};font-size:${zu(15)};padding:${zu(6)} ${zu(14)}">BEHIND THE CURTAIN</span>
+      <p style="margin:0;font-size:${zu(21)};line-height:1.55;color:${ZINE.paper}">This is the part of Colony nobody gets shown. Only the ants who find their way down here get to read it.</p>
+      <p style="margin:0;font-size:${zu(17)};line-height:1.6;color:${ZINE.soft}">What we keep typing, when the colony wakes up, who keeps the flame going, and what goes on underneath while everyone is busy up there.</p>
+      <button type="button" class="zine-toc" data-zine-step="1" style="align-self:flex-start;margin-top:${zu(14)};transform:rotate(1.5deg);font-size:${zu(19)};padding:${zu(10)} ${zu(18)}">turn the page →</button>
+    </div>
+  </section>`;
+}
+
+let secretStats = null;
+let secretPageIdx = 0;
+let secretPages = [];
+function renderSecretPage() {
+  const el = document.getElementById('secretBody');
+  if (!el) return;
+  // Its fonts load only here, the first time the page opens.
+  if (!document.getElementById('secretFonts')) {
+    const l = document.createElement('link');
+    l.id = 'secretFonts'; l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?family=Anton&family=Special+Elite&family=Rubik+Mono+One&family=Abril+Fatface&family=Bungee&family=Permanent+Marker&family=Playfair+Display:ital,wght@1,900&display=swap';
+    document.head.appendChild(l);
+  }
+  // Opening it counts you as a finder (once). Stats and streaks load on first
+  // open (streaks may already be in from Home).
+  if (!secretStats && !renderSecretPage.loading) {
+    renderSecretPage.loading = true;
+    el.innerHTML = '<p class="mini-meta">Digging…</p>';
+    Promise.all([
+      state.supabase.rpc('secret_page_stats').then(({ data, error }) => { if (error) throw error; secretStats = data || {}; }),
+      loadSecretDiscovery(true),
+      streakLeaderboard?.length ? null : loadStreakData()
+    ].map((p) => Promise.resolve(p).catch((err) => console.warn('secret page:', err?.message || err))))
+      .finally(() => { renderSecretPage.loading = false; if (!secretStats) secretStats = {}; secretPageIdx = 0; renderSecretPage(); });
+    return;
+  }
+  if (renderSecretPage.loading) return;
+  if (!secretStats?.words) { el.innerHTML = '<p class="mini-meta">Nothing to dig up right now. Try again in a minute.</p>'; secretStats = null; return; }
+  const d = secretData(secretStats);
+  const spreads = [['Age', zineAge], ['Words', zineWords], ['Clock', zineClock], ['Record week', zineRecord], ['Streak club', zineStreaks], ['Complaints', zineFeedback], ['Leave', zineLeave], ['The river', zineRiver]]
+    .map(([label, f]) => { try { return { label, html: f(d) }; } catch (err) { console.warn('zine spread failed:', label, err); return { label, html: '' }; } })
+    .filter((s) => s.html);
+  secretPages = [{ label: 'Cover', html: zineCover(d) }, ...spreads];
+  drawSecretPage(0);
+}
+
+// One spread at a time, sized to fit the window: arrows, ← → keys, a swipe,
+// a click on the spread, or a jump from the contents strip.
+function drawSecretPage(dir) {
+  const el = document.getElementById('secretBody');
+  if (!el || !secretPages.length) return;
+  secretPageIdx = Math.max(0, Math.min(secretPageIdx, secretPages.length - 1));
+  const page = secretPages[secretPageIdx];
+  const ar = (() => { const m = page.html.match(/aspect-ratio:1280\/(\d+)/); return m ? 1280 / Number(m[1]) : 1.6; })();
+  el.innerHTML = `<div class="zine-reader">
+    <div class="zine-bar">
+      <button class="ghost small" type="button" data-secret-back>← Home</button>
+      <nav class="zine-strip" aria-label="Pages">${secretPages.map((p, i) => `<button type="button" class="zine-dot${i === secretPageIdx ? ' is-on' : ''}" data-zine-go="${i}" aria-label="${escapeHtml(p.label)}" title="${escapeHtml(p.label)}"><span>${escapeHtml(p.label)}</span></button>`).join('')}</nav>
+      <span class="zine-count">${secretPageIdx + 1} / ${secretPages.length}</span>
+    </div>
+    <div class="zine-stage">
+      <button type="button" class="zine-nav is-prev" data-zine-step="-1" aria-label="Previous page"${secretPageIdx === 0 ? ' disabled' : ''}>‹</button>
+      <div class="zine-page${dir > 0 ? ' turn-next' : dir < 0 ? ' turn-prev' : ''}" style="--ar:${ar.toFixed(4)}" data-zine-page>${page.html}</div>
+      <button type="button" class="zine-nav is-next" data-zine-step="1" aria-label="Next page"${secretPageIdx === secretPages.length - 1 ? ' disabled' : ''}>›</button>
+    </div>
+  </div>`;
+}
+function stepSecretPage(n) {
+  const next = Math.max(0, Math.min(secretPageIdx + n, secretPages.length - 1));
+  if (next === secretPageIdx) return;
+  const dir = next > secretPageIdx ? 1 : -1;
+  secretPageIdx = next; drawSecretPage(dir);
+}
+document.addEventListener('click', (e) => {
+  if (getActiveScreenId() !== 'after-hours') return;
+  const go = e.target.closest('[data-zine-go]');
+  if (go) { const i = Number(go.dataset.zineGo); const dir = i > secretPageIdx ? 1 : -1; secretPageIdx = i; drawSecretPage(dir); return; }
+  const step = e.target.closest('[data-zine-step]');
+  if (step) { stepSecretPage(Number(step.dataset.zineStep)); return; }
+  if (e.target.closest('[data-zine-page]') && !e.target.closest('button, a')) stepSecretPage(1);
+});
+document.addEventListener('keydown', (e) => {
+  if (getActiveScreenId() !== 'after-hours' || e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+  if (e.key === 'ArrowRight') stepSecretPage(1);
+  if (e.key === 'ArrowLeft') stepSecretPage(-1);
+});
+let zineTouchX = null;
+document.addEventListener('touchstart', (e) => { if (e.target.closest?.('[data-zine-page]')) zineTouchX = e.touches[0].clientX; }, { passive: true });
+document.addEventListener('touchend', (e) => {
+  if (zineTouchX === null) return;
+  const dx = e.changedTouches[0].clientX - zineTouchX; zineTouchX = null;
+  if (Math.abs(dx) > 50) stepSecretPage(dx < 0 ? 1 : -1);
+});
+// @circle-omit-end
+
+function renderHomeYourDay() {
+  const el = document.getElementById('homeYourDay');
+  if (!el) return;
+  const pulse = state.homePulse;
+  if (!pulse || !state.currentEmployeeId) { el.innerHTML = ''; return; }
+  const due = pulse.myTasksDueToday || 0;
+  let pct = 0;
+  (state.homeAllocations || []).forEach((a) => { if (a.employee_id === state.currentEmployeeId) pct += (a.allocation_percent || 0); });
+  const bits = [due ? `${due} task${due === 1 ? '' : 's'} due today` : 'nothing due today'];
+  if (pct > 0) bits.push(`${Math.round(pct)}% allocated`);
+  el.innerHTML = `<a href="#daily-tasklist" data-link="daily-tasklist">${escapeHtml(bits.join(' · '))} →</a>`;
+}
+
+function renderHomeList(title, items, emptyText, todayIso, cap = HOME_LIST_CAP) {
+  const rows = items.slice(0, cap).map((it) => {
+    const attrs = [
+      it.link ? `data-link="${escapeHtml(it.link)}"` : '',
+      it.detail ? 'data-detail' : '',
+      it.title ? `title="${escapeHtml(it.title)}"` : '',
+    ].filter(Boolean).join(' ');
+    return `<li class="hl-row${it.hot ? ' is-hot' : ''}${it.link || it.detail ? ' is-action' : ''}" ${attrs}>
+        <span class="hl-day">${escapeHtml(feedDayLabel(it.date, todayIso))}</span>
+        <span class="hl-icon" aria-hidden="true">${escapeHtml(it.icon)}</span>
+        <span class="hl-text">${escapeHtml(it.text)}</span>
+        ${it.detail ? `<div class="hl-detail hidden">${it.detail}</div>` : ''}
+      </li>`;
+  }).join('');
+  return `<section class="home-list${cap > HOME_LIST_CAP ? ' is-scroll' : ''}">
+      <h4 class="hl-head"><span>${title}</span></h4>
+      ${items.length ? `<ul>${rows}</ul>` : `<p class="hl-empty">${emptyText}</p>`}
+    </section>`;
 }
 
 function renderHomeFeed() {
   applyHomeGreeting();
   renderHomeStatCards();
-  renderBirthdayStrip();
-  renderSustainabilityCalendar();
-
-  if (!homeFeedList || !homeFeedEmpty) return;
-
-  const events = buildTimelineEvents();
-  const yourDay = buildYourDayEvent();
-  const teamPulse = buildTeamPulseEvents();
-
-  if (!events.length && !teamPulse.length && !yourDay) {
-    homeFeedList.innerHTML = '';
-    homeFeedEmpty.classList.remove('hidden');
-    return;
-  }
-
-  homeFeedEmpty.classList.add('hidden');
+  renderHomeYourDay();
+  if (!homeFeedList) return;
+  if (!state.sustainabilityCalendar) loadSustainabilityCalendar(); // renders again when it lands
 
   const todayIso = toISODateLocal();
-  const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-  const yesterdayIso = toISODateLocal(yesterday);
-  const daysAgo7 = new Date(today);
-  daysAgo7.setDate(today.getDate() - 7);
-  const daysAgo7Iso = toISODateLocal(daysAgo7);
-  const daysAhead7 = new Date(today);
-  daysAhead7.setDate(today.getDate() + 7);
-  const daysAhead7Iso = toISODateLocal(daysAhead7);
+  const comingUp = buildComingUp(todayIso);
+  // The secret page's trails (the functions are left out of the Circle build).
+  if (typeof secretAntWalk === 'function') {
+    if (!secretDiscovery && !renderHomeFeed.discoveryAsked) { renderHomeFeed.discoveryAsked = true; loadSecretDiscovery(false).then(() => { if (getActiveScreenId() === 'home-feed') renderHomeFeed(); }); }
+    secretAntWalk();
+  }
+  const wins = buildWins(todayIso);
+  // The latest five, whatever their age: a month-window hid the list entirely
+  // when changelog.json went unedited (28 Sep 2026).
+  const updates = whatsNewFor(todayIso);
 
-  const sections = { today: [], yesterday: [], thisWeek: [], recent: [] };
-  events.forEach(e => {
-    if (e.date === todayIso || (e.date > todayIso && e.date <= daysAhead7Iso)) {
-      if (e.date === todayIso) sections.today.push(e);
-      else sections.thisWeek.push(e);
-    } else if (e.date === yesterdayIso) {
-      sections.yesterday.push(e);
-    } else if (e.date >= daysAgo7Iso && e.date < todayIso) {
-      sections.thisWeek.push(e);
-    } else {
-      sections.recent.push(e);
-    }
-  });
-
-  let html = '';
-  const renderSection = (label, items) => {
-    if (!items.length) return;
-    if (label) html += `<h4 class="feed-section-heading">${label}</h4>`;
-    items.forEach(e => {
-      const titleAttr = e.fullText ? ` title="${escapeHtml(e.fullText)}"` : '';
-      const linkAttr = !e.expandable && e.link ? ` data-link="${escapeHtml(e.link)}" style="cursor:pointer"` : '';
-      const expandAttr = e.expandable ? ' data-expandable style="cursor:pointer"' : '';
-      html += `
-        <div class="feed-card feed-type-${escapeHtml(e.type)}"${titleAttr}${linkAttr}${expandAttr}>
-          <span class="feed-icon">${escapeHtml(e.icon)}</span>
-          <div class="feed-body">
-            <span class="feed-text">${escapeHtml(e.text)}${e.expandable ? ' <span class="feed-chevron">▾</span>' : ''}</span>
-            ${e.detail ? `<span class="feed-detail">${escapeHtml(e.detail).replace(/\n/g, '<br>')}</span>` : ''}
-            ${e.expandable ? `<div class="feed-expand hidden">${e.expandable}</div>` : ''}
-          </div>
-        </div>`;
-    });
-  };
-
-  if (yourDay) renderSection('', [yourDay]);
-  renderSection('Team Pulse', teamPulse);
-  renderSection('Today', sections.today);
-  renderSection('Yesterday', sections.yesterday);
-  renderSection('This Week', sections.thisWeek);
-  renderSection('Recent', sections.recent);
-
-  homeFeedList.innerHTML = html;
-  homeFeedList.querySelectorAll('.feed-card[data-link]').forEach(card => {
-    card.addEventListener('click', () => navigateToScreen(card.dataset.link));
-  });
-  homeFeedList.querySelectorAll('.feed-card[data-expandable]').forEach(card => {
-    card.addEventListener('click', (ev) => {
-      if (ev.target.closest('[data-link]') && !ev.target.closest('.feed-card[data-expandable]').isSameNode(ev.target.closest('[data-link]'))) return;
-      const expand = card.querySelector('.feed-expand');
-      const chevron = card.querySelector('.feed-chevron');
-      if (expand) {
-        expand.classList.toggle('hidden');
-        if (chevron) chevron.textContent = expand.classList.contains('hidden') ? '▾' : '▴';
-      }
-    });
-  });
-  homeFeedList.querySelectorAll('.feed-expand-viewall[data-link]').forEach(link => {
-    link.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      navigateToScreen(link.dataset.link);
-    });
-  });
+  homeFeedList.innerHTML = `
+    <div class="home-cols">
+      ${renderHomeList('Coming up · next 7 days', comingUp, 'A quiet week ahead.', todayIso)}
+      ${renderHomeList('Wins · last 30 days', wins, 'Nothing yet this month. Go make some.', todayIso, 20)}
+    </div>
+    ${updates.big.length || updates.groups.length ? `<details class="home-updates">
+      <summary>What's new in Colony</summary>
+      <ul>${updates.big.map((u) => `<li><span class="hl-day">${escapeHtml(shortDate(u.date))}</span><span>${escapeHtml(u.text)}</span></li>`).join('')}</ul>
+      ${updates.groups.map((g) => `<details class="hu-group">
+        <summary>${escapeHtml(g.area)} · ${g.items.length} smaller improvement${g.items.length === 1 ? '' : 's'} this month</summary>
+        <ul>${g.items.map((u) => `<li><span class="hl-day">${escapeHtml(shortDate(u.date))}</span><span>${escapeHtml(u.text)}</span></li>`).join('')}</ul>
+      </details>`).join('')}
+    </details>` : ''}`;
 }
+
 
 // Screen-switch cache: skip a loader if its data landed <60s ago. ONLY the
 // screen-switch call sites below use this — every mutation path calls the raw
@@ -1380,6 +1855,7 @@ function maybeLoad(key, loader) {
   return loader();
 }
 
+// @circle-omit Colony-only wiring
 document.addEventListener('visibilitychange', () => {
   if (document.hidden || !state.isAuthenticated) return;
   const now = Date.now();
@@ -1394,10 +1870,14 @@ document.addEventListener('visibilitychange', () => {
     refreshScreenData(getActiveScreenId());
   }
 });
+// @circle-omit-end
 
 function refreshScreenData(screenId) {
   if (!state.isAuthenticated) return;
   switch (screenId) {
+    // Circle's bundle holds only the client screens below, so every other case
+    // is cut from it (see _build/circle-scope.mjs). In Colony these are comments.
+    // @circle-omit Colony-only screens
     case 'home-feed':
       maybeLoad('homeStats', loadHomeStatsFromSupabase).then(() => renderHomeFeed()).catch(console.error);
       maybeLoad('featureRequests', loadFeatureRequestsFromSupabase).then(() => renderHomeFeed()).catch(console.error);
@@ -1416,6 +1896,8 @@ function refreshScreenData(screenId) {
       // My Leave: refresh both the request list and the balance summary.
       loadLeaveRequestsFromSupabase().catch(console.error);
       loadLeaveCycleSummaryFromSupabase().catch(console.error);
+      // Public holidays live here now (T2, 8 Oct 2026); leadership edits them.
+      if (isLeadershipRole()) loadPublicHolidaysFromSupabase().then(renderHolidaysAdmin).catch(console.error);
       break;
     case 'my-allocations':
       // Skip reload if allocation table already has rows (preserves unsaved edits)
@@ -1440,12 +1922,12 @@ function refreshScreenData(screenId) {
       if (state.hiringOnlyMode) loadHiringPanel().catch(console.error);
       break;
     case 'admin-settings':
-      if (isSuperadminUser()) loadPolicyDocuments().catch(console.error);
-      loadPublicHolidaysFromSupabase().then(renderHolidaysAdmin).catch(console.error);
       if (isSuperadminUser()) loadAccessOverrides().then(renderAccessOverridesAdmin).catch(console.error);
       if (isSuperadminUser()) loadAppConfig().then(renderAppConfigAdmin).catch(console.error);
       loadCronHealth().then(renderCronHealthAdmin).catch(console.error);
-      renderPendingSetupAdmin().catch(console.error);
+      break;
+    case 'after-hours':
+      renderSecretPage();
       break;
     case 'policy':
       loadPolicyPage().catch(console.error);
@@ -1454,8 +1936,10 @@ function refreshScreenData(screenId) {
       // The panel is born inside the directory markup; bring it here on the
       // way in, whichever screen loaded first.
       if (!state.hiringOnlyMode) placeHiringPanel('hiring');
+      if (!pendingHireFocus) hireReturnProfile = null; // arrived normally, not from a profile
       loadHiringPanel().catch(console.error);
       break;
+    // @circle-omit-end
     case 'partner-home':
       if (isPartnerRole() || state.staffOnCircle) loadPartnerData().catch(console.error);
       break;
@@ -1469,6 +1953,7 @@ function refreshScreenData(screenId) {
     case 'partner-team':
       if (isPartnerRole() || state.staffOnCircle) { placeOrgContactsPanel('partner'); loadOrgContacts().catch(console.error); }
       break;
+    // @circle-omit Colony-only screens
     case 'briefs-pipeline':
       if (!isPartnerRole()) loadBriefsBoard().catch(console.error);
       break;
@@ -1487,13 +1972,13 @@ function refreshScreenData(screenId) {
       }
       break;
     case 'invoice-center':
-      checkInvoiceAccess().then(allowed => {
-        if (allowed) {
-          loadInvoices().catch(console.error);
-        } else {
-          navigateToScreen('home-feed', { replace: true });
-        }
-      });
+      openInvoiceCenter().catch(actionFailed);
+      break;
+    case 'ndas':
+      // A reload straight onto #ndas can arrive before the crew check has.
+      (state.isNdaCrew === undefined ? applyNdaVisibility() : Promise.resolve())
+        .then(() => (state.isNdaCrew ? loadNdas() : navigateToScreen('client-projects', { replace: true })))
+        .catch(console.error);
       break;
     case 'client-analytics':
       if (analyticsCurrentClientId) {
@@ -1514,40 +1999,12 @@ function refreshScreenData(screenId) {
         navigateToScreen('client-projects', { replace: true });
       }
       break;
+    // @circle-omit-end
   }
 }
 
 function getActiveScreenId() {
   return document.querySelector('.screen.active')?.id || 'login';
-}
-
-function getVisibleScreenOrder() {
-  return STATEFUL_SCREENS.filter(id => {
-    const el = document.getElementById(id);
-    return el && !el.classList.contains('hidden');
-  });
-}
-
-function navigateScreenByDelta(delta) {
-  const order = getVisibleScreenOrder();
-  const current = getActiveScreenId();
-  const idx = order.indexOf(current);
-  if (idx < 0) return;
-  const newIdx = idx + delta;
-  if (newIdx < 0 || newIdx >= order.length) return;
-  navigateToScreen(order[newIdx]);
-}
-
-function updateScreenArrows() {
-  const order = getVisibleScreenOrder();
-  const current = getActiveScreenId();
-  const idx = order.indexOf(current);
-  document.querySelectorAll('.screen-arrow.prev').forEach(btn => {
-    btn.disabled = idx <= 0;
-  });
-  document.querySelectorAll('.screen-arrow.next').forEach(btn => {
-    btn.disabled = idx >= order.length - 1;
-  });
 }
 
 function readScreenFromHash() {
@@ -1619,10 +2076,10 @@ function takeLinkIntent() {
 const LINK_OPEN_ANCHORS = {
   hiring: 'hiringPanel',
   partners: 'partnersAdminPanel',
-  // Awaiting Setup sits well down a long Admin Settings page, so the approval
-  // email used to land people at the top of it with nothing to tell them what
-  // they had come for (7 Sep 2026 — first real hire through it).
-  setup: 'pendingSetupPanel'
+  // Old "Set up X" emails still carry ?open=setup; it lives on Hiring now.
+  setup: 'hiringPanel',
+  // The pending-leave digest lands on the approvals, not the top of Leave.
+  approvals: 'leaveApprovalsPanel'
 };
 
 // ?open=<kind>:<id> — the specific thing an email is about, not just the
@@ -1631,29 +2088,86 @@ const LINK_OPEN_ANCHORS = {
 // done its job; until the data it needs has loaded it returns false and is
 // retried, like the panel anchors above.
 const LINK_OPEN_ITEMS = {
-  hire: (id) => revealBySelector(`[data-hire-row="${cssEscape(id)}"]`, (el) => {
-    const toggle = el.querySelector('[data-hire-checklist-toggle]');
-    const list = el.querySelector('[data-hire-checklist]');
-    if (toggle && list && list.classList.contains('hidden')) toggle.click();
-  }),
+  // @circle-omit hire links open on Colony
+  // Through focusPendingHire, like a profile link: it finds the hire under
+  // any filter, opens it before scrolling, and the open drawer survives
+  // later re-renders (30 Oct 2026: a link to Manisha landed on Payal).
+  hire: (id) => {
+    if (!hiresCache.length || !document.querySelector('#hiringList [data-hire-row]')) return false;
+    pendingHireFocus = id;
+    pendingHireFocusQuiet = false;
+    focusPendingHire();
+    return true;
+  },
+  // Finance's breakup email lands on the breakup itself: open the hire's
+  // details and scroll to Annexure B (21 Sep 2026).
+  hireterms: (id) => {
+    const key = cssEscape(id);
+    const detail = document.querySelector(`[data-hire-detail="${key}"]`);
+    if (!detail) return false;
+    if (detail.classList.contains('hidden')) document.querySelector(`[data-hire-toggle="${key}"]`)?.click();
+    // The terms editor lives on the "Open the hire" step now, and that step is
+    // collapsed once it is done — so open it too, or Finance's breakup link
+    // lands on something hidden (7 Oct 2026).
+    const openStep = document.querySelector(`[data-hc-body="${key}:open"]`);
+    if (openStep && openStep.classList.contains('hidden')) {
+      document.querySelector(`[data-hc-toggle="${key}:open"]`)?.click();
+    }
+    return revealBySelector(`[data-ctc-breakup="${key}"]`) || revealBySelector(`[data-offer-terms="${key}"]`);
+  },
+  // @circle-omit-end
   brief: (id) => {
     if (!briefById(id)) return false;
     if (isPartnerRole() || state.staffOnCircle) openPartnerBriefDetail(id);
+    // @circle-omit on Circle every session is a partner or staffOnCircle
     else renderBriefDrawer(id).catch(console.error);
+    // @circle-omit-end
     return true;
   },
   request: (id) => revealBySelector(`.fr-card[data-fr-id="${cssEscape(id)}"], [data-pf-id="${cssEscape(id)}"]`),
+  // @circle-omit Colony records
+  // The month-end email: own profile, then the approvals panel once the
+  // waiting reimbursements have loaded (5 Nov 2026).
+  reimbursements: () => {
+    if (!state.employeeProfile?.full_name || !Array.isArray(state.invoices)) return false;
+    if (state.currentEmployee !== state.employeeProfile.full_name) {
+      setSelectedEmployee(state.employeeProfile.full_name);
+      renderReimbApprovals();
+    }
+    const panel = document.getElementById('reimbApprovalsPanel');
+    if (!panel || panel.style.display === 'none') return false;
+    scrollToNotifyAnchor('reimbApprovalsPanel');
+    return true;
+  },
   deal: (id) => {
     if (!(state.deals || []).some((d) => d.id === id)) return false;
     openDealDetail(id);
     return true;
   },
-  leave: (id) => revealBySelector(`tr[data-request-id="${cssEscape(id)}"]`),
+  // The approval row, where the decision is made. The upcoming-leave table
+  // higher up carries the same data-request-id, and matching it first left
+  // approvers at the top of Leave (13 Oct 2026).
+  // Leadership waits for that row (it may render after the other table);
+  // everyone else has no approvals panel and lands on the upcoming-leave row.
+  // A request still waiting lands on its row in "Waiting for you"; a decided
+  // one opens Past decisions (or your own list) and lands there.
+  leave: (id) => {
+    const key = cssEscape(id);
+    if (revealBySelector(`#leaveApprovalTableBody tr[data-request-id="${key}"]`)) return true;
+    if (!state.leaveRowsById?.has(id)) return false;
+    for (const [panelId, sel] of [['leaveDecisionsPanel', '#leaveDecidedTableBody'], ['leaveMinePanel', '#leaveMineList']]) {
+      const el = document.querySelector(`${sel} [data-request-id="${key}"]`);
+      const panel = document.getElementById(panelId);
+      if (el && panel && panel.offsetHeight > 0) { panel.open = true; return revealBySelector(`${sel} [data-request-id="${key}"]`); }
+    }
+    return true;
+  },
   client: (id) => {
     if (!(state.clients || []).some((c) => String(c.id) === String(id))) return false;
-    showClientDetail(id).catch(console.error);
+    showClientDetail(id).catch(actionFailed);
     return true;
   }
+  // @circle-omit-end
 };
 function cssEscape(v) { return (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v).replace(/["\\]/g, '\\$&'); }
 function revealBySelector(selector, then) {
@@ -1720,21 +2234,13 @@ function applyProductBranding(hostname = location.hostname) {
   // new hire.
   document.getElementById('staffAuthActions')?.remove();
   document.getElementById('staffAuthHelp')?.remove();
-  // No "Sign in to Circle" line: the mark and name sit directly above it, so it
-  // only repeated what the screen already said (8 Sep 2026).
-  document.getElementById('invitedEntranceTitle')?.remove();
   // "Partner sign in" rather than "Sign in with Google" — it names who the door
-  // is for. Google is still the mechanism, and the hint below says which
-  // account to use.
+  // is for. Google is still the mechanism.
   const partnerBtnLabel = document.querySelector('#partnerSignInBtn span');
   if (partnerBtnLabel) partnerBtnLabel.textContent = 'Partner sign in';
-  const entranceHint = document.getElementById('invitedEntranceHint');
-  // One button, two kinds of people: clients with an invited Google account,
-  // and the Your Agency account team who answer them here. Saying so beats a
-  // reviewer assuming the door is not for them.
-  if (entranceHint) {
-    entranceHint.textContent = 'Use the Google account your invite was sent to. Your Agency team: your @youragency.com account.';
-  }
+  // No hint under the button on Circle: just the button (22 Oct 2026).
+  // Colony keeps its hint, since candidates use that door too.
+  document.getElementById('invitedEntranceHint')?.remove();
   document.getElementById('invitedEntrance')?.classList.add('is-only-entrance');
 
   document.documentElement.setAttribute('data-product', 'circle');
@@ -1918,6 +2424,7 @@ function applyRoleAccess() {
     section.classList.add('hidden');
   });
 
+  // @circle-omit Colony's own screens: Circle has none of them (audit S21)
   const teamDashboardNav = navButtons.find((btn) => btn.dataset.screen === 'leadership-planner');
   const peopleDirectoryNav = navButtons.find((btn) => btn.dataset.screen === 'people-directory');
   const adminSettingsNav = navButtons.find((btn) => btn.dataset.screen === 'admin-settings');
@@ -1939,18 +2446,19 @@ function applyRoleAccess() {
   if (adminSettingsScreen) {
     adminSettingsScreen.classList.toggle('hidden', !adminSettingsAccess);
   }
+  // @circle-omit-end
 
-  // Onboarding: policy docs editor visible to admin only
-  const policyDocsPanel = document.getElementById('policyDocumentsPanel');
-  if (policyDocsPanel) policyDocsPanel.style.display = adminSettingsAccess ? '' : 'none';
-  const onbTemplatesPanel = document.getElementById('onboardingTemplatesPanel');
-  if (onbTemplatesPanel) onbTemplatesPanel.style.display = adminSettingsAccess ? '' : 'none';
+  // Policies are edited in place on the Policies page (its own Edit button);
+  // the duplicate editor in Settings was removed (T2, 8 Oct 2026).
 
+  // @circle-omit employee profile selection: Colony screens only
   if (!leadershipAccess) {
     const ownName = state.employeeProfile?.full_name || state.currentEmployee || DEFAULT_EMPLOYEE;
     setSelectedEmployee(ownName);
   }
+  // @circle-omit-end
 
+  // @circle-omit Colony's own screens: Circle has none of them (audit S21)
   const active = getActiveScreenId();
   const blockedActiveScreen =
     (active === 'leadership-planner' && !teamDashboardAccess) ||
@@ -1959,9 +2467,12 @@ function applyRoleAccess() {
   if (blockedActiveScreen) {
     activateScreen(defaultHomeScreen());
   }
+  // @circle-omit-end
 
+  // @circle-omit Colony screens only
   syncTaskManagerUi();
   syncAllocationManagerUi();
+  // @circle-omit-end
   applySuperadminOnlyControls();
   syncMobileNav();
 }
@@ -2003,6 +2514,9 @@ function toggleTheme() {
   const newTheme = isDark ? 'light' : 'dark';
   applyTheme(newTheme);
   try { localStorage.setItem('colony-theme', newTheme); } catch (_) {}
+  // Charts paint their colours once; whatever draws them listens for this
+  // and redraws (3 Nov 2026). An event, so Circle's build keeps no chart code.
+  document.dispatchEvent(new CustomEvent('app:theme'));
 }
 
 (function initTheme() {
@@ -2025,16 +2539,17 @@ document.querySelectorAll('.header-logo, .sidebar-brand').forEach((el) => {
   });
 });
 
-document.querySelector('.canvas').addEventListener('click', (e) => {
-  const prev = e.target.closest('.screen-arrow.prev');
-  const next = e.target.closest('.screen-arrow.next');
-  if (prev) navigateScreenByDelta(-1);
-  if (next) navigateScreenByDelta(1);
-});
-
 // ── Mobile Bottom Tab Bar + More Sheet ──────────────────────────────────
 
 const MOBILE_TAB_ICONS = {
+  // Client screens (Circle). Kept first: the staff entries below are cut from
+  // Circle's bundle.
+  'partner-home': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>',
+  'partner-timeline': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>',
+  'partner-team': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  'partner-feedback': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  'more': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>',
+  // @circle-omit staff screens
   'daily-tasklist': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
   'my-allocations': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>',
   'leave-center': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
@@ -2046,24 +2561,34 @@ const MOBILE_TAB_ICONS = {
   'feature-requests': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   'executive-dashboard': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>',
   'bd-pipeline': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+  'briefs-pipeline': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6"/></svg>',
+  'hiring': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M19 8v6M16 11h6"/></svg>',
   'invoice-center': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
-  'more': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>',
+  // @circle-omit-end
 };
 
 const MOBILE_TAB_LABELS = {
-  'daily-tasklist': 'My Work',
+  'partner-home': 'Briefs',
+  'partner-timeline': 'Timeline',
+  'partner-team': 'Team',
+  'partner-feedback': 'Feedback',
+  'more': 'More',
+  // @circle-omit staff screens
+  'daily-tasklist': 'My week',
   'my-allocations': 'Allocation',
-  'leave-center': 'My Leave',
+  'leave-center': 'Leave',
   'home-feed': 'Home',
   'leadership-planner': 'Resources',
-  'people-directory': 'Directory',
+  'people-directory': 'People',
   'client-projects': 'Clients',
-  'admin-settings': 'Admin',
+  'admin-settings': 'Settings',
+  'briefs-pipeline': 'Briefs',
+  'hiring': 'Hiring',
   'feature-requests': 'Features',
   'executive-dashboard': 'Overview',
   'bd-pipeline': 'Deal Flow',
   'invoice-center': 'Invoices',
-  'more': 'More',
+  // @circle-omit-end
 };
 
 const mobileTabBar = document.getElementById('mobileTabBar');
@@ -2072,24 +2597,46 @@ const moreSheetBackdrop = document.getElementById('moreSheetBackdrop');
 const moreSheetList = document.getElementById('moreSheetList');
 
 function getMobileTabConfig() {
+  // Clients, and the reviewers who answer them on Circle, get their own
+  // screens. Until 24 Sep 2026 every signed-in phone got the STAFF tab bar —
+  // a client on Circle saw Home / My Work / Allocation / More (My Leave,
+  // Directory, Clients, Features), none of which exist for them.
+  if (isPartnerRole() || state.staffOnCircle) {
+    const tabs = navButtons
+      .filter((btn) => btn.dataset.role === 'partner' && !btn.classList.contains('hidden'))
+      .map((btn) => btn.dataset.screen);
+    return { tabs, more: [] };
+  }
+  // A candidate or a hiring-only account has a single screen: no tab bar.
+  if (state.hireProfile || state.hiringOnlyMode) return { tabs: [], more: [] };
+  // @circle-omit staff tabs: no staff session reaches this on Circle
   const leadership = isLeadershipRole();
   const dealFlow = isDealFlowViewer();
+  // Same groups as the sidebar (T2, 8 Oct 2026): You, Your Agency, Running Your Agency.
+  const briefs = !document.getElementById('briefsNavButton')?.classList.contains('hidden');
   if (leadership) {
     return {
-      tabs: ['home-feed', 'leadership-planner', 'daily-tasklist'],
+      tabs: ['home-feed', 'daily-tasklist', 'executive-dashboard'],
       more: [
+        'leave-center', 'people-directory', 'client-projects', ...(briefs ? ['briefs-pipeline'] : []),
         ...(dealFlow ? ['bd-pipeline'] : []),
-        'executive-dashboard',
-        'my-allocations', 'leave-center', 'people-directory', 'client-projects', 'feature-requests',
+        ...(isHiringCrew() ? ['hiring'] : []),
+        ...(isInvoiceViewer() ? ['invoice-center'] : []),
+        'feature-requests',
         ...(isSuperadminUser() ? ['admin-settings'] : [])],
     };
   }
   return {
-    tabs: ['home-feed', 'daily-tasklist', 'my-allocations'],
+    tabs: ['home-feed', 'daily-tasklist', 'leave-center'],
     more: [
+      'people-directory', 'client-projects', ...(briefs ? ['briefs-pipeline'] : []),
       ...(dealFlow ? ['bd-pipeline'] : []),
-      'leave-center', 'people-directory', 'client-projects', 'feature-requests'],
+      ...(isHiringCrew() ? ['hiring'] : []),
+      ...(isInvoiceViewer() ? ['invoice-center'] : []),
+      'feature-requests'],
   };
+  // @circle-omit-end
+  return { tabs: [], more: [] };   // reached only in Circle's bundle
 }
 
 function renderMobileTabBar() {
@@ -2107,11 +2654,13 @@ function renderMobileTabBar() {
     </button>`;
   });
 
-  // "More" button
-  html += `<button class="tab-item${moreActive ? ' active' : ''}" data-action="more" type="button">
-    ${MOBILE_TAB_ICONS.more}
-    <span class="tab-label">More</span>
-  </button>`;
+  // "More" button — only when there is more (client sessions have none)
+  if (config.more.length) {
+    html += `<button class="tab-item${moreActive ? ' active' : ''}" data-action="more" type="button">
+      ${MOBILE_TAB_ICONS.more}
+      <span class="tab-label">More</span>
+    </button>`;
+  }
 
   mobileTabBar.innerHTML = html;
 
@@ -2165,14 +2714,15 @@ function toggleMoreSheet(show) {
 }
 
 if (moreSheetBackdrop) {
-  moreSheetBackdrop.addEventListener('click', () => toggleMoreSheet(false));
+  moreSheetBackdrop.addEventListener('click', (e) => { if (isBackdropClick(e, moreSheetBackdrop)) toggleMoreSheet(false); });
 }
 
 function syncMobileNav() {
   if (!mobileTabBar) return;
   const isLoggedIn = state.isAuthenticated && getActiveScreenId() !== 'login';
-  mobileTabBar.hidden = !isLoggedIn;
-  if (isLoggedIn) {
+  const hasTabs = isLoggedIn && getMobileTabConfig().tabs.length > 0;
+  mobileTabBar.hidden = !hasTabs;
+  if (hasTabs) {
     renderMobileTabBar();
   }
 }
@@ -2182,6 +2732,7 @@ let _lastMobileState = window.matchMedia('(max-width: 768px)').matches;
 // Guard with a lock to prevent concurrent loadDailyTasksFromSupabase calls.
 let _taskLoadInFlight = false;
 let _carryForwardDoneThisSession = false;
+// @circle-omit Colony-only wiring
 document.addEventListener('visibilitychange', async () => {
   if (document.hidden || _taskLoadInFlight) return;
   if (!state.isAuthenticated) return;
@@ -2200,10 +2751,12 @@ document.addEventListener('visibilitychange', async () => {
     _taskLoadInFlight = false;
   }
 });
+// @circle-omit-end
 
 // Midnight boundary: detect date change and re-run carry-forward for the new day.
 // Fires every 60s — lightweight check, only reloads when date actually changes.
 let _lastCheckedDate = toISODateLocal();
+// @circle-omit Colony-only wiring
 setInterval(() => {
   if (!state.isAuthenticated) return;
   const now = toISODateLocal();
@@ -2213,16 +2766,19 @@ setInterval(() => {
     loadDailyTasksFromSupabase().catch((err) => console.error('Midnight reload failed:', err));
   }
 }, 60000);
+// @circle-omit-end
 
 window.addEventListener('resize', () => {
   syncMobileNav();
   const isMobile = window.matchMedia('(max-width: 768px)').matches;
   if (isMobile !== _lastMobileState) {
     _lastMobileState = isMobile;
+    // @circle-omit the planner is a Colony screen
     // Re-render planner when crossing mobile/desktop breakpoint
     if (state._plannerByDept) {
       renderActivePlannerView();
     }
+    // @circle-omit-end
   }
 });
 syncMobileNav();
@@ -2338,8 +2894,9 @@ async function fetchCurrentEmployeeProfile(ensureResult) {
     throw new Error('Account bootstrap succeeded but profile id is missing.');
   }
 
-  // Address and emergency contact are column-revoked from authenticated
-  // (202609210001) and come from employee_private_details, own row only.
+  // Address, emergency contact (202609210001) and date of birth (202609250002)
+  // are column-revoked from authenticated and come from
+  // employee_private_details, own row only.
   const [employeeResult, privateDetails] = await Promise.all([state.supabase
     .from('employees')
     .select(`
@@ -2356,12 +2913,15 @@ async function fetchCurrentEmployeeProfile(ensureResult) {
       job_title,
       current_city,
       timezone,
-      date_of_birth,
       direct_manager_email,
       department:departments!employees_department_id_fkey (
         id,
         name,
         leave_tracking_enabled
+      ),
+      requested_department:departments!employees_requested_department_id_fkey (
+        id,
+        name
       )
     `)
     .eq('id', profileId)
@@ -2376,7 +2936,8 @@ async function fetchCurrentEmployeeProfile(ensureResult) {
 // callers must then leave those fields out of any save, never write blanks.
 async function loadEmployeePrivateDetails(employeeId) {
   if (!state.supabase || !employeeId) return null;
-  const { data, error } = await state.supabase.rpc('employee_private_details', { p_employee_id: employeeId });
+  // Sign-in and the profile panel ask for your own at the same moment (P1).
+  const { data, error } = await shareInFlight(`privateDetails|${employeeId}`, () => state.supabase.rpc('employee_private_details', { p_employee_id: employeeId }));
   if (error) {
     console.warn('Private profile details unavailable:', error.message);
     return null;
@@ -2394,7 +2955,9 @@ function resetToSignedOutState() {
     state.hireProfile = null;
     state.hiringOnlyMode = false;
     state.staffOnCircle = false;
+    // @circle-omit Colony screens only
     placeHiringPanel('directory');
+    // @circle-omit-end
     state.currentEmployeeId = null;
     state.employeeDirectory = [];
     state.inactiveEmployees = [];
@@ -2408,7 +2971,6 @@ function resetToSignedOutState() {
     state.allocationViewEmployeeId = null;
     state.role = 'employee';
     state.currentEmployee = DEFAULT_EMPLOYEE;
-    invoiceUnlocked = false;
     setAuthenticatedNavigation(false);
     if (signInBtn) signInBtn.classList.remove('hidden');
     if (registerBtn) registerBtn.classList.remove('hidden');
@@ -2426,6 +2988,7 @@ function resetToSignedOutState() {
     } else {
       setLoginStatus('Choose Sign in or Register with your @youragency.com Google account.', 'status');
     }
+    // @circle-omit clearing Colony screens
     setDailyTaskNotice('');
     renderPeopleDirectory();
     renderTaskEmployeeFilterOptions();
@@ -2442,6 +3005,7 @@ function resetToSignedOutState() {
     setLeaveBalanceNotice('Sign in to load leave balances.');
     if (orgChartPanel) orgChartPanel.classList.add('hidden');
     if (toggleOrgChartBtn) toggleOrgChartBtn.textContent = 'Org Chart';
+    // @circle-omit-end
     // Runs after every field above is cleared, so applyFooterLinkAccess()
     // inside it sees a genuinely signed-out state.
     applyRoleAccess();
@@ -2458,6 +3022,13 @@ async function establishIdentityAndRole(authEmail, wasAuthenticated) {
     // reads depends on another, so they run together: one after another they
     // were ~3s of every sign-in and page load (17 Sep 2026).
     const ensureResult = await ensureEmployeeProfileRow();
+    // Paused (7 Oct 2026): the database already treats them as signed out, so
+    // nothing else would load. Stop here and show why, and the way back.
+    if (ensureResult.data?.access_paused_at) {
+      const paused = new Error('Access paused');
+      paused.accessPause = ensureResult.data;
+      throw paused;
+    }
     const [rawProfile] = await Promise.all([
       fetchCurrentEmployeeProfile(ensureResult),
       loadAccessOverrides().catch(err => console.warn('Access overrides load failed, using fallback:', err)),
@@ -2507,14 +3078,24 @@ function applySignedInChrome(employeeProfile, authEmail, wasAuthenticated) {
     }
     state.authIntent = 'signin';
 
+    // @circle-omit Colony screens only
     if (!wasAuthenticated) {
       setSelectedEmployee(employeeProfile.full_name || DEFAULT_EMPLOYEE);
     }
+    // @circle-omit-end
     applyRoleAccess();
+    // @circle-omit Colony screens only
     applyInvoiceVisibility();
     applyDealFlowVisibility();
     applyBriefsVisibility();
+    applyNdaVisibility().catch(console.error);
     applyFractionalVisibility();
+    state.isLeaveViewer = undefined;
+    state.supabase.rpc('is_leave_viewer').then(({ data }) => {
+      state.isLeaveViewer = data === true;
+      applyFractionalVisibility();
+    }).catch(console.error);
+    // @circle-omit-end
 }
 
 // Phase: initial data fan-out (each load fails independently).
@@ -2522,6 +3103,40 @@ function applySignedInChrome(employeeProfile, authEmail, wasAuthenticated) {
 // "this request had no usable identity" — an ordinary RLS refusal ("new row
 // violates row-level security policy") must NOT land here, it is a real
 // answer to a real request.
+// One request per dataset and inputs at a time (P1, 25 Sep 2026). Sign-in and
+// the first screen start the same loaders from several places at once
+// (applySignedInChrome, applyRoleAccess, loadInitialAppData, the screen
+// refresh): measured 61 requests for an admin's home, allocations alone 16
+// times. A call made while an identical one is running reuses it, but only if
+// nothing has been WRITTEN since that one started, so a reload after a save
+// can never be handed pre-save data. supabaseWriteEpoch is bumped by the
+// client's fetch wrapper before every write leaves the browser.
+let supabaseWriteEpoch = 0;
+const inFlightLoads = new Map();
+function shareInFlight(key, run) {
+  const hit = inFlightLoads.get(key);
+  if (hit && hit.epoch === supabaseWriteEpoch) return hit.promise;
+  const entry = { epoch: supabaseWriteEpoch, promise: null };
+  entry.promise = Promise.resolve().then(run).finally(() => {
+    if (inFlightLoads.get(key) === entry) inFlightLoads.delete(key);
+  });
+  inFlightLoads.set(key, entry);
+  return entry.promise;
+}
+
+// Reads that travel as POST: RPCs named get_/is_/can_/home_/current_ and the
+// private-details lookup. Every other POST/PATCH/PUT/DELETE to the database or
+// storage counts as a write.
+function isSupabaseWrite(input, init) {
+  const method = String(init?.method || (typeof input === 'object' && input?.method) || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return false;
+  let path = '';
+  try { path = new URL(typeof input === 'string' ? input : input.url).pathname; } catch { return true; }
+  if (!/\/(rest|storage)\/v1\//.test(path)) return false;
+  const rpc = path.match(/\/rest\/v1\/rpc\/([\w]+)/);
+  return !(rpc && /^(get_|is_|can_|home_|current_|employee_private_details$)/.test(rpc[1]));
+}
+
 let authLossInFlight = false;
 function isDeadSessionBody(body) {
   return /permission denied for schema|JWT expired|invalid claim|bad_jwt|token is expired/i.test(body || '');
@@ -2545,7 +3160,9 @@ async function handlePossibleAuthLoss(response) {
     // One honest attempt to refresh before giving up on the session.
     const { data, error } = await state.supabase.auth.refreshSession();
     if (!error && data?.session) {
+      // @circle-omit Circle's screens reload their own data
       await loadInitialAppData().catch((e) => console.error('Reload after session refresh failed:', e));
+      // @circle-omit-end
       return;
     }
     // Never sign out blind: if the client no longer holds a session, calling
@@ -2675,12 +3292,14 @@ async function applyAuthState(session) {
     await applyOutsiderAuthState(authEmail, wasAuthenticated);
     return;
   }
+  // @circle-omit the list is redacted in Circle's config, so this never matches there
   if (HIRING_ONLY_EMAILS.includes(authEmail)) {
     // Hiring-only accounts (Leo/legal): youragency email, but never an
     // employee profile — they get the hiring section and nothing else.
     await applyHiringOnlyAuthState(authEmail, wasAuthenticated);
     return;
   }
+  // @circle-omit-end
 
   try {
     const employeeProfile = await establishIdentityAndRole(authEmail, wasAuthenticated);
@@ -2692,18 +3311,9 @@ async function applyAuthState(session) {
     if (onCircle) {
       if (!isBriefReviewer()) {
         state.staffOnCircle = false;
-        // This runs on Circle only, so the staff product is named through
-        // productName(STAFF_HOST) — the Circle build rewrites that one literal,
-        // keeping the internal product's name out of what clients download.
-        const staffProduct = productName(STAFF_HOST);
-        const msg = `This is the client workspace. Your workspace is ${staffProduct}.`;
-        state.pendingAuthStatus = { message: msg, className: 'status error' };
-        await state.supabase.auth.signOut();
-        setLoginStatus(msg, 'status error');
-        appConfirm(
-          `${msg}\n\nCircle is where clients work. Only the account team signs in here.`,
-          { title: 'Wrong door', confirmLabel: `Go to ${staffProduct}`, cancelLabel: 'Close' }
-        ).then((go) => { if (go) window.location.href = `https://${STAFF_HOST}`; }).catch(() => {});
+        // Same refusal as an uninvited email (1 Oct 2026): whoever
+        // lands here is simply not authorised for Circle.
+        await refuseUnauthorised(authEmail);
         return;
       }
       state.staffOnCircle = true;
@@ -2711,6 +3321,7 @@ async function applyAuthState(session) {
 
     applySignedInChrome(employeeProfile, authEmail, wasAuthenticated);
 
+    // @circle-omit the warning below fires only for a staff session on Colony
     // Came in via the "Partner sign in" button with an youragency account?
     // Routing is by email, so they got the employee view — say so, or this
     // reads as "the partner button is broken" (3 Aug 2026).
@@ -2728,6 +3339,7 @@ async function applyAuthState(session) {
         { title: 'That was the invited sign-in', confirmLabel: 'Got it', cancelLabel: 'Close' }
       ).catch(() => {});
     }
+    // @circle-omit-end
 
     // Skip full data reload on token refresh — preserves unsaved form inputs
     if (wasAuthenticated) {
@@ -2743,6 +3355,7 @@ async function applyAuthState(session) {
     // a second Google sign-in (17 Sep 2026; auth logs show /authorize
     // with no logout in between). The onboarding overlay and the leadership
     // badge are employee-app chrome the Circle bundle does not contain.
+    // @circle-omit staff who reach this on Circle are always staffOnCircle
     if (!state.staffOnCircle) {
       await loadInitialAppData();
 
@@ -2759,10 +3372,16 @@ async function applyAuthState(session) {
         loadOnboardingBadge().catch(console.error);
       }
     }
+    // @circle-omit-end
 
     routeAfterSignIn(wasAuthenticated, activeScreenBeforeAuthUpdate);
     dismissSplash();
   } catch (error) {
+    if (error.accessPause) {
+      showAccessPause(error.accessPause);
+      dismissSplash();
+      return;
+    }
     console.error(error);
     const bootstrapError = `Unable to bootstrap employee profile: ${error.message}`;
     state.pendingAuthStatus = { message: bootstrapError, className: 'status error' };
@@ -2770,6 +3389,115 @@ async function applyAuthState(session) {
     await state.supabase.auth.signOut();
     dismissSplash();
   }
+}
+
+// ── Access pause (7 Oct 2026) ─────────────────────────────────────────────
+// A paused person signs in to this and nothing else. An emergency-contact
+// pause carries its own way back in: save the contact and Colony reloads.
+// A manual pause just says who to talk to.
+function showAccessPause(emp) {
+  document.getElementById('accessPauseScreen')?.remove();
+  const name = escapeHtml(String(emp.full_name || '').split(' ')[0] || 'there');
+  const forContact = emp.access_pause_reason === 'emergency_contact';
+  const wrap = document.createElement('div');
+  wrap.id = 'accessPauseScreen';
+  wrap.className = 'access-pause';
+  wrap.innerHTML = `<div class="access-pause-card">
+    <p class="eyebrow">Colony</p>
+    ${forContact ? `
+      <h2>Hi ${name}, one thing before you're back in</h2>
+      <p>We still need an emergency contact for you: someone we can reach if anything ever happens to you at work. Add it and you're straight back in.</p>
+      <form id="accessPauseForm" class="access-pause-form">
+        <label>Their name<input id="apName" type="text" autocomplete="off" required></label>
+        <label>Their phone number<span class="ap-phone">
+          <select id="apCode">${['+91', '+1', '+44', '+61', '+65', '+971'].map((c) => `<option>${c}</option>`).join('')}</select>
+          <input id="apNumber" type="tel" inputmode="tel" autocomplete="off" required>
+        </span></label>
+        <p class="mini-meta" id="apStatus"></p>
+        <div class="access-pause-actions"><button class="primary" type="submit">Save and continue</button><button class="ghost" type="button" data-ap-signout>Sign out</button></div>
+      </form>` : `
+      <h2>Your Colony access is paused</h2>
+      <p>Please speak to Alex to have it turned back on.</p>
+      <div class="access-pause-actions"><button class="ghost" type="button" data-ap-signout>Sign out</button></div>`}
+  </div>`;
+  document.body.appendChild(wrap);
+  wrap.querySelector('[data-ap-signout]')?.addEventListener('click', () => state.supabase.auth.signOut().then(() => location.reload()));
+  wrap.querySelector('#accessPauseForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = wrap.querySelector('#apStatus');
+    const btn = wrap.querySelector('button[type="submit"]');
+    const phone = `${wrap.querySelector('#apCode').value} ${wrap.querySelector('#apNumber').value.trim()}`;
+    btn.disabled = true;
+    status.textContent = 'Saving…';
+    const { error } = await state.supabase.rpc('save_my_emergency_contact', { p_name: wrap.querySelector('#apName').value, p_phone: phone });
+    if (error) { status.textContent = error.message; btn.disabled = false; return; }
+    location.reload();
+  });
+}
+
+// Superadmin only (the database checks too). Paused people read nothing
+// until resumed; an emergency-contact pause also lifts when they save one.
+async function toggleEmployeeAccessPause(employeeId) {
+  const emp = (state.employeeDirectory || []).find((e) => e.id === employeeId);
+  if (!emp) return;
+  const pausing = !emp.access_paused_at;
+  const { error } = await state.supabase.rpc('set_employee_access_pause', { p_employee: employeeId, p_pause: pausing, p_note: null });
+  if (error) { appAlert(`Could not ${pausing ? 'pause' : 'resume'}: ${error.message}`); return; }
+  await loadEmployeeDirectoryFromSupabase();
+  syncProfileOffboardButton();
+}
+
+// Offboard lives on the person's edit page, not in every directory row (Alex,
+// 7 Oct 2026: three stacked buttons broke the table). For the superadmin it
+// first offers the lighter option: pause their access, which is undone in one
+// click, or carry on to offboarding.
+const profileOffboardBtn = document.getElementById('profileOffboardBtn');
+function profileTargetEmployee() {
+  // The profile screen shows whoever setSelectedEmployee() named.
+  const id = getEmployeeIdByName(state.currentEmployee);
+  return id ? (state.employeeDirectory || []).find((e) => e.id === id) : null;
+}
+function syncProfileOffboardButton() {
+  if (!profileOffboardBtn) return;
+  const emp = profileTargetEmployee();
+  const show = Boolean(emp && isLeadershipRole() && emp.id !== state.currentEmployeeId);
+  profileOffboardBtn.classList.toggle('hidden', !show);
+  if (show) profileOffboardBtn.textContent = emp.access_paused_at && isSuperadminUser() ? 'Offboard or resume' : 'Offboard';
+}
+profileOffboardBtn?.addEventListener('click', async () => {
+  const emp = profileTargetEmployee();
+  if (!emp) return;
+  const name = displayPersonName(emp.full_name, 'this person');
+  if (isSuperadminUser() && normalizeEmail(emp.email) !== normalizeEmail(state.session?.user?.email)) {
+    const paused = Boolean(emp.access_paused_at);
+    const pick = await appChoice(paused
+      ? `${name}'s access is paused.`
+      : `Pause ${name}'s access for now, or offboard them?`, {
+      title: name,
+      choices: [
+        { label: paused ? 'Resume access' : 'Pause access', value: 'pause' },
+        { label: 'Continue to offboard', value: 'offboard' }
+      ]
+    });
+    if (pick === 'pause') { await toggleEmployeeAccessPause(emp.id); return; }
+    if (pick !== 'offboard') return;
+  }
+  openOffboardEmployeeFlow(emp.id, emp.full_name).catch((error) => {
+    console.error(error);
+    appAlert(`Unable to start offboarding: ${error.message}`);
+  });
+});
+
+// Signed in, but not allowed in here: sign out and say so in one line
+// (1 Oct 2026). Used for uninvited emails and for staff who are not
+// brief reviewers on Circle.
+async function refuseUnauthorised(authEmail) {
+  const product = productName(location.hostname);
+  const msg = `Your email isn't authorised for ${product}. Please ask your Your Agency team for access.`;
+  state.pendingAuthStatus = { message: msg, className: 'status error' };
+  await state.supabase.auth.signOut();
+  setLoginStatus(msg, 'status error');
+  appAlert(msg, { title: 'No access' }).catch(() => {});
 }
 
 // Phase: invited-outsider session (non-youragency email). Invite-only; the email
@@ -2792,18 +3520,8 @@ async function applyOutsiderAuthState(authEmail, wasAuthenticated) {
         return;
       }
       // The first thing a mistyped or uninvited client ever sees, so it must
-      // name THEIR product. Said "No Colony invite" until 10 Sep 2026 — a
-      // platform they have never heard of and cannot reach.
-      const msg = `No ${productName(location.hostname)} invite for this email. Ask your Your Agency contact for an invite.`;
-      state.pendingAuthStatus = { message: msg, className: 'status error' };
-      await state.supabase.auth.signOut();
-      setLoginStatus(msg, 'status error');
-      // The status line under the sign-in buttons is easy to miss — say it
-      // plainly, then the user is back on the sign-in screen.
-      appConfirm(
-        `${authEmail} isn't on ${productName(location.hostname)}'s invite list, so we've signed you out. If you're expecting access, ask your Your Agency contact to invite this exact email address.`,
-        { title: 'Invited sign-in failed', confirmLabel: 'OK', cancelLabel: 'Close' }
-      ).catch(() => {});
+      // name THEIR product (never "Colony" on Circle).
+      await refuseUnauthorised(authEmail);
       return;
     }
 
@@ -2876,6 +3594,7 @@ async function applyHireAuthState(hire, authEmail, wasAuthenticated) {
   // @youragency.com check upstream never sees them — without this they would be
   // stranded on Circle.
   if (routeToHomeHost('hire')) return;
+  // @circle-omit on Circle a candidate is always sent to the team app above
   if (signInBtn) signInBtn.classList.add('hidden');
   if (registerBtn) registerBtn.classList.add('hidden');
   if (partnerSignInBtn) partnerSignInBtn.classList.add('hidden');
@@ -2889,6 +3608,7 @@ async function applyHireAuthState(hire, authEmail, wasAuthenticated) {
   renderHireChecklist();
   navigateToScreen('hire-checklist', { replace: true });
   dismissSplash();
+  // @circle-omit-end
 }
 
 // Hiring-only session (Leo/legal): youragency account, hiring section only.
@@ -3020,6 +3740,7 @@ async function initializeSupabaseAuth() {
       // happened to load first (24 Aug 2026). Now a dead session is
       // recognised once, here, and turned into a normal re-sign-in.
       fetch: async (input, init) => {
+        if (isSupabaseWrite(input, init)) supabaseWriteEpoch += 1;
         const response = await fetch(input, init);
         if (response.status === 401 || response.status === 403) {
           handlePossibleAuthLoss(response.clone()).catch(() => {});
@@ -3116,7 +3837,21 @@ const archiveDayDetailBody = document.getElementById('archiveDayDetailBody');
 const archiveDayDetailClose = document.getElementById('archiveDayDetailClose');
 const homeStatCards = document.getElementById('homeStatCards');
 const homeFeedList = document.getElementById('homeFeedList');
-const homeFeedEmpty = document.getElementById('homeFeedEmpty');
+// One delegated listener: rows that link, rows that unfold.
+// @circle-omit Colony-only wiring
+homeFeedList?.addEventListener('click', (ev) => {
+  const row = ev.target.closest('.hl-row');
+  if (!row) return;
+  if (row.dataset.link) { navigateToScreen(row.dataset.link); return; }
+  if (row.hasAttribute('data-detail')) row.querySelector('.hl-detail')?.classList.toggle('hidden');
+});
+document.getElementById('homeYourDay')?.addEventListener('click', (ev) => {
+  const a = ev.target.closest('[data-link]');
+  if (!a) return;
+  ev.preventDefault();
+  navigateToScreen(a.dataset.link);
+});
+// @circle-omit-end
 const featureRequestThread = document.getElementById('featureRequestThread');
 const featureRequestNotice = document.getElementById('featureRequestNotice');
 const newFeatureRequestInput = document.getElementById('newFeatureRequestInput');
@@ -3194,8 +3929,7 @@ function dedupeSortedNames(values) {
 function taskClientNamesFromState() {
   const clientNames = state.clients
     .filter((row) => row.is_active !== false)
-    .map((row) => row.name)
-    .filter((name) => normalizeClientNameKey(name) !== 'internal');
+    .map((row) => row.name);
   return dedupeSortedNames(clientNames);
 }
 
@@ -3218,15 +3952,8 @@ function renderTaskClientOptions() {
 function renderPeopleDirectory() {
   if (!peopleDirectoryBody) return;
   peopleDirectoryBody.innerHTML = '';
-  const showAccessRole = isLeadershipRole();
-  const showUtilization = isLeadershipRole();
-  const colCount = (showAccessRole ? 1 : 0) + (showUtilization ? 1 : 0) + 7;
-
-  // Toggle Access Role and Utilization header visibility
-  const directoryTable = peopleDirectoryBody.closest('table');
-  const headers = directoryTable?.querySelectorAll('thead th');
-  if (headers?.[5]) headers[5].classList.toggle('hidden', !showAccessRole);
-  if (headers?.[6]) headers[6].classList.toggle('hidden', !showUtilization);
+  // Access role and utilization left the directory (8 Oct 2026).
+  const colCount = 5;
 
   if (!state.employeeDirectory.length) {
     const row = document.createElement('tr');
@@ -3236,35 +3963,21 @@ function renderPeopleDirectory() {
     return;
   }
 
-  // Compute per-employee utilization from current week allocations
-  const empAllocTotals = new Map();
-  state.homeAllocations.forEach(a => {
-    const cur = empAllocTotals.get(a.employee_id) || 0;
-    empAllocTotals.set(a.employee_id, cur + (a.allocation_percent || 0));
-  });
-
   state.employeeDirectory.filter(e => !getHiddenEmployeeEmails().includes(normalizeEmail(e.email))).forEach((employee) => {
-    const util = Math.min(Math.round(empAllocTotals.get(employee.id) || 0), 100);
     const displayName = displayPersonName(employee.full_name, 'Employee');
     const reportsTo = managerLabelForEmployee(employee);
-    const accessRole = normalizeAccessLevel(employee.access_level || 'employee');
-    const accessLabel = accessRole === 'admin' ? 'Admin' : accessRole === 'leadership' ? 'Leadership' : 'Employee';
     const canEdit = canEditEmployee(employee);
     const actionCell = canEdit
       ? `
         <button class="ghost small" type="button" data-directory-action="edit" data-employee-id="${employee.id}" data-employee="${escapeHtml(employee.full_name)}">Edit</button>
-        <button class="ghost small" type="button" data-directory-action="offboard" data-employee-id="${employee.id}" data-employee="${escapeHtml(employee.full_name)}">Offboard</button>
       `
       : '<span class="mini-meta">View only</span>';
     const row = document.createElement('tr');
     row.innerHTML = `
-      <td data-label="Name">${state.onboardingEmployeeIds?.has(employee.id) ? '<span class="onboarding-dot" title="Onboarding in progress"></span>' : ''}<button class="name-link employee-link" data-employee="${escapeHtml(employee.full_name)}">${escapeHtml(displayName)}</button>${employee.current_city ? `<span class="directory-city">📍 ${escapeHtml(employee.current_city)}</span>` : ''}</td>
+      <td data-label="Name">${state.onboardingEmployeeIds?.has(employee.id) ? '<span class="onboarding-dot" title="New joiner: steps still open on their hire"></span>' : ''}${employmentMark(employee.employment_type)}<button class="name-link employee-link" data-employee="${escapeHtml(employee.full_name)}">${escapeHtml(displayName)}</button>${employee.access_paused_at ? `<span class="paused-chip" title="${employee.access_pause_reason === 'emergency_contact' ? 'Until they add an emergency contact' : 'Paused by Alex'}">Paused</span>` : ''}${employee.current_city ? `<span class="directory-city">📍 ${escapeHtml(employee.current_city)}</span>` : ''}</td>
       <td data-label="Email">${escapeHtml(employee.email || '')}</td>
       <td data-label="Department">${escapeHtml(normalizeTeamName(employee.department?.name, TEAM_AM))}</td>
       <td data-label="Reports To">${escapeHtml(reportsTo)}</td>
-      <td data-label="Type">${escapeHtml(employmentTypeLabel(employee.employment_type))}</td>
-      ${showAccessRole ? `<td data-label="Access">${accessLabel}</td>` : ''}
-      ${showUtilization ? `<td data-label="Utilization">${util}%</td>` : ''}
       <td data-label="">${actionCell}</td>
     `;
     peopleDirectoryBody.appendChild(row);
@@ -3272,6 +3985,15 @@ function renderPeopleDirectory() {
 
   renderOrgChart();
   renderDeactivatedEmployees();
+}
+
+// Full-time or fractional, as a mark (8 Oct 2026). A consultant works full
+// time on contract, so the directory shows them as full-time: "consultant" is
+// a contract type, not something people need to see here.
+function employmentMark(type) {
+  const fractional = type === 'fractional';
+  const label = fractional ? 'Fractional' : 'Full-time';
+  return `<span class="emp-mark ${fractional ? 'is-fractional' : 'is-full'}" title="${label}" role="img" aria-label="${label}"></span>`;
 }
 
 function renderDeactivatedEmployees() {
@@ -3449,25 +4171,18 @@ function ensureOffboardModalStyles() {
   const s = document.createElement('style');
   s.id = 'offboardModalStyles';
   s.textContent = `
-    .ofb-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px}
-    .ofb-modal{background:var(--panel-bg,#161b26);color:var(--text,#e6ebf5);border:1px solid var(--panel-border,#262d3d);border-radius:14px;max-width:680px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.5)}
-    .ofb-head{padding:18px 22px;border-bottom:1px solid var(--panel-border,#262d3d)}
-    .ofb-head h3{margin:0;font-size:18px}
-    .ofb-head .ofb-sub{font-size:12px;color:var(--text-muted,#8b95a8);margin-top:4px}
-    .ofb-body{padding:16px 22px;overflow-y:auto;flex:1}
-    .ofb-section{margin-bottom:14px;padding:12px 14px;border:1px solid var(--panel-border,#262d3d);border-radius:10px;background:var(--panel-bg-alt,#1a1f2c)}
-    .ofb-section h4{margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted,#8b95a8)}
-    .ofb-section .ofb-count{font-size:20px;font-weight:600}
-    .ofb-section ul{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--text-muted,#8b95a8)}
-    .ofb-reassign-row{display:flex;gap:8px;align-items:center;margin:6px 0;font-size:13px}
+    .ofb-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14px}
+    .ofb-list li{padding-left:14px;position:relative}
+    .ofb-list li::before{content:'';position:absolute;left:0;top:.6em;width:5px;height:5px;border-radius:50%;background:var(--muted)}
+    .ofb-none{margin:0;font-size:14px;color:var(--muted)}
+    .ofb-handover{display:flex;flex-direction:column;gap:8px}
+    .ofb-label{margin:0;font-size:12px;color:var(--muted)}
+    .ofb-reassign-row{display:flex;gap:10px;align-items:center;font-size:14px}
     .ofb-reassign-row .ofb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .ofb-reassign-row select{flex:1;min-width:160px}
-    .ofb-empty{color:var(--text-muted,#8b95a8);font-size:13px}
-    .ofb-foot{padding:14px 22px;border-top:1px solid var(--panel-border,#262d3d);display:flex;gap:10px;justify-content:flex-end;align-items:center}
-    .ofb-btn{padding:8px 14px;border-radius:8px;border:1px solid var(--panel-border,#262d3d);background:transparent;color:var(--text,#e6ebf5);cursor:pointer;font-size:13px}
-    .ofb-btn.danger{background:#c0392b;border-color:#c0392b;color:#fff;font-weight:600}
-    .ofb-btn:disabled{opacity:.45;cursor:not-allowed}
-    .ofb-status{font-size:12px;color:var(--text-muted,#8b95a8);margin-right:auto}
+    .ofb-reassign-row select{flex:0 0 170px;margin:0}
+    .ofb .app-modal-actions button{margin:0}
+    .ofb .app-modal-actions button:disabled{opacity:.45;cursor:not-allowed}
+    .ofb-status{font-size:12px;color:var(--muted);margin-right:auto}
   `;
   document.head.appendChild(s);
 }
@@ -3519,53 +4234,47 @@ async function openOffboardEmployeeFlow(employeeId, employeeName) {
     .map(e => ({ id: e.id, name: e.full_name }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  // Build modal
-  const backdrop = document.createElement('div');
-  backdrop.className = 'ofb-backdrop';
-  const reassignSelect = (kind, item, label) =>
-    `<div class="ofb-reassign-row"><span class="ofb-name">${escapeHtml(label)}</span><select data-ofb-reassign="${kind}" data-id="${escapeHtml(item.id)}"><option value="">— Reassign to —</option>${candidates.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('')}</select></div>`;
+  // A small pop-up in the same style as every other Colony dialog (Alex,
+  // 7 Oct 2026: the old one filled the screen with five boxes saying "0").
+  // Only what will actually happen is listed; handovers need a person picked.
+  const first = String(employeeName || '').split(' ')[0] || employeeName;
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const effects = [
+    data.tasks.length && `${plural(data.tasks.length, 'open task', 'open tasks')} archived`,
+    data.leave.length && `${plural(data.leave.length, 'upcoming leave request', 'upcoming leave requests')} cancelled`,
+    data.allocs.length && `${plural(data.allocs.length, 'allocation', 'allocations')} from this week on removed`,
+    data.standing.length && `${plural(data.standing.length, 'standing client allocation', 'standing client allocations')} removed`,
+    data.onboarding.length && `${plural(data.onboarding.length, 'onboarding checklist', 'onboarding checklists')} deleted`
+  ].filter(Boolean);
+  const handovers = [
+    ...data.clients.map(c => ({ kind: 'client', id: c.id, label: c.name || 'Untitled client' })),
+    ...data.deals.map(d => ({ kind: 'deal', id: d.id, label: d.deal_name || 'Untitled deal' }))
+  ];
+  const options = candidates.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(displayPersonName(c.name, c.name))}</option>`).join('');
 
-  const sec = (title, count, body) =>
-    `<div class="ofb-section"><h4>${title}</h4><div class="ofb-count">${count}</div>${body || ''}</div>`;
-
-  const tasksBody = data.tasks.length
-    ? `<ul>${data.tasks.slice(0, 6).map(t => `<li>${escapeHtml(t.task_title || 'Untitled')}</li>`).join('')}${data.tasks.length > 6 ? `<li>+${data.tasks.length - 6} more</li>` : ''}</ul>`
-    : '';
-  const leaveBody = data.leave.length ? `<ul>${data.leave.map(l => `<li>${escapeHtml(l.start_date)} → ${escapeHtml(l.end_date)} (${escapeHtml(l.status)})</li>`).join('')}</ul>` : '';
-  const clientsBody = data.clients.length
-    ? data.clients.map(c => reassignSelect('client', c, c.name || 'Untitled client')).join('')
-    : '<div class="ofb-empty">None</div>';
-  const dealsBody = data.deals.length
-    ? data.deals.map(d => reassignSelect('deal', d, d.deal_name || 'Untitled deal')).join('')
-    : '<div class="ofb-empty">None</div>';
-
+  const backdrop = document.createElement('dialog');
+  backdrop.className = 'app-modal ofb';
   backdrop.innerHTML = `
-    <div class="ofb-modal" role="dialog" aria-modal="true">
-      <div class="ofb-head">
-        <h3>Offboard ${escapeHtml(employeeName)}</h3>
-        <div class="ofb-sub">Review what will be archived, reassigned, or cancelled. This cannot be undone from here.</div>
-      </div>
-      <div class="ofb-body">
-        ${sec('Open tasks → archive', data.tasks.length, tasksBody)}
-        ${sec('Future leave → cancel', data.leave.length, leaveBody)}
-        ${sec('This week + future allocations → remove', data.allocs.length, '')}
-        ${sec('Standing client allocations → remove', data.standing.length, '')}
-        ${sec('Active onboarding checklists → delete', data.onboarding.length, '')}
-        <div class="ofb-section"><h4>Owned clients → reassign</h4>${clientsBody}</div>
-        <div class="ofb-section"><h4>Owned deals → reassign</h4>${dealsBody}</div>
-      </div>
-      <div class="ofb-foot">
+    <div class="app-modal-form">
+      <h3 class="app-modal-title">Offboard ${escapeHtml(employeeName)}</h3>
+      <p class="app-modal-message">${escapeHtml(first)}'s Colony access ends now.</p>
+      ${effects.length ? `<ul class="ofb-list">${effects.map(e => `<li>${escapeHtml(e)}</li>`).join('')}</ul>` : (handovers.length ? '' : '<p class="ofb-none">Nothing else to hand over.</p>')}
+      ${handovers.length ? `<div class="ofb-handover"><p class="ofb-label">Hand over</p>${handovers.map(h => `
+        <label class="ofb-reassign-row"><span class="ofb-name">${escapeHtml(h.label)}</span>
+          <select data-ofb-reassign="${h.kind}" data-id="${escapeHtml(h.id)}"><option value="">Choose someone</option>${options}</select></label>`).join('')}</div>` : ''}
+      <div class="app-modal-actions">
         <span class="ofb-status" data-ofb-status></span>
-        <button class="ofb-btn" data-ofb-cancel>Cancel</button>
-        <button class="ofb-btn danger" data-ofb-confirm ${(data.clients.length || data.deals.length) ? 'disabled' : ''}>Confirm Offboard</button>
+        <button type="button" class="ghost" data-ofb-cancel>Cancel</button>
+        <button type="button" class="danger" data-ofb-confirm ${handovers.length ? 'disabled' : ''}>Offboard</button>
       </div>
-    </div>
-  `;
+    </div>`;
   document.body.appendChild(backdrop);
+  backdrop.showModal();
 
   const confirmBtn = backdrop.querySelector('[data-ofb-confirm]');
   const statusEl = backdrop.querySelector('[data-ofb-status]');
-  const close = () => backdrop.remove();
+  const close = () => { if (backdrop.open) backdrop.close(); backdrop.remove(); };
+  backdrop.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
 
   const validateReassignments = () => {
     const selects = backdrop.querySelectorAll('select[data-ofb-reassign]');
@@ -3577,7 +4286,7 @@ async function openOffboardEmployeeFlow(employeeId, employeeName) {
   });
 
   backdrop.querySelector('[data-ofb-cancel]').addEventListener('click', close);
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  backdrop.addEventListener('click', (e) => { if (isBackdropClick(e, backdrop)) close(); });
 
   confirmBtn.addEventListener('click', async () => {
     confirmBtn.disabled = true;
@@ -3799,12 +4508,12 @@ async function removeHoliday(dateStr) {
 }
 
 if (document.getElementById('addHolidayBtn')) {
-  document.getElementById('addHolidayBtn').addEventListener('click', () => addHoliday().catch(console.error));
+  document.getElementById('addHolidayBtn').addEventListener('click', () => addHoliday().catch(actionFailed));
 }
 if (holidaysAdminTableBody) {
   holidaysAdminTableBody.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-remove-holiday]');
-    if (btn) removeHoliday(btn.dataset.removeHoliday).catch(console.error);
+    if (btn) removeHoliday(btn.dataset.removeHoliday).catch(actionFailed);
   });
 }
 
@@ -3854,6 +4563,12 @@ function renderPartnersAdmin() {
       <td data-label="Status">${p.is_active ? (p.auth_user_id ? 'Active' : 'Invited') : 'Deactivated'}</td>
       <td data-label="Action">${canEdit ? `<button class="ghost small ${p.is_active ? 'danger-text' : ''}" data-toggle-partner="${escapeHtml(p.id)}" type="button">${p.is_active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</td>
     </tr>`).join('');
+  }
+  // Suggest the orgs that exist so a known client is picked, not retyped.
+  const orgList = document.getElementById('partnerOrgOptions');
+  if (orgList) {
+    orgList.innerHTML = [...new Set(partnersAdminRows.map((p) => p.org).filter(Boolean))].sort()
+      .map((o) => `<option value="${escapeHtml(o)}"></option>`).join('');
   }
   const addBtn = document.getElementById('addPartnerBtn');
   if (addBtn) addBtn.closest('.editor-bar')?.classList.toggle('hidden', !canEdit);
@@ -3909,7 +4624,6 @@ async function addPartner() {
   const roleEl = document.getElementById('newPartnerRole');
   const full_name = (nameEl?.value || '').trim();
   const email = normalizeEmail(emailEl?.value || '');
-  const org = (orgEl?.value || '').trim() || 'Example Collective';
   const partner_role = roleEl?.value || 'submitter';
   if (!full_name || !email || !email.includes('@')) {
     setPartnersNotice('Enter a name and a valid email.', 'mini-meta warn');
@@ -3919,6 +4633,19 @@ async function addPartner() {
     setPartnersNotice('Your Agency people are employees, not partners.', 'mini-meta warn');
     return;
   }
+  // The org is what they will see — never defaulted (S3, see resolvePartnerOrg).
+  const knownOrgs = [...new Set(partnersAdminRows.map((p) => p.org).filter(Boolean))];
+  const resolved = resolvePartnerOrg(orgEl?.value, knownOrgs);
+  if (resolved.error) {
+    setPartnersNotice(resolved.error, 'mini-meta warn');
+    orgEl?.focus();
+    return;
+  }
+  const { org } = resolved;
+  if (resolved.isNew && !await appConfirm(
+    `"${org}" is a new client organisation.\n\n${full_name} will see only ${org}'s briefs and contacts — nothing from any other client. Check the spelling: a different spelling is a different organisation.`,
+    { title: 'New client organisation', confirmLabel: `Create ${org}` }
+  )) return;
   setPartnersNotice('Saving…');
   const { data, error } = await state.supabase
     .from('partners')
@@ -3952,7 +4679,7 @@ async function togglePartnerActive(partnerId) {
 }
 
 if (document.getElementById('addPartnerBtn')) {
-  document.getElementById('addPartnerBtn').addEventListener('click', () => addPartner().catch(console.error));
+  document.getElementById('addPartnerBtn').addEventListener('click', () => addPartner().catch(actionFailed));
   // Built from the same list as the row editor, so the two can never drift.
   const newRoleSel = document.getElementById('newPartnerRole');
   if (newRoleSel) {
@@ -3965,12 +4692,12 @@ if (document.getElementById('addPartnerBtn')) {
 if (document.getElementById('partnersAdminTableBody')) {
   document.getElementById('partnersAdminTableBody').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-toggle-partner]');
-    if (btn) togglePartnerActive(btn.dataset.togglePartner).catch(console.error);
+    if (btn) togglePartnerActive(btn.dataset.togglePartner).catch(actionFailed);
   });
   // A <select> fires change, not click — the click listener above never sees it.
   document.getElementById('partnersAdminTableBody').addEventListener('change', (e) => {
     const sel = e.target.closest('[data-partner-role]');
-    if (sel) changePartnerRole(sel.dataset.partnerRole, sel.value).catch(console.error);
+    if (sel) changePartnerRole(sel.dataset.partnerRole, sel.value).catch(actionFailed);
   });
 }
 
@@ -3992,6 +4719,8 @@ const APP_CONFIG_FIELDS = [
     help: 'Hidden from the invoice checklist and their own invoice upload panel.' },
   { key: 'hidden_employee_emails',  kind: 'list', get: getHiddenEmployeeEmails,  label: 'Hidden employees',
     help: 'Keep their access but hide them from directory, team and exec views.' },
+  { key: 'all_group_exempt_emails', kind: 'list', get: getAllGroupExemptEmails,  label: 'Not on all@youragency.com',
+    help: 'Accounts that are not a person (shared or temporary), so the daily all@youragency.com check stops listing them as missing.' },
   { key: 'deal_flow_extra_emails',  kind: 'list', get: getDealFlowExtraEmails,   label: 'Deal-flow viewers',
     implicit: () => (state.employeeDirectory || [])
       .filter(e => e.is_active !== false && ['leadership', 'admin'].includes(normalizeAccessLevel(e.access_level)))
@@ -4039,7 +4768,7 @@ function renderAppConfigAdmin() {
       ? Array.isArray(stored)
       : Boolean(stored && typeof stored === 'object');
     const badge = isCustom
-      ? '<span class="mini-meta" style="color:var(--accent, #e8590c)">customised</span>'
+      ? '<span class="mini-meta" style="color:var(--warn)">customised</span>'
       : '<span class="mini-meta">built-in default</span>';
     const head = `<div class="config-block-head"><h4>${escapeHtml(field.label)}</h4> ${badge}</div>
       <p class="mini-meta">${escapeHtml(field.help)}</p>`;
@@ -4047,7 +4776,7 @@ function renderAppConfigAdmin() {
     if (field.kind === 'json') {
       const pretty = JSON.stringify(field.get(), null, 2);
       return `<div class="config-block">${head}
-        <textarea data-cfg-json-input="${escapeHtml(field.key)}" rows="12" spellcheck="false" style="width:100%;font-family:var(--mono, monospace);font-size:12px">${escapeHtml(pretty)}</textarea>
+        <textarea data-cfg-json-input="${escapeHtml(field.key)}" rows="12" spellcheck="false" style="width:100%;font-family:var(--font-mono);font-size:12px">${escapeHtml(pretty)}</textarea>
         <div class="editor-bar action-row">
           <button class="primary" type="button" data-cfg-save-json="${escapeHtml(field.key)}">Save JSON</button>
         </div></div>`;
@@ -4168,13 +4897,13 @@ async function removeConfigMapEntry(key, mapKey) {
 if (appConfigEditors) {
   appConfigEditors.addEventListener('click', (e) => {
     const addList = e.target.closest('[data-cfg-add-list]');
-    if (addList) { addConfigListEntry(addList.dataset.cfgAddList).catch(console.error); return; }
+    if (addList) { addConfigListEntry(addList.dataset.cfgAddList).catch(actionFailed); return; }
     const rmList = e.target.closest('[data-cfg-remove-list]');
-    if (rmList) { removeConfigListEntry(rmList.dataset.cfgRemoveList, rmList.dataset.val).catch(console.error); return; }
+    if (rmList) { removeConfigListEntry(rmList.dataset.cfgRemoveList, rmList.dataset.val).catch(actionFailed); return; }
     const addMap = e.target.closest('[data-cfg-add-map]');
-    if (addMap) { setConfigMapEntry(addMap.dataset.cfgAddMap).catch(console.error); return; }
+    if (addMap) { setConfigMapEntry(addMap.dataset.cfgAddMap).catch(actionFailed); return; }
     const rmMap = e.target.closest('[data-cfg-remove-map]');
-    if (rmMap) { removeConfigMapEntry(rmMap.dataset.cfgRemoveMap, rmMap.dataset.mapkey).catch(console.error); return; }
+    if (rmMap) { removeConfigMapEntry(rmMap.dataset.cfgRemoveMap, rmMap.dataset.mapkey).catch(actionFailed); return; }
     const saveJson = e.target.closest('[data-cfg-save-json]');
     if (saveJson) {
       const key = saveJson.dataset.cfgSaveJson;
@@ -4188,7 +4917,7 @@ if (appConfigEditors) {
         setAppConfigNotice('Expected a JSON object (client name → persona).', 'mini-meta warn');
         return;
       }
-      saveAppConfigKey(key, parsed).then(ok => { if (ok) setAppConfigNotice('Saved.'); }).catch(console.error);
+      saveAppConfigKey(key, parsed).then(ok => { if (ok) setAppConfigNotice('Saved.'); }).catch(actionFailed);
       return;
     }
   });
@@ -4273,17 +5002,14 @@ async function renderPendingSetupAdmin() {
   const panel = document.getElementById('pendingSetupPanel');
   const list = document.getElementById('pendingSetupList');
   if (!panel || !list) return;
-  if (!isSetupApprover()) { panel.style.display = 'none'; return; }
-
-  const rows = await loadPendingSetups();
-  // Keep the panel in place even when empty: hiding it after an approval made
-  // the page reflow and dumped the approver onto whatever panel came next
-  // (the Operational Config JSON editor — very confusing).
-  panel.style.display = '';
-  if (!rows.length) {
-    list.innerHTML = '<p class="mini-meta">No one waiting — all new joiners are set up. ✓</p>';
-    return;
-  }
+  // Alex only (8 Oct 2026): a joiner with a hire is switched on from that
+  // hire by its hiring manager; this list is only for accounts with no hire.
+  if (!isSuperadminUser()) { panel.style.display = 'none'; return; }
+  const hired = new Set((hiresCache || []).flatMap((h) => [normalizeEmail(h.work_email || ''), String(h.full_name || '').trim().toLowerCase()]).filter(Boolean));
+  const rows = (await loadPendingSetups())
+    .filter((emp) => !hired.has(normalizeEmail(emp.email || '')) && !hired.has(String(emp.full_name || '').trim().toLowerCase()));
+  panel.style.display = rows.length ? '' : 'none';
+  if (!rows.length) { list.innerHTML = ''; return; }
 
   // Active, real clients only. Archived ones are out (you can't be "dedicated
   // to" an archived client — 7 of the 26 rows), as are the internal buckets in
@@ -4293,7 +5019,7 @@ async function renderPendingSetupAdmin() {
       && !NON_CLIENT_BUCKETS.includes(String(c.name || '').trim().toLowerCase()))
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   list.innerHTML = rows.map((emp) => {
-    const requested = emp.requested_department?.name || '';
+    const requested = emp.requested_department?.name || emp.department?.name || '';
     const scheduledFor = (state.scheduledActivations || []).find((a) => a.employee_id === emp.id) || null;
     // EVERY department, not ONBOARDING_DEPARTMENTS. That list exists to stop a
     // new joiner declaring themselves Leadership or Finance — it is about what
@@ -4516,12 +5242,12 @@ async function removeAccessOverride(email) {
 }
 
 if (document.getElementById('addOverrideBtn')) {
-  document.getElementById('addOverrideBtn').addEventListener('click', () => addAccessOverride().catch(console.error));
+  document.getElementById('addOverrideBtn').addEventListener('click', () => addAccessOverride().catch(actionFailed));
 }
 if (accessOverridesTableBody) {
   accessOverridesTableBody.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-remove-override]');
-    if (btn) removeAccessOverride(btn.dataset.removeOverride).catch(console.error);
+    if (btn) removeAccessOverride(btn.dataset.removeOverride).catch(actionFailed);
   });
 }
 
@@ -4666,7 +5392,7 @@ async function saveFullAccessRoles() {
       }
       // Auto-spawn onboarding checklist for the new employee
       if (insertResult.data?.id) {
-        spawnOnboardingForEmployee(insertResult.data.id).catch(console.error);
+        // The old onboarding checklist is retired (8 Oct 2026).
       }
       insertedCount += 1;
     }
@@ -4803,7 +5529,9 @@ function renderDailyTaskTable() {
 }
 
 // Task Archive month navigation state
+// @circle-omit Colony-only wiring
 state._archiveMonthOffset = 0;
+// @circle-omit-end
 
 const archiveMonthPrev = document.getElementById('archiveMonthPrev');
 const archiveMonthNext = document.getElementById('archiveMonthNext');
@@ -4920,12 +5648,13 @@ async function showArchiveDayDetail(dateIso, employeeId) {
   // Lazy-load tasks for this date directly from DB (includes archived)
   let tasks = tasksForDate(employeeId, dateIso);
   if (!tasks.length && state.supabase && state.isAuthenticated) {
-    const res = await state.supabase
+    // Every task-view render at sign-in asks for the same day (P1).
+    const res = await shareInFlight(`archiveDay|${employeeId}|${dateIso}`, () => state.supabase
       .from('daily_tasks')
       .select('id, employee_id, task_date, task_title, status, notes, description, deadline, created_at, updated_at, sort_order, recurring_task_id')
       .eq('employee_id', employeeId)
       .eq('task_date', dateIso)
-      .limit(200);
+      .limit(200));
     if (!res.error && res.data?.length) {
       tasks = res.data;
       // Merge into state so subsequent clicks don't re-fetch
@@ -4980,13 +5709,15 @@ async function loadEmployeeDirectoryFromSupabase() {
       full_name,
       email,
       is_active,
+      activated_at,
+      joined_on,
       capacity_percent,
       employment_type,
       leave_tracking_enabled,
       access_level,
       created_at,
       direct_manager_email,
-      date_of_birth,
+      birthday_md,
       current_city,
       timezone,
       onboarding_completed,
@@ -5007,6 +5738,18 @@ async function loadEmployeeDirectoryFromSupabase() {
   }
 
   state.employeeDirectory = (response.data || []).map(stripMiddleNameOnEmployee);
+  // Who is paused, and why, is leadership's alone (12 Oct 2026): the
+  // columns are closed to everyone else, and this RPC returns nothing to them.
+  if (isLeadershipRole()) {
+    const { data: pauses, error: pauseError } = await state.supabase.rpc('employee_access_pauses');
+    if (pauseError) console.warn('Access pauses load failed:', pauseError);
+    const byId = new Map((pauses || []).map((p) => [p.employee_id, p]));
+    state.employeeDirectory.forEach((employee) => {
+      const p = byId.get(employee.id);
+      employee.access_paused_at = p?.paused_at || null;
+      employee.access_pause_reason = p?.reason || null;
+    });
+  }
   state.employeeDirectory.forEach((employee) => upsertEmployeeInStore(employee));
 
   // Load deactivated employees for leadership reactivation
@@ -5229,7 +5972,7 @@ async function addTask(targetDate = null) {
     setDailyTaskNotice('Select a client first.');
     return;
   }
-  if (!normalizedClient || normalizedClient === 'internal') {
+  if (!normalizedClient) {
     setDailyTaskNotice('Select a valid client before saving.');
     return;
   }
@@ -5495,8 +6238,69 @@ async function demoteTaskToWeekly(taskId) {
 // updated_at would credit everyone with a streak they never earned.
 let streakActivityDates = new Set();   // 'YYYY-MM-DD' for me
 let streakMyLeaveDates = new Set();    // my approved leave, so it never breaks my streak
+let streakMyFreezes = new Set();       // days I chose to cover with a streak freeze (from 1 Oct 2026)
 let streakLeaderboard = [];            // [{ name, count }], only those on a run
 let streakTeamSize = 0;                // everyone counted, so the rank has a stable denominator
+
+// Streak saver effects (5 Oct 2026): smoke off a dying ember while a
+// missed day waits; a spark burst when it is saved. One small canvas inside the
+// strip; the loop stops itself once the strip is re-rendered away. Nothing
+// moves for people who ask their system for reduced motion.
+function streakFx(strip) {
+  const canvas = strip?.querySelector('.streak-fx');
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (!canvas || reduced) return { burst() {}, reduced: true };
+  const ctx = canvas.getContext('2d');
+  let parts = [];
+  let mode = 'risk';
+  const fit = () => {
+    const r = strip.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+  const origin = () => {
+    const f = strip.querySelector('.streak-flame').getBoundingClientRect();
+    const r = strip.getBoundingClientRect();
+    return { x: f.left - r.left + f.width / 2, y: f.top - r.top + f.height / 2 };
+  };
+  const tick = () => {
+    if (!canvas.isConnected) return; // re-rendered: stop
+    const r = strip.getBoundingClientRect();
+    ctx.clearRect(0, 0, r.width, r.height);
+    if (mode === 'risk' && Math.random() < 0.22) {
+      const o = origin();
+      parts.push({ x: o.x + (Math.random() * 6 - 3), y: o.y - 6, vx: (Math.random() - 0.5) * 0.25, vy: -0.35 - Math.random() * 0.3, life: 1, r: 2 + Math.random() * 2, smoke: true });
+    }
+    parts = parts.filter((p) => p.life > 0);
+    for (const p of parts) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.smoke) {
+        p.r += 0.06; p.life -= 0.012;
+        ctx.fillStyle = `rgba(136,135,128,${p.life * 0.35})`;
+      } else {
+        p.vy += 0.06; p.vx *= 0.985; p.life -= 0.012;
+        ctx.fillStyle = `hsla(${p.hue},95%,${55 + p.life * 20}%,${p.life})`;
+      }
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.smoke ? p.r : p.r * p.life + 0.3, 0, 7); ctx.fill();
+    }
+    requestAnimationFrame(tick);
+  };
+  fit();
+  requestAnimationFrame(tick);
+  return {
+    reduced: false,
+    burst() {
+      mode = 'saved'; parts = [];
+      const o = origin();
+      for (let i = 0; i < 90; i++) {
+        const a = Math.random() * 1.2 - 0.6;
+        const sp = 2 + Math.random() * 7;
+        parts.push({ x: o.x, y: o.y, vx: Math.cos(a) * sp * (0.6 + Math.random()), vy: Math.sin(a) * sp - 1.5 * Math.random(), life: 1, r: 1 + Math.random() * 2.2, hue: 30 + Math.random() * 25 });
+      }
+    }
+  };
+}
 
 function renderStreakStrip() {
   const wrap = document.getElementById('homeStreakPanel');
@@ -5504,58 +6308,91 @@ function renderStreakStrip() {
   if (!state.currentEmployeeId || !streakLeaderboard) { wrap.classList.add('hidden'); return; }
 
   const today = istToday();
-  const mine = computeStreak(streakActivityDates, today, holidayDates(), streakMyLeaveDates);
+  const mine = computeStreak(streakActivityDates, today, holidayDates(), streakMyLeaveDates, streakMyFreezes);
   const progress = streakProgress(mine.count);
   const top = streakLeaderboard.slice(0, 3);
   // Rank among the team, shown only once you actually have a streak.
   const myIndex = streakLeaderboard.findIndex((p) => p.id === state.currentEmployeeId);
   const myRank = mine.count > 0 && myIndex >= 0 ? myIndex + 1 : null;
 
-  // Show a zero state rather than hiding: on launch day nobody has a streak, and
-  // an invisible feature is one nobody starts (26 Aug 2026).
-  const empty = !mine.count && !top.length;
+  // A zero state rather than hiding: on launch day nobody has a streak, and an
+  // invisible feature is one nobody starts (26 Aug 2026).
 
   // Celebrated the day it lands, then it clears itself. Broken streaks are
   // never announced — the point is to restart quietly, not to be seen falling.
-  const milestoneRows = streakLeaderboard
-    .filter((p) => milestoneReached(p.count))
-    .map((p) => `<span class="streak-pill is-milestone">🎉 ${escapeHtml(p.name)} hit <b>${milestoneLabel(p.count)}</b></span>`);
+  const milestoneHits = streakLeaderboard.filter((p) => milestoneReached(p.count));
 
+  // One slim row (28 Sep 2026): the two-tier card with a separate
+  // milestone banner took ~200px of the home page. Milestone news now rides
+  // in the same row, only on the day it lands; the leaders are plain text.
   const meId = state.currentEmployeeId;
+  const firstHit = milestoneHits[0];
+  const milestoneHtml = firstHit
+    ? `<span class="streak-hit">🎉 ${escapeHtml(firstHit.name.split(' ')[0])} hit ${escapeHtml(milestoneLabel(firstHit.count))}${milestoneHits.length > 1 ? ` <span class="streak-hit-more">+${milestoneHits.length - 1}</span>` : ''}</span>`
+    : '';
+  const nextHtml = progress.next
+    ? `${progress.remaining} to ${escapeHtml(milestoneLabel(progress.next))}`
+    : 'Every milestone reached';
+  // Streak saver prompt (from 1 Oct 2026; called "streak freeze" until 5 Oct,
+  // Alex: nobody knows what a freeze is). Only on your own row, only while
+  // the missed day is inside the window. One question, one button; ignoring it
+  // lets the streak end when the window closes. The row goes ashen with a
+  // dying ember and smoke; saving it bursts into sparks (streakFx below).
+  const freezeAsk = mine.pendingMiss && mine.count;
+  const missedLabel = freezeAsk
+    ? (mine.pendingMiss === shiftIsoDays(today, -1) ? 'yesterday' : parseIsoDateLocal(mine.pendingMiss).toLocaleDateString('en-IN', { weekday: 'long' }))
+    : '';
+  const leadersHtml = top.map((p) => `<span class="${p.id === meId ? 'is-me' : ''}">${escapeHtml(p.name.split(' ')[0])} ${p.count}</span>`).join('<span class="streak-dot">·</span>');
   wrap.classList.remove('hidden');
   wrap.innerHTML = `
-    ${milestoneRows.length ? `<div class="streak-milestone"><span class="streak-lead-label">Milestone</span>${milestoneRows.join('')}</div>` : ''}
-    <div class="streak-strip">
-      <div class="streak-mine">
-        <span class="streak-flame">${mine.count ? '🔥' : '·'}</span>
-        <span class="streak-count">${mine.count}<small>day streak</small></span>
-      </div>
-      <div class="streak-progress">
-        ${empty ? '' : `<div class="streak-bar"><i style="width:${progress.next ? progress.percent : 100}%"></i></div>`}
-        ${myRank ? `<p class="streak-rank">You're ${ordinal(myRank)} of ${streakTeamSize}</p>` : ''}
-        <p class="streak-next">${empty
-          ? 'Update any task today to start your streak.'
-          : (progress.next
-            ? `Next: <b>${milestoneLabel(progress.next)}</b> — ${progress.remaining} working day${progress.remaining === 1 ? '' : 's'} to go`
-            : 'Every milestone reached. Nothing left to chase.')}</p>
-      </div>
-      <div class="streak-lead">
-        ${top.length ? '<span class="streak-lead-label">Leading now</span>' : ''}
-        ${top.map((p) => `<span class="streak-pill${p.id === meId ? ' is-me' : ''}">🔥 <b>${p.count}</b> ${escapeHtml(p.name.split(' ')[0])}</span>`).join('')}
-        <span class="streak-help">
-          <button class="streak-help-btn" type="button" id="streakHelpBtn">ⓘ How streaks work</button>
-          <div class="streak-tip hidden" id="streakTip">
-            <h4>How streaks work</h4>
-            <ul>
-              <li>Update <b>any one task</b> on a working day and the day counts.</li>
-              <li>Weekends, public holidays and approved leave <b>never break</b> a streak — they simply don't count.</li>
-              <li>Everyone gets <b>one grace day a month</b>, applied automatically if you miss a day.</li>
-            </ul>
-            <p class="rungs">Milestones: <b>${STREAK_MILESTONES.join(' · ')}</b><br>A half-day off at <b>${STREAK_REWARD_DAY} days</b>.</p>
-          </div>
-        </span>
-      </div>
+    <div class="streak-strip${freezeAsk ? ' is-at-risk' : firstHit ? ' has-hit' : ''}">
+      ${freezeAsk ? '<canvas class="streak-fx" aria-hidden="true"></canvas>' : ''}
+      <span class="streak-flame${mine.count ? '' : ' is-cold'}" aria-hidden="true">🔥</span>
+      ${mine.count
+        ? `<span class="streak-count" title="${myRank ? `You're ${ordinal(myRank)} of ${streakTeamSize}` : ''}">${mine.count}<small>${mine.count === 1 ? 'day' : 'days'}</small></span>
+           ${freezeAsk
+             ? `<span class="streak-next streak-saver-ask" id="streakFreezeMsg">You missed ${escapeHtml(missedLabel)}. Save your ${mine.count}-day streak?</span>
+                <button class="streak-saver-btn" type="button" id="streakFreezeBtn" data-missed="${escapeHtml(mine.pendingMiss)}">Save my streak</button>`
+             : `<div class="streak-bar" aria-hidden="true"><i style="width:${progress.next ? progress.percent : 100}%"></i></div>
+           <span class="streak-next">${milestoneHtml || nextHtml}</span>`}`
+        : `<span class="streak-start">${milestoneHtml || 'Tick off one task today to start a streak'}</span>`}
+      ${top.length ? `<span class="streak-sep" aria-hidden="true"></span><span class="streak-leaders" title="Leading now">${leadersHtml}</span>` : ''}
+      <span class="streak-help">
+        <button class="streak-help-btn" type="button" id="streakHelpBtn" aria-label="How streaks work">ⓘ</button>
+        <div class="streak-tip hidden" id="streakTip">
+          <h4>How streaks work</h4>
+          <ul>
+            <li>Update <b>any one task</b> on a working day and the day counts.</li>
+            <li>Weekends, public holidays and approved leave <b>never break</b> a streak — they simply don't count.</li>
+            <li>Missed a working day? You get <b>one streak saver a month</b>. Use it within ${STREAK_FREEZE_WINDOW} working days and the missed day won't break your streak.</li>
+          </ul>
+          <p class="rungs">Milestones: <b>${STREAK_MILESTONES.join(' · ')}</b><br>A half-day off every <b>${STREAK_REWARD_DAY} days</b> (50, 100, 150…), to take within 90 days from My Leave.</p>
+        </div>
+      </span>
     </div>`;
+
+  const strip = wrap.querySelector('.streak-strip');
+  const fx = freezeAsk ? streakFx(strip) : null;
+  document.getElementById('streakFreezeBtn')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    const { error } = await state.supabase.rpc('use_streak_freeze', { p_missed_on: btn.dataset.missed });
+    const msg = document.getElementById('streakFreezeMsg');
+    if (error) {
+      if (msg) msg.textContent = error.message;
+      btn.remove();
+      return;
+    }
+    streakMyFreezes.add(btn.dataset.missed);
+    // The moment: sparks, warm light, the count pulses. Then the normal row.
+    btn.remove();
+    if (msg) msg.textContent = 'Streak saved';
+    strip.classList.remove('is-at-risk');
+    strip.classList.add('is-saved');
+    fx?.burst();
+    setTimeout(() => loadStreakData().catch(console.error), fx?.reduced ? 0 : 1700);
+  });
 
   document.getElementById('streakHelpBtn')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -5564,21 +6401,42 @@ function renderStreakStrip() {
 }
 
 // Click anywhere else to dismiss the explainer.
+// @circle-omit Colony-only wiring
 document.addEventListener('click', (e) => {
   const tip = document.getElementById('streakTip');
-  if (tip && !tip.classList.contains('hidden') && !e.target.closest('.streak-help')) tip.classList.add('hidden');
+  if (tip && !tip.classList.contains('hidden') && isOutsideClick(e, '.streak-help')) tip.classList.add('hidden');
 });
+// @circle-omit-end
 
 // Everyone's last ~5 months of activity plus approved leave: enough history to
 // resolve any streak worth showing, small enough to fetch in one go.
 async function loadStreakData() {
   if (!state.supabase || !state.currentEmployeeId) return;
   const since = shiftIsoDays(istToday(), -170);
-  const [actRes, leaveRes] = await Promise.all([
+  const [actRes, leaveRpcRes, freezeRes] = await Promise.all([
     state.supabase.from('task_activity').select('employee_id, activity_date').gte('activity_date', since),
-    state.supabase.from('leave_requests').select('employee_id, start_date, end_date').eq('status', 'approved').gte('end_date', since)
+    // Everyone's approved leave, dates only, through a definer RPC: leave RLS is
+    // own-or-leadership, so a plain select made every COLLEAGUE's leave read
+    // as missed days on ordinary screens (Luke: 20 real, 7 shown; 28 Sep).
+    state.supabase.rpc('streak_leave_ranges', { p_since: since }),
+    // Freezes people chose to use (app.streak_freezes, 1 Oct 2026). Everyone's,
+    // because everyone's streak is computed here for the leaderboard.
+    state.supabase.from('streak_freezes').select('employee_id, missed_on').gte('missed_on', since)
   ]);
+  if (freezeRes.error) console.warn('streak_freezes unavailable:', freezeRes.error.message);
+  const freezesByEmployee = new Map();
+  (freezeRes.error ? [] : (freezeRes.data || [])).forEach((r) => {
+    if (!freezesByEmployee.has(r.employee_id)) freezesByEmployee.set(r.employee_id, new Set());
+    freezesByEmployee.get(r.employee_id).add(String(r.missed_on).slice(0, 10));
+  });
   if (actRes.error) { console.warn('Streaks unavailable:', actRes.error.message); return; }
+  // RPC missing or failing: fall back to what RLS lets us read (own leave at
+  // least) rather than treating everyone's leave as missed days.
+  let leaveRes = leaveRpcRes;
+  if (leaveRes.error) {
+    console.warn('streak_leave_ranges failed, using own leave only:', leaveRes.error.message);
+    leaveRes = await state.supabase.from('leave_requests').select('employee_id, start_date, end_date').eq('status', 'approved').gte('end_date', since);
+  }
 
   const byEmployee = new Map();
   (actRes.data || []).forEach((r) => {
@@ -5600,6 +6458,7 @@ async function loadStreakData() {
   const hols = holidayDates();
   streakActivityDates = byEmployee.get(state.currentEmployeeId) || new Set();
   streakMyLeaveDates = leaveByEmployee.get(state.currentEmployeeId) || new Set();
+  streakMyFreezes = freezesByEmployee.get(state.currentEmployeeId) || new Set();
 
   const hidden = getHiddenEmployeeEmails();
   const considered = (state.employeeDirectory || [])
@@ -5609,12 +6468,30 @@ async function loadStreakData() {
     .map((e) => ({
       id: e.id,
       name: displayPersonName(e.full_name, 'Employee'),
-      count: computeStreak(byEmployee.get(e.id) || new Set(), today, hols, leaveByEmployee.get(e.id) || new Set()).count
+      count: computeStreak(byEmployee.get(e.id) || new Set(), today, hols, leaveByEmployee.get(e.id) || new Set(), freezesByEmployee.get(e.id) || new Set()).count
     }))
     .filter((e) => e.count > 0)
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
+  // Milestones reached in the last 30 days, for Wins: the day a streak first
+  // stood at a milestone (that day active). Multiples of 50 are the reward line.
+  const winsSince = shiftIsoDays(today, -30);
+  const milestoneWins = [];
+  considered.forEach((e) => {
+    const act = byEmployee.get(e.id) || new Set();
+    const leave = leaveByEmployee.get(e.id) || new Set();
+    const frz = freezesByEmployee.get(e.id) || new Set();
+    for (let d = winsSince; d <= today; d = shiftIsoDays(d, 1)) {
+      if (!act.has(d)) continue;
+      const n = computeStreak(act, d, hols, leave, frz).count;
+      if (STREAK_MILESTONES.includes(n) && n % 50 !== 0) milestoneWins.push({ employee_id: e.id, date: d, milestone: n });
+    }
+  });
+  state.streakMilestoneWins = milestoneWins;
+
   renderStreakStrip();
+  if (getActiveScreenId() === 'home-feed') renderHomeFeed();
+  if (getActiveScreenId() === 'after-hours') renderSecretPage();
 }
 
 let streakWriteInFlight = false;
@@ -5873,6 +6750,7 @@ if (archiveDayDetailClose) {
 }
 
 // ── Recurring tasks: form controls + manage list ──
+// @circle-omit Colony-only wiring
 (function wireRecurringControls() {
   const sel = document.getElementById('newTaskRepeatSelect');
   const daySel = document.getElementById('newTaskRepeatDay');
@@ -5889,6 +6767,7 @@ if (archiveDayDetailClose) {
     wdaySel.classList.toggle('hidden', sel.value !== 'weekly');
   });
 })();
+// @circle-omit-end
 
 async function loadRecurringTasks() {
   if (!state.supabase || !state.isAuthenticated) return;
@@ -6044,6 +6923,11 @@ function setFeatureRequestNotice(message = '') {
 }
 
 async function loadFeatureRequestsFromSupabase() {
+  // Sign-in loads it and opening home loads it again (P1).
+  return shareInFlight('featureRequests', loadFeatureRequestsNow);
+}
+
+async function loadFeatureRequestsNow() {
   if (!state.supabase || !state.isAuthenticated) {
     state.featureRequests = [];
     renderFeatureRequests();
@@ -6053,6 +6937,10 @@ async function loadFeatureRequestsFromSupabase() {
   const response = await state.supabase
     .from('feature_requests')
     .select('id, employee_id, author_partner_id, author_name, request_text, request_type, status, created_at, updated_at, links, attachments, employee:employees!feature_requests_employee_id_fkey(full_name)')
+    // Your Agency's own wall only. Client posts live on Circle (6 Oct 2026); RLS
+    // already hides them from everyone but Alex, and this keeps them off
+    // her Colony wall too — she handles them on Circle.
+    .is('author_partner_id', null)
     .order('created_at', { ascending: true })
     .limit(2000);
 
@@ -7282,8 +8170,8 @@ function renderAllocationEmployeeFilterOptions() {
 function renderAllocationClientFilterOptions(rows = []) {
   if (!allocClientFilter) return;
   const current = String(state.allocationClientFilter || 'all');
-  const fromState = state.clients.filter((row) => row.is_active !== false).map((row) => String(row.name || '').trim()).filter(Boolean).filter(n => normalizeClientNameKey(n) !== 'internal');
-  const fromRows = rows.map((row) => String(row.client || '').trim()).filter(Boolean).filter(n => normalizeClientNameKey(n) !== 'internal');
+  const fromState = state.clients.filter((row) => row.is_active !== false).map((row) => String(row.name || '').trim()).filter(Boolean);
+  const fromRows = rows.map((row) => String(row.client || '').trim()).filter(Boolean);
   const options = dedupeSortedNames([...fromState, ...fromRows]);
 
   allocClientFilter.innerHTML = '<option value="all">All clients</option>';
@@ -7378,7 +8266,7 @@ function bindAllocationInputListeners() {
 
 function allocationClientOptionsMarkup(selectedClient = '') {
   const selected = String(selectedClient || '').trim();
-  const fromState = state.clients.filter((row) => row.is_active !== false).map((row) => String(row.name || '').trim()).filter(Boolean).filter(n => normalizeClientNameKey(n) !== 'internal');
+  const fromState = state.clients.filter((row) => row.is_active !== false).map((row) => String(row.name || '').trim()).filter(Boolean);
   const names = dedupeSortedNames(selected ? [...fromState, selected] : fromState);
   const options = ['<option value="">Select client</option>'];
   names.forEach((name) => {
@@ -7439,7 +8327,7 @@ function appendAllocationRow(line, editable) {
   defaultOpt.value = '';
   defaultOpt.textContent = 'Select client';
   clientSelect.appendChild(defaultOpt);
-  const fromState = state.clients.filter((r) => r.is_active !== false).map((r) => String(r.name || '').trim()).filter(Boolean).filter(n => normalizeClientNameKey(n) !== 'internal');
+  const fromState = state.clients.filter((r) => r.is_active !== false).map((r) => String(r.name || '').trim()).filter(Boolean);
   const names = dedupeSortedNames(clientName ? [...fromState, clientName] : fromState);
   names.forEach((name) => {
     const opt = document.createElement('option');
@@ -7559,6 +8447,13 @@ function renderWeeklyAllocationViews() {
 }
 
 async function loadWeeklyAllocationsFromSupabase() {
+  // Three sign-in steps call this at once, and each run fans out to the
+  // archive, profile history and team dashboard (P1).
+  const key = ['weeklyAllocations', getAllocationViewEmployeeId(), getSelectedAllocWeekIso(), getSelectedProfileEmployeeId(), isLeadershipRole()].join('|');
+  return shareInFlight(key, loadWeeklyAllocationsNow);
+}
+
+async function loadWeeklyAllocationsNow() {
   const targetEmployeeId = getAllocationViewEmployeeId();
   if (!state.supabase || !state.isAuthenticated || !targetEmployeeId) {
     state.weeklyAllocations = [];
@@ -7622,75 +8517,28 @@ async function loadWeeklyAllocationsFromSupabase() {
   }
 }
 
-async function ensureInternalClientId() {
-  const lookup = await state.supabase.from('clients').select('id').eq('name', 'Internal').maybeSingle();
-  if (lookup.error && lookup.error.code !== 'PGRST116') throw lookup.error;
-  if (lookup.data?.id) return lookup.data.id;
-
-  const insert = await state.supabase
-    .from('clients')
-    .insert({
-      name: 'Internal',
-      account_owner_employee_id: state.currentEmployeeId || null,
-      is_active: true
-    })
-    .select('id')
-    .single();
-  if (insert.error) throw insert.error;
-  return insert.data.id;
-}
-
-async function ensureInternalProjectId(clientId, projectName) {
-  const lookup = await state.supabase
-    .from('projects')
-    .select('id')
-    .eq('client_id', clientId)
-    .eq('name', projectName)
-    .maybeSingle();
-  if (lookup.error && lookup.error.code !== 'PGRST116') throw lookup.error;
-  if (lookup.data?.id) return lookup.data.id;
-
-  const insert = await state.supabase
-    .from('projects')
-    .insert({
-      client_id: clientId,
-      name: projectName,
-      engagement_type: 'project',
-      status: 'active',
-      owner_employee_id: state.currentEmployeeId || null
-    })
-    .select('id')
-    .single();
-  if (insert.error) throw insert.error;
-  return insert.data.id;
-}
-
-async function resolveProjectIdForLine(line, internalClientId) {
+async function resolveProjectIdForLine(line) {
   const projectName = String(line.project_name || '').trim();
   if (!projectName) return null;
 
-  // Always use Internal-client projects — must match save_my_allocations RPC
-  // which resolves project names under the Internal client. Resolution goes
-  // through the SECURITY DEFINER RPC: client-scoped employees (Ruby, Mara)
-  // can't SEE the Internal client under RLS, so the old client-side
-  // find-or-create silently failed for them (Ruby's bug, 5 Aug 2026).
+  // Every allocation belongs to a real client (27 Sep 2026): the RPC
+  // finds that client's project and REFUSES a name that is no client, so a
+  // typo is caught instead of filed somewhere nobody looks. It runs as
+  // SECURITY DEFINER because client-scoped employees cannot see every client
+  // under RLS (Ruby's bug, 5 Aug 2026). Same rule as save_my_allocations.
   const { data, error } = await state.supabase.rpc('resolve_internal_project', {
     p_project_name: projectName
   });
   if (error) throw error;
-  if (data) return data;
-  // Fallback for callers that already resolved the Internal client id.
-  return internalClientId ? ensureInternalProjectId(internalClientId, projectName) : null;
+  return data || null;
 }
 
 async function persistAllocationLinesForEmployeeDirect(targetEmployeeId, lines, weekStartIso) {
-  const internalClientId = await ensureInternalClientId();
-
   // Resolve project IDs for incoming lines
   const incomingProjectIds = new Set();
   const lineEntries = [];
   for (const line of lines) {
-    const projectId = await resolveProjectIdForLine(line, internalClientId);
+    const projectId = await resolveProjectIdForLine(line);
     incomingProjectIds.add(projectId);
     lineEntries.push({ projectId, allocation_percent: line.allocation_percent });
   }
@@ -7782,9 +8630,7 @@ async function populateAllocationForClient(clientName, scope) {
   }
 
   const targetEmployeeId = getAllocationViewEmployeeId() || state.currentEmployeeId;
-  // No ensureInternalClientId() here: that lookup runs under RLS and fails for
-  // client-scoped employees. The RPC inside resolveProjectIdForLine handles it.
-  const projectId = await resolveProjectIdForLine(targetLine, null);
+  const projectId = await resolveProjectIdForLine(targetLine);
   if (!projectId) {
     setAllocationPolicyNote(`Unable to resolve project for ${clientName}.`);
     return;
@@ -7994,7 +8840,10 @@ if (saveAllocationsBtn) {
     } catch (error) {
       console.error(error);
       if (allocSummary) {
-        setAllocTotalMessage(`Save failed: ${error.message}. Please check your connection and try again.`, 'warn');
+        // A name that is no client is refused by the database with its own
+        // instruction (27 Sep 2026); "check your connection" would mislead.
+        const refused = /^No client is called/.test(String(error?.message || ''));
+        setAllocTotalMessage(refused ? error.message : `Save failed: ${error.message}. Please check your connection and try again.`, 'warn');
       }
       saveAllocationsBtn.textContent = 'Retry Save';
     } finally {
@@ -8167,27 +9016,19 @@ async function loadAllocArchive() {
     return;
   }
 
-  let html = '';
+  // One line per week: the week, where the time went, and how full it was
+  // (8 Oct 2026: the old stacked cards were unreadable).
   const sortedWeeks = [...weekMap.keys()].sort((a, b) => b.localeCompare(a));
-  sortedWeeks.forEach(week => {
-    const lines = weekMap.get(week);
-    const total = lines.reduce((s, l) => s + (l.pct || 0), 0);
-    const weekLabel = formatWeekRangeLabel(week);
-    const lineItems = lines
-      .sort((a, b) => b.pct - a.pct)
-      .map(l => `<span class="alloc-archive-item">${escapeHtml(l.client)} <strong>${Math.round(l.pct)}%</strong></span>`)
-      .join('');
-    html += `
-      <div class="alloc-archive-week">
-        <div class="alloc-archive-header">
-          <span class="alloc-archive-label">Week of ${weekLabel}</span>
-          <span class="alloc-archive-total">${Math.round(total)}% used</span>
-        </div>
-        <div class="alloc-archive-items">${lineItems}</div>
-      </div>`;
-  });
-
-  allocArchiveContainer.innerHTML = html;
+  allocArchiveContainer.innerHTML = `<ul class="aa-list">${sortedWeeks.map((week) => {
+    const lines = weekMap.get(week).sort((a, b) => b.pct - a.pct);
+    const total = Math.round(lines.reduce((s, l) => s + (l.pct || 0), 0));
+    const split = lines.map((l) => `${escapeHtml(l.client)} ${Math.round(l.pct)}%`).join(' · ') || '—';
+    return `<li class="aa-row">
+        <span class="aa-week">${escapeHtml(formatWeekRangeLabel(week))}</span>
+        <span class="aa-split" title="${split}">${split}</span>
+        <span class="aa-total"><span class="aa-bar" aria-hidden="true"><i style="width:${Math.min(total, 100)}%"></i></span>${total}%</span>
+      </li>`;
+  }).join('')}</ul>`;
 }
 
 // Delegated click handler for per-row populate button + menu
@@ -8273,7 +9114,7 @@ if (allocationTableEl) {
 
   // Close menus when clicking outside
   document.addEventListener('click', (event) => {
-    if (!event.target.closest('.populate-wrapper')) {
+    if (isOutsideClick(event, '.populate-wrapper')) {
       allocationTableEl.querySelectorAll('.populate-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));
     }
   });
@@ -8310,7 +9151,9 @@ if (allocViewToggle) {
   });
 }
 
+// @circle-omit Colony-only wiring
 renderWeeklyAllocationViews();
+// @circle-omit-end
 
 const leaveType = document.getElementById('leaveType');
 const leaveStart = document.getElementById('leaveStart');
@@ -8331,7 +9174,8 @@ const leaveCycleMeta = document.getElementById('leaveCycleMeta');
 const leaveBalanceNotice = document.getElementById('leaveBalanceNotice');
 const leaveArchiveBody = document.getElementById('leaveArchiveBody');
 const leaveApprovalTableBody = document.getElementById('leaveApprovalTableBody');
-const teamLeaveCalendarTable = document.getElementById('teamLeaveCalendarTable');
+// The "Next 30 days" list (was a team-leave table until 13 Oct 2026).
+const teamLeaveCalendarTable = document.getElementById('leaveNext30List');
 const pendingApprovalCount = document.getElementById('pendingApprovalCount');
 const leaveApprovalNotice = document.getElementById('leaveApprovalNotice');
 const onLeaveTodayCount = document.getElementById('onLeaveTodayCount');
@@ -8351,28 +9195,12 @@ function setLeaveBalanceNotice(message = '', className = 'mini-meta') {
 
 // emptyLeaveSummary lives in js/leave.js
 
+// Earlier leave years, one line each, under "Your leave this year".
 function renderLeaveArchiveRows(entries = []) {
   if (!leaveArchiveBody) return;
-  leaveArchiveBody.innerHTML = '';
-  if (!entries.length) {
-    const row = document.createElement('tr');
-    row.innerHTML = '<td colspan="5">No archived leave cycles yet.</td>';
-    leaveArchiveBody.appendChild(row);
-    return;
-  }
-
-  entries.forEach((entry) => {
-    const row = document.createElement('tr');
-    const archivedOn = entry.archived_at ? formatTimestamp(entry.archived_at) : '--';
-    row.innerHTML = `
-      <td data-label="Cycle">${escapeHtml(entry.cycle_label || '--')}</td>
-      <td data-label="PL Rem.">${escapeHtml(leaveDayText(entry.pl_remaining))}</td>
-      <td data-label="CL Rem.">${escapeHtml(leaveDayText(entry.cl_remaining))}</td>
-      <td data-label="SL Rem.">${escapeHtml(leaveDayText(entry.sl_remaining))}</td>
-      <td data-label="Archived">${escapeHtml(archivedOn)}</td>
-    `;
-    leaveArchiveBody.appendChild(row);
-  });
+  leaveArchiveBody.innerHTML = entries.map((e) =>
+    `<li><span class="leave-next-day">${escapeHtml(e.cycle_label || '')}</span><span>${escapeHtml(leaveDayText(e.pl_remaining))} privilege, ${escapeHtml(leaveDayText(e.cl_remaining))} casual, ${escapeHtml(leaveDayText(e.sl_remaining))} sick left</span></li>`).join('');
+  leaveArchiveBody.closest('.leave-archive')?.classList.toggle('hidden', !entries.length);
 }
 
 function applyLeaveCycleSummary(summaryInput) {
@@ -8388,36 +9216,22 @@ function applyLeaveCycleSummary(summaryInput) {
 
   state.leaveCycleSummary = summary;
 
-  if (leavePlHeadline) {
-    leavePlHeadline.textContent = `Remaining: ${leaveDayText(plRem)}`;
-    leavePlHeadline.classList.toggle('leave-negative', plRem < 0);
-  }
-  if (leaveClHeadline) {
-    leaveClHeadline.textContent = `Remaining: ${leaveDayText(clRem)}`;
-    leaveClHeadline.classList.toggle('leave-negative', clRem < 0);
-  }
-  if (leaveSlHeadline) {
-    leaveSlHeadline.textContent = `Remaining: ${leaveDayText(slRem)}`;
-    leaveSlHeadline.classList.toggle('leave-negative', slRem < 0);
-  }
-
-  if (leavePlMeta) {
-    leavePlMeta.textContent = `Allocated ${leaveDayText(pl.allocated)} | Taken ${leaveDayText(pl.taken)} | Applied ${leaveDayText(pl.applied)}`;
-  }
-  if (leaveClMeta) {
-    leaveClMeta.textContent = `Allocated ${leaveDayText(cl.allocated)} | Taken ${leaveDayText(cl.taken)} | Applied ${leaveDayText(cl.applied)}`;
-  }
-  if (leaveSlMeta) {
-    leaveSlMeta.textContent = `Allocated ${leaveDayText(sl.allocated)} | Taken ${leaveDayText(sl.taken)} | Applied ${leaveDayText(sl.applied)}`;
-  }
+  // Three small boxes: what's left, out of what was given, and a thin bar
+  // (13 Oct 2026: no Allocated | Taken | Applied text).
+  [[leavePlHeadline, leavePlMeta, 'leavePlBar', plRem, pl.allocated],
+   [leaveClHeadline, leaveClMeta, 'leaveClBar', clRem, cl.allocated],
+   [leaveSlHeadline, leaveSlMeta, 'leaveSlBar', slRem, sl.allocated]].forEach(([head, meta, barId, rem, alloc]) => {
+    if (head) {
+      head.textContent = leaveDayText(rem);
+      head.classList.toggle('leave-negative', rem < 0);
+    }
+    if (meta) meta.textContent = `/ ${leaveDayText(alloc)}`;
+    const bar = document.getElementById(barId);
+    if (bar) bar.style.width = `${Math.max(0, Math.min(100, alloc > 0 ? (rem / alloc) * 100 : 0))}%`;
+  });
 
   if (leaveCycleLabel) {
-    leaveCycleLabel.textContent = summary.cycle_label || 'Apr-Mar';
-  }
-  if (leaveCycleMeta) {
-    const startText = summary.cycle_start ? formatDateForLabel(summary.cycle_start) : '--';
-    const endText = summary.cycle_end ? formatDateForLabel(summary.cycle_end) : '--';
-    leaveCycleMeta.textContent = `Cycle: ${startText} to ${endText}`;
+    leaveCycleLabel.textContent = summary.cycle_label || '';
   }
 
   renderLeaveArchiveRows(Array.isArray(summary.archive) ? summary.archive : []);
@@ -8442,7 +9256,38 @@ async function loadLeaveCycleSummaryFromSupabase() {
   }
 
   applyLeaveCycleSummary(response.data || emptyLeaveSummary());
-  setLeaveBalanceNotice('Leave balances are loaded from the active leave cycle.');
+  setLeaveBalanceNotice('');
+  renderMyLeaveThisYear();
+  await loadMyStreakRewards();
+}
+
+// Streak rewards (27 Sep 2026): the form offers "Streak reward" only while the
+// viewer holds an unused, unexpired one. Rows are granted by the streak-rewards
+// cron; the leave trigger claims one on submit and rejects if none is valid.
+async function loadMyStreakRewards() {
+  if (!state.supabase || !state.currentEmployeeId) { state.myStreakRewards = []; renderStreakRewardOption(); return; }
+  const { data, error } = await state.supabase.from('streak_rewards')
+    .select('id, milestone, earned_on, expires_on, leave_request_id')
+    .eq('employee_id', state.currentEmployeeId);
+  if (error) console.warn('Streak rewards unavailable:', error.message);
+  state.myStreakRewards = data || [];
+  renderStreakRewardOption();
+}
+
+function renderStreakRewardOption() {
+  const option = leaveType?.querySelector('option[value="SR"]');
+  const note = document.getElementById('streakRewardNote');
+  const summary = streakRewardSummary(state.myStreakRewards || [], istToday());
+  const has = summary.count > 0;
+  if (option) { option.hidden = !has || Boolean(leaveForTarget()); option.disabled = option.hidden; }
+  if (!has && leaveType?.value === 'SR') { leaveType.value = 'PL'; updateLeaveHint(); }
+  renderLeaveTypePick();
+  if (note) {
+    note.classList.toggle('hidden', !has);
+    note.textContent = has
+      ? `Streak reward: ${leaveDayText(summary.days)} day, use by ${formatShortDate(summary.nextExpiry)}`
+      : '';
+  }
 }
 
 // calendarDayCount lives in js/leave.js
@@ -8459,6 +9304,12 @@ async function loadLeaveCycleSummaryFromSupabase() {
 async function loadNotifySignals() {
   if (!state.supabase || !state.currentEmployeeId) { state.notifySignals = null; return; }
   const signals = { invoiceDue: false, policyAckPending: false, featureReplies: [] };
+  // Own emergency contact (S7): already on the profile from
+  // employee_private_details at sign-in. When that read failed the fields are
+  // absent — unknown, so no reminder rather than a false one.
+  const me = state.employeeProfile || {};
+  signals.emergencyContactMissing = 'emergency_contact_phone' in me
+    && !String(me.emergency_contact_phone || '').trim();
   try {
     const myEmail = normalizeEmail(state.employeeProfile?.email || '');
     const inWindow = new Date().getDate() >= 25;
@@ -8485,19 +9336,32 @@ async function loadNotifySignals() {
     signals.policyAckPending = !ackRes.error && (ackRes.count || 0) === 0;
     // New joiners awaiting setup — only Alex/Nadia see these. (RLS doesn't
     // hide the rows; this is the same UX-level gate as the rest of the bell.)
-    if (isSetupApprover()) {
-      const pendRes = await state.supabase.from('employees')
-        .select('id, full_name, employment_type, created_at, requested_department:departments!employees_requested_department_id_fkey(name)')
-        .eq('is_active', true).eq('setup_pending', true)
-        .order('created_at', { ascending: true });
+    // Since 8 Oct 2026 switching someone on is a step in their hire, for its
+    // hiring manager or Alex; people with no hire are Alex's alone.
+    if (isSuperadminUser() || isHiringCrew()) {
+      const [pendRes, hireRes] = await Promise.all([
+        state.supabase.from('employees')
+          .select('id, full_name, email, employment_type, created_at, requested_department:departments!employees_requested_department_id_fkey(name)')
+          .eq('is_active', true).eq('setup_pending', true)
+          .order('created_at', { ascending: true }),
+        state.supabase.from('hires').select('id, work_email, hire_offer_terms(hiring_manager_email)').not('work_email', 'is', null)
+      ]);
       if (!pendRes.error) {
-        signals.pendingSetups = (pendRes.data || []).map(p => ({
-          id: p.id,
-          fullName: p.full_name,
-          employmentType: p.employment_type,
-          requestedTeam: p.requested_department?.name || '',
-          createdAt: p.created_at
-        }));
+        const me = normalizeEmail(state.session?.user?.email || '');
+        const hireBy = new Map((hireRes.data || []).map((h) => [normalizeEmail(h.work_email), h]));
+        signals.pendingSetups = (pendRes.data || []).map(p => {
+          const hire = hireBy.get(normalizeEmail(p.email || ''));
+          const terms = Array.isArray(hire?.hire_offer_terms) ? hire.hire_offer_terms[0] : hire?.hire_offer_terms;
+          return {
+            id: p.id,
+            hireId: hire?.id || null,
+            manager: normalizeEmail(terms?.hiring_manager_email || ''),
+            fullName: p.full_name,
+            employmentType: p.employment_type,
+            requestedTeam: p.requested_department?.name || '',
+            createdAt: p.created_at
+          };
+        }).filter((p) => isSuperadminUser() || (p.hireId && p.manager === me));
       }
     }
     if (!replyRes.error) {
@@ -8511,26 +9375,58 @@ async function loadNotifySignals() {
     // Brief pipeline signals — reviewer counts for Rhea/Mara/leadership,
     // assigned-deliverable count for everyone.
     const nowIso = new Date().toISOString();
+    // Open pieces I can see (RLS: reviewers, creative leads, owners, people
+    // on the client), with their brief, for the bell and My week.
     const briefQueries = [
-      state.supabase.from('brief_deliverables').select('id', { count: 'exact', head: true })
-        .eq('assignee_employee_id', state.currentEmployeeId)
-        .in('status', ['queued', 'in_progress', 'in_review'])
+      state.supabase.from('brief_deliverables')
+        .select('id, brief_id, title, status, due_at, delivery_url, needs_copy, needs_design, copy_assignee_id, design_assignee_id, copy_done_at, design_done_at, sent_back_at, brief:briefs(id, title, org, status, paused_at, archived_at, request_type)')
+        .neq('status', 'delivered').limit(500)
     ];
     if (isBriefReviewer()) {
       briefQueries.push(
         state.supabase.from('briefs').select('id', { count: 'exact', head: true })
-          .eq('request_type', 'brief').eq('status', 'ready_for_review'),
+          .eq('request_type', 'brief').eq('status', 'ready_for_review').is('archived_at', null),
         state.supabase.from('briefs').select('id', { count: 'exact', head: true })
-          .eq('request_type', 'notify_only').eq('status', 'submitted'),
+          .eq('request_type', 'notify_only').eq('status', 'submitted').is('archived_at', null),
         state.supabase.from('brief_deliverables').select('id', { count: 'exact', head: true })
           .neq('status', 'delivered').not('due_at', 'is', null).lt('due_at', nowIso)
       );
     }
     const [mineRes, reviewRes, quickRes, overdueRes] = await Promise.all(briefQueries);
-    signals.briefAssignedToMe = (!mineRes?.error && mineRes?.count) || 0;
+    state.openPieces = (!mineRes?.error && mineRes?.data) || [];
+    const piecesBriefs = {};
+    state.openPieces.forEach((p) => { if (p.brief) piecesBriefs[p.brief_id] = p.brief; });
+    signals.pieceCounts = pieceActionCounts(state.openPieces, piecesBriefs, {
+      me: state.currentEmployeeId,
+      email: state.employeeProfile?.email || state.session?.user?.email || '',
+      reviewer: isBriefReviewer(),
+      leadsMap: getConfigMap('creative_leads', {})
+    });
+    renderMyWeekPieces();
+    // NDAs I started whose details are in and draft is made: mine to send.
+    if (state.isNdaCrew) {
+      const ndaRes = await state.supabase.from('ndas').select('with_name')
+        .eq('status', 'ready').eq('created_by', state.currentEmployeeId).not('papersign_document_id', 'is', null);
+      signals.ndasToSend = (!ndaRes.error && ndaRes.data) ? ndaRes.data.map((r) => r.with_name) : [];
+    }
+    // Given a piece since sign-in: the Briefs menu appears without a reload.
+    if (state.openPieces.length && document.getElementById('briefsNavButton')?.classList.contains('hidden')) applyBriefsVisibility();
     signals.briefsAwaitingReview = (!reviewRes?.error && reviewRes?.count) || 0;
     signals.briefQuickOpen = (!quickRes?.error && quickRes?.count) || 0;
     signals.briefOverdue = (!overdueRes?.error && overdueRes?.count) || 0;
+    // Reimbursements waiting on ME as someone's manager, and mine sent back
+    // to me in the last two weeks (5 Nov 2026).
+    const [reimbWait, reimbBack] = await Promise.all([
+      state.supabase.from('invoices').select('id', { count: 'exact', head: true })
+        .eq('invoice_type', 'reimbursement').eq('approval_status', 'pending')
+        .eq('approver_id', state.currentEmployeeId).neq('employee_id', state.currentEmployeeId),
+      state.supabase.from('invoices').select('id, notes, decision_note')
+        .eq('invoice_type', 'reimbursement').eq('approval_status', 'sent_back')
+        .eq('employee_id', state.currentEmployeeId)
+        .gte('decided_at', new Date(Date.now() - 14 * 86400000).toISOString())
+    ]);
+    signals.reimbursementsToApprove = (!reimbWait.error && reimbWait.count) || 0;
+    signals.reimbursementsSentBack = (!reimbBack.error && reimbBack.data) || [];
     // Hiring pipeline: stages waiting on ME (crew employees only; Leo's
     // hiring-only surface IS his queue, no bell there).
     const myHireStages = [];
@@ -8580,6 +9476,7 @@ function refreshNotifyBell() {
   const unseen = countUnseenItems(items, notifySeenKeys());
   badge.textContent = String(unseen);
   badge.classList.toggle('hidden', unseen === 0);
+  showNotifyAttention(unseen);
   list.innerHTML = items.length
     ? items.map(i => `<div class="notify-item" data-notify-screen="${escapeHtml(i.screen)}"${i.anchor ? ` data-notify-anchor="${escapeHtml(i.anchor)}"` : ''}>
         <div class="notify-item-text">${escapeHtml(i.icon)} ${escapeHtml(i.text)}</div>
@@ -8587,6 +9484,93 @@ function refreshNotifyBell() {
       </div>`).join('')
     : '<div class="notify-empty">All caught up — nothing needs your action.</div>';
 }
+
+// ── The bell stays live (21 Oct 2026: it "should not need a refresh") ──
+// Items are computed from live data, so staying live means reading it again:
+// when the tab comes back into view or focus, and every 2 minutes while the
+// tab is open (browsers slow background timers to about once a minute, which
+// is fine). Unseen items show in the tab title, "(2) Agency Colony", and as a dot
+// on the tab icon, so a tab in the background says it wants attention; the
+// bell pulses when something new arrives or you come back to the tab.
+const NOTIFY_LIVE_MS = 2 * 60 * 1000;
+let notifyLiveAt = 0;
+let notifyLiveBusy = false;
+let notifyLastUnseen = 0;
+
+async function refreshNotifyLive({ force = false } = {}) {
+  if (!state.isAuthenticated || !state.supabase || notifyLiveBusy) return;
+  if (!force && Date.now() - notifyLiveAt < 30 * 1000) return;
+  notifyLiveBusy = true;
+  notifyLiveAt = Date.now();
+  try {
+    // Leave approvals come from the leave rows; everything else from signals.
+    await Promise.all([loadNotifySignals(), loadLeaveRequestsFromSupabase()]);
+  } catch (err) {
+    console.warn('Live bell refresh failed:', err);
+  } finally {
+    notifyLiveBusy = false;
+  }
+}
+
+function pulseNotifyBell() {
+  const bell = document.getElementById('notifyBellBtn');
+  if (!bell) return;
+  bell.classList.remove('notify-new');
+  void bell.offsetWidth; // restart the animation
+  bell.classList.add('notify-new');
+}
+
+function showNotifyAttention(unseen) {
+  const base = document.title.replace(/^\(\d+\)\s*/, '');
+  document.title = unseen ? `(${unseen}) ${base}` : base;
+  setNotifyFaviconDot(unseen > 0);
+  // Option B (21 Oct 2026): the bell turns Colony pink while
+  // something is waiting, and goes back to quiet once it's seen.
+  document.getElementById('notifyBellBtn')?.classList.toggle('has-items', unseen > 0);
+  if (unseen > notifyLastUnseen) pulseNotifyBell();
+  notifyLastUnseen = unseen;
+}
+
+// The tab icon with a dot, drawn once from the 32px icon and reused.
+let notifyFaviconOriginals = null;
+let notifyFaviconDotUrl = null;
+function setNotifyFaviconDot(on) {
+  const links = [...document.querySelectorAll('link[rel~="icon"]')];
+  if (!links.length) return;
+  if (!notifyFaviconOriginals) notifyFaviconOriginals = links.map((l) => [l, l.getAttribute('href'), l.getAttribute('type')]);
+  if (!on) {
+    notifyFaviconOriginals.forEach(([l, href, type]) => { l.setAttribute('href', href); if (type) l.setAttribute('type', type); });
+    return;
+  }
+  const apply = (url) => links.forEach((l) => { l.setAttribute('href', url); l.setAttribute('type', 'image/png'); });
+  if (notifyFaviconDotUrl) { apply(notifyFaviconDotUrl); return; }
+  const img = new Image();
+  img.onload = () => {
+    try {
+      const c = document.createElement('canvas');
+      c.width = c.height = 32;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0, 32, 32);
+      g.beginPath();
+      g.arc(24, 8, 7, 0, Math.PI * 2);
+      g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bad').trim() || '#d05050';
+      g.fill();
+      notifyFaviconDotUrl = c.toDataURL('image/png');
+      if (notifyLastUnseen > 0) apply(notifyFaviconDotUrl);
+    } catch (e) { /* the title still carries the count */ }
+  };
+  img.src = 'assets/favicon-32.png';
+}
+
+// @circle-omit Colony-only wiring
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (notifyLastUnseen > 0) pulseNotifyBell();
+  refreshNotifyLive();
+});
+window.addEventListener('focus', () => refreshNotifyLive());
+setInterval(() => refreshNotifyLive({ force: true }), NOTIFY_LIVE_MS);
+// @circle-omit-end
 
 // Scroll a just-opened screen to the section the notification points at.
 // Screens aren't URL-sectioned; data loads reflow the page, so retry briefly
@@ -8609,6 +9593,7 @@ function scrollToNotifyAnchor(anchorId, attempt = 0) {
   if (attempt < 50) setTimeout(() => scrollToNotifyAnchor(anchorId, attempt + 1), 300);
 }
 
+// @circle-omit Colony-only wiring
 (function wireNotifyBell() {
   const bell = document.getElementById('notifyBellBtn');
   const panel = document.getElementById('notifyPanel');
@@ -8628,20 +9613,28 @@ function scrollToNotifyAnchor(anchorId, attempt = 0) {
     const item = e.target.closest('[data-notify-screen]');
     if (!item) return;
     panel.classList.add('hidden');
+    // A profile item is always about YOUR profile; the screen shows whoever is
+    // selected, which for leadership may be someone else.
+    if (item.dataset.notifyScreen === 'employee-profile' && state.employeeProfile?.full_name) {
+      setSelectedEmployee(state.employeeProfile.full_name);
+    }
     navigateToScreen(item.dataset.notifyScreen);
     if (item.dataset.notifyAnchor) scrollToNotifyAnchor(item.dataset.notifyAnchor);
   });
   document.addEventListener('click', (e) => {
-    if (!panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== bell) {
+    if (!panel.classList.contains('hidden') && isOutsideClick(e, panel) && e.target !== bell) {
       panel.classList.add('hidden');
     }
   });
 })();
+// @circle-omit-end
 
+// "Waiting for you" shows only while something is waiting on this person.
 function refreshLeavePendingCount() {
   if (!leaveApprovalTableBody || !pendingApprovalCount) return;
-  const pending = leaveApprovalTableBody.querySelectorAll('.leave-approval-status .chip.pending').length;
-  pendingApprovalCount.textContent = `(${pending} pending)`;
+  const pending = leaveApprovalTableBody.querySelectorAll('tr[data-request-id]').length;
+  pendingApprovalCount.textContent = pending === 1 ? '1 request' : `${pending} requests`;
+  document.getElementById('leaveApprovalsPanel')?.classList.toggle('hidden', pending === 0);
 }
 
 function refreshOnLeaveTodayBadge() {
@@ -8663,7 +9656,7 @@ function refreshOnLeaveTodayBadge() {
 
 function setCalendarLeaveStatus(requestId, statusClass, label) {
   if (!teamLeaveCalendarTable) return;
-  const row = teamLeaveCalendarTable.querySelector(`tr[data-request-id=\"${requestId}\"]`);
+  const row = teamLeaveCalendarTable.querySelector(`[data-request-id="${requestId}"]`);
   const chip = row?.querySelector('.leave-calendar-status');
   if (!chip) return;
   chip.classList.remove('pending', 'approved', 'rejected');
@@ -8686,51 +9679,15 @@ function setApprovalRowStatus(row, statusClass, label, decisionText) {
   });
 }
 
+// Signed-out demo only: shows the request in the lists without a database.
 function addLeaveRequestToTables({ employee, type, dates }) {
-  if (!leaveApprovalTableBody || !teamLeaveCalendarTable) return null;
+  if (!teamLeaveCalendarTable) return null;
   leaveRequestSeq += 1;
   const requestId = `lr-${String(leaveRequestSeq).padStart(3, '0')}`;
-  const employeeName = escapeHtml(displayPersonName(employee, 'Employee'));
-
-  leaveApprovalTableBody.querySelectorAll('tr').forEach((row) => {
-    if (row.children.length === 1 && row.children[0]?.hasAttribute('colspan')) {
-      row.remove();
-    }
-  });
-
-  const approvalRow = document.createElement('tr');
-  approvalRow.dataset.requestId = requestId;
-  approvalRow.innerHTML = `
-    <td>${employeeName}</td>
-    <td>${type}</td>
-    <td>${dates}</td>
-    <td class=\"leave-approval-status\"><span class=\"chip pending\">Pending</span></td>
-    <td>
-      <button class=\"ghost small\" data-leave-action=\"approve\">Approve</button>
-      <button class=\"ghost small\" data-leave-action=\"reject\">Reject</button>
-    </td>
-    <td class=\"leave-decision-meta\">--</td>
-  `;
-  leaveApprovalTableBody.appendChild(approvalRow);
-
-  const calendarBody = teamLeaveCalendarTable.querySelector('tbody');
-  if (calendarBody) {
-    calendarBody.querySelectorAll('tr').forEach((row) => {
-      if (row.children.length === 1 && row.children[0]?.hasAttribute('colspan')) {
-        row.remove();
-      }
-    });
-    const calendarRow = document.createElement('tr');
-    calendarRow.dataset.requestId = requestId;
-    calendarRow.innerHTML = `
-      <td>${dates}</td>
-      <td>${employeeName}</td>
-      <td>${type}</td>
-      <td><span class=\"chip pending leave-calendar-status\">Pending</span></td>
-    `;
-    calendarBody.appendChild(calendarRow);
-  }
-
+  const li = document.createElement('li');
+  li.dataset.requestId = requestId;
+  li.innerHTML = `<span class="leave-next-day">${escapeHtml(dates)}</span><span>${escapeHtml(displayPersonName(employee, 'Employee'))} · ${escapeHtml(leaveTypeShort(type))} <span class="leave-calendar-status pending">pending</span></span>`;
+  teamLeaveCalendarTable.appendChild(li);
   return requestId;
 }
 
@@ -8745,248 +9702,194 @@ function formatDecisionText(row) {
 
 function clearRenderedLeaveRows() {
   leaveApprovalTableBody?.querySelectorAll('tr').forEach((row) => row.remove());
-  teamLeaveCalendarTable?.querySelectorAll('tbody tr').forEach((row) => row.remove());
+  const decided = document.getElementById('leaveDecidedTableBody');
+  if (decided) decided.innerHTML = '';
+  if (teamLeaveCalendarTable) teamLeaveCalendarTable.innerHTML = '';
 }
 
-let showAllHolidays = false;
-
+// The year's office holidays, folded on Leave; past ones are dimmed.
 function renderHolidaysToCalendar() {
-  const holidayTable = document.getElementById('holidayCalendarTable');
-  const calendarBody = holidayTable?.querySelector('tbody');
-  const toggleBtn = document.getElementById('holidayToggleBtn');
-  const heading = document.getElementById('holidayHeading');
+  const calendarBody = document.getElementById('holidayCalendarTable')?.querySelector('tbody');
   if (!calendarBody) return;
-  calendarBody.innerHTML = '';
-  const todayStr = toISODateLocal(new Date());
-
-  const allHolidays = getPublicHolidays();
-  const holidays = showAllHolidays
-    ? allHolidays
-    : allHolidays.filter((h) => h.date >= todayStr).slice(0, 3);
-
-  if (!holidays.length) {
-    const emptyRow = document.createElement('tr');
-    emptyRow.innerHTML = '<td colspan="3">No upcoming holidays.</td>';
-    calendarBody.appendChild(emptyRow);
-    if (toggleBtn) toggleBtn.classList.add('hidden');
-    return;
-  }
-
-  holidays.forEach((h) => {
-    const d = new Date(h.date + 'T00:00:00');
-    const dateLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-    const isPast = h.date < todayStr;
-    const row = document.createElement('tr');
-    if (isPast) row.classList.add('muted-row');
-    row.innerHTML = `
-      <td data-label="Date">${dateLabel}</td>
-      <td data-label="Holiday">${escapeHtml(h.name)}</td>
-      <td data-label="Status"><span class="chip ${isPast ? 'muted-chip' : 'approved'}">${isPast ? 'Past' : 'Holiday'}</span></td>
-    `;
-    calendarBody.appendChild(row);
-  });
-
-  if (heading) heading.textContent = showAllHolidays ? 'Public Holidays 2026' : 'Upcoming Public Holidays';
-  if (toggleBtn) {
-    toggleBtn.textContent = showAllHolidays ? 'Show upcoming only' : 'See all holidays';
-    toggleBtn.classList.remove('hidden');
-  }
+  const todayStr = toISODateLocal();
+  const holidays = holidayRuns();
+  const day = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+  calendarBody.innerHTML = holidays.length
+    ? holidays.map((h) => {
+      const label = h.end !== h.date ? `${day(h.date)} – ${day(h.end)}` : day(h.date);
+      return `<tr${h.end < todayStr ? ' class="muted-row"' : ''}><td data-label="Date">${escapeHtml(label)}</td><td data-label="Holiday">${escapeHtml(h.name)}</td></tr>`;
+    }).join('')
+    : '<tr><td>No holidays added yet.</td></tr>';
 }
 
-const holidayToggleBtn = document.getElementById('holidayToggleBtn');
-if (holidayToggleBtn) {
-  holidayToggleBtn.addEventListener('click', () => {
-    showAllHolidays = !showAllHolidays;
-    renderHolidaysToCalendar();
-  });
+// Leave, simplified (13 Oct 2026). Requests this person can decide go
+// in "Waiting for you" at the top; everything else is "Past decisions",
+// folded. The right column's "Next 30 days" lists who's out and the office
+// holidays together.
+function leaveCanDecide(row) {
+  const me = normalizeEmail(state.employeeProfile?.email || state.session?.user?.email || '');
+  const requiresSuperadmin = normalizeAccessLevel(row.employee?.access_level || 'employee') === 'leadership';
+  const routedToMe = approverEmailList(row.approver_emails).includes(me);
+  return row.status === 'pending' && (routedToMe || isSuperadminUser()) && (!requiresSuperadmin || isSuperadminUser());
+}
+
+// "Mon 19 Oct" — one date format across the Leave lists.
+function leaveDayLabel(iso) {
+  const d = new Date(`${String(iso).slice(0, 10)}T00:00:00`);
+  if (isNaN(d)) return String(iso || '');
+  return `${d.toLocaleDateString('en-IN', { weekday: 'short' })} ${d.getDate()} ${d.toLocaleDateString('en-IN', { month: 'short' })}`;
+}
+function leaveRangeLabel(a, b) {
+  return a === b || !b ? leaveDayLabel(a) : `${leaveDayLabel(a)} – ${leaveDayLabel(b)}`;
+}
+
+function leaveDaysOf(row) {
+  if (row.is_half_day) return 0.5;
+  const s = parseIsoDateLocal(row.start_date), e = parseIsoDateLocal(row.end_date);
+  return s && e ? calendarDayCount(s, e) : 1;
 }
 
 function renderLeaveRows(rows) {
   clearRenderedLeaveRows();
-  state.leaveRowsById = new Map((rows || []).map((row) => [row.id, row]));
+  rows = rows || [];
+  state.leaveRowsById = new Map(rows.map((row) => [row.id, row]));
   refreshNotifyBell();
-
-  // Render holidays into their own table
   renderHolidaysToCalendar();
 
-  // Clear the team leave calendar tbody
-  const teamLeaveBody = teamLeaveCalendarTable?.querySelector('tbody');
-  if (teamLeaveBody) teamLeaveBody.innerHTML = '';
+  const nameOf = (row) => displayPersonName(row.employee?.full_name || state.currentEmployee || 'Employee', 'Employee');
+  const dateOf = (row) => leaveRangeLabel(row.start_date, row.end_date) + (row.is_half_day ? ' (½ day)' : '');
 
-  if (!(rows || []).length) {
-    if (leaveApprovalTableBody) {
-      const emptyApproval = document.createElement('tr');
-      emptyApproval.innerHTML = '<td colspan="6">No leave requests yet.</td>';
-      leaveApprovalTableBody.appendChild(emptyApproval);
-    }
-    if (teamLeaveBody) {
-      const emptyLeave = document.createElement('tr');
-      emptyLeave.innerHTML = '<td colspan="4">No upcoming team leave.</td>';
-      teamLeaveBody.appendChild(emptyLeave);
-    }
-    refreshLeavePendingCount();
-    return;
-  }
+  // Waiting for you: one row each, Approve and Decline on the row.
+  const waiting = rows.filter(leaveCanDecide).sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)));
+  waiting.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.dataset.requestId = row.id;
+    const days = leaveDaysOf(row);
+    tr.innerHTML = `
+      <td data-label="Who"><strong>${escapeHtml(nameOf(row))}</strong></td>
+      <td data-label="Type">${escapeHtml(leaveTypeShort(row.leave_type))} · ${escapeHtml(leaveDayText(days))} day${days === 1 ? '' : 's'}</td>
+      <td data-label="Dates">${escapeHtml(dateOf(row))}${row.reason ? `<span class="leave-row-note">${escapeHtml(row.reason)}</span>` : ''}</td>
+      <td data-label="" class="leave-row-actions">
+        <button class="primary small" type="button" data-leave-action="approve">Approve</button>
+        <button class="ghost small" type="button" data-leave-action="reject">Decline</button>
+      </td>`;
+    leaveApprovalTableBody?.appendChild(tr);
+  });
 
-  // Calculate 30-day window for team leave visibility
-  const todayDate = new Date();
-  const todayStr = toISODateLocal(todayDate);
-  const futureDate = new Date(todayDate);
-  futureDate.setDate(futureDate.getDate() + 30);
-  const futureStr = toISODateLocal(futureDate);
-
-  let teamLeaveCount = 0;
-
-  // Split into pending and decided for the approval table
-  const pendingRows = (rows || []).filter(r => r.status === 'pending');
-  const decidedRows = (rows || []).filter(r => r.status !== 'pending')
-    .sort((a, b) => {
-      // Rows with decided_at sort first (latest on top); imported rows without decision sink to bottom
-      if (a.decided_at && !b.decided_at) return -1;
-      if (!a.decided_at && b.decided_at) return 1;
-      const da = a.decided_at || a.created_at || '';
-      const db = b.decided_at || b.created_at || '';
-      return db.localeCompare(da);
-    });
-  const DECIDED_PAGE_SIZE = 5;
-  let decidedPage = 0;
+  // Past decisions: everything else, newest first, ten at a time.
+  const decidedBody = document.getElementById('leaveDecidedTableBody');
   const toggleBtn = document.getElementById('leaveApprovalToggle');
-
-  function buildApprovalRow(row) {
-    const employeeName = displayPersonName(row.employee?.full_name || state.currentEmployee || 'Employee', 'Employee');
-    const dateLabel = formatLeaveDateRange(row.start_date, row.end_date) + (row.is_half_day ? ' (½ day)' : '');
-    const statusMeta = leaveStatusMeta(row.status);
-    const requesterAccessLevel = normalizeAccessLevel(row.employee?.access_level || 'employee');
-    const requiresSuperadminDecision = requesterAccessLevel === 'leadership';
-    // Decisions belong to the ROUTED approver (direct manager) + superadmin —
-    // not leadership-wide. Everyone in leadership still SEES the table.
-    const routedToMe = approverEmailList(row.approver_emails)
-      .includes(normalizeEmail(state.employeeProfile?.email || state.session?.user?.email || ''));
-    const canDecide =
-      row.status === 'pending' &&
-      (routedToMe || isSuperadminUser()) &&
-      (!requiresSuperadminDecision || isSuperadminUser());
-    const tr = document.createElement('tr');
-    tr.dataset.requestId = row.id;
-    tr.innerHTML = `
-      <td data-label="Employee">${escapeHtml(employeeName)}</td>
-      <td data-label="Type">${escapeHtml(row.leave_type)}</td>
-      <td data-label="Dates">${dateLabel}</td>
-      <td data-label="Status" class="leave-approval-status"><span class="chip ${statusMeta.chipClass}">${statusMeta.label}</span></td>
-      <td data-label="Action">
-        <button class="ghost small" data-leave-action="approve" ${canDecide ? '' : 'disabled'}>Approve</button>
-        <button class="ghost small" data-leave-action="reject" ${canDecide ? '' : 'disabled'}>Reject</button>
-      </td>
-      <td data-label="Decision" class="leave-decision-meta">${formatDecisionText(row)}</td>
-    `;
-    return tr;
-  }
-
-  function renderApprovalTable() {
-    if (!leaveApprovalTableBody) return;
-    leaveApprovalTableBody.querySelectorAll('tr').forEach(r => r.remove());
-
-    // Pending first
-    pendingRows.forEach(row => leaveApprovalTableBody.appendChild(buildApprovalRow(row)));
-
-    // Then decided — paginated
-    const totalDecidedPages = Math.max(1, Math.ceil(decidedRows.length / DECIDED_PAGE_SIZE));
-    decidedPage = Math.min(decidedPage, totalDecidedPages - 1);
-    const pageStart = decidedPage * DECIDED_PAGE_SIZE;
-    const pageSlice = decidedRows.slice(pageStart, pageStart + DECIDED_PAGE_SIZE);
-    pageSlice.forEach(row => leaveApprovalTableBody.appendChild(buildApprovalRow(row)));
-
+  const decided = rows.filter((r) => !waiting.includes(r)).sort((a, b) => {
+    if (a.decided_at && !b.decided_at) return -1;
+    if (!a.decided_at && b.decided_at) return 1;
+    return String(b.decided_at || b.created_at || '').localeCompare(String(a.decided_at || a.created_at || ''));
+  });
+  const PAGE = 10;
+  // Kept across re-renders: the live bell reloads leave rows every couple of
+  // minutes, and the page you were reading must not jump back to 1.
+  let page = state.leaveDecidedPage || 0;
+  const drawDecided = () => {
+    if (!decidedBody) return;
+    decidedBody.innerHTML = '';
+    const pages = Math.max(1, Math.ceil(decided.length / PAGE));
+    page = Math.min(page, pages - 1);
+    state.leaveDecidedPage = page;
+    if (!decided.length) decidedBody.innerHTML = '<tr><td>Nothing yet.</td></tr>';
+    decided.slice(page * PAGE, page * PAGE + PAGE).forEach((row) => {
+      const meta = leaveStatusMeta(row.status);
+      const tr = document.createElement('tr');
+      tr.dataset.requestId = row.id;
+      tr.innerHTML = `
+        <td data-label="Who">${escapeHtml(nameOf(row))}</td>
+        <td data-label="Type">${escapeHtml(leaveTypeShort(row.leave_type))}</td>
+        <td data-label="Dates">${escapeHtml(dateOf(row))}</td>
+        <td data-label="Status"><span class="chip ${meta.chipClass}">${meta.label}</span></td>`;
+      decidedBody.appendChild(tr);
+    });
     if (toggleBtn) {
-      if (decidedRows.length > DECIDED_PAGE_SIZE) {
-        toggleBtn.classList.remove('hidden');
-        const pageLabel = `${decidedPage + 1} / ${totalDecidedPages}`;
-        toggleBtn.innerHTML = `<button class="ghost small leave-page-prev" ${decidedPage === 0 ? 'disabled' : ''}>&larr;</button> <span style="font-size:13px;color:var(--muted)">Past decisions · ${pageLabel}</span> <button class="ghost small leave-page-next" ${decidedPage >= totalDecidedPages - 1 ? 'disabled' : ''}>&rarr;</button>`;
-      } else {
-        toggleBtn.classList.add('hidden');
-      }
+      toggleBtn.classList.toggle('hidden', pages <= 1);
+      toggleBtn.innerHTML = `<button class="ghost small leave-page-prev" type="button" ${page === 0 ? 'disabled' : ''}>&larr;</button> <span class="mini-meta">${page + 1} / ${pages}</span> <button class="ghost small leave-page-next" type="button" ${page >= pages - 1 ? 'disabled' : ''}>&rarr;</button>`;
+      toggleBtn.onclick = (e) => {
+        if (e.target.closest('.leave-page-next')) { page += 1; drawDecided(); }
+        if (e.target.closest('.leave-page-prev')) { page -= 1; drawDecided(); }
+      };
     }
-  }
+  };
+  drawDecided();
 
-  renderApprovalTable();
-
-  if (toggleBtn) {
-    toggleBtn.onclick = (e) => {
-      const totalPages = Math.max(1, Math.ceil(decidedRows.length / DECIDED_PAGE_SIZE));
-      if (e.target.closest('.leave-page-next') && decidedPage < totalPages - 1) {
-        decidedPage++;
-        renderApprovalTable();
-        refreshLeavePendingCount();
-      } else if (e.target.closest('.leave-page-prev') && decidedPage > 0) {
-        decidedPage--;
-        renderApprovalTable();
-        refreshLeavePendingCount();
-      }
-    };
-  }
-
-  // Team leave calendar
-  const allTeamLeave = (rows || []).filter(
-    (row) => (row.status === 'approved' || row.status === 'pending') && row.end_date >= todayStr
-  );
-  const next30Leave = allTeamLeave.filter((row) => row.start_date <= futureStr);
-  let showAllTeamLeave = false;
-  const teamLeaveToggle = document.getElementById('teamLeaveToggleBtn');
-  const teamLeaveHeading = document.getElementById('teamLeaveHeading');
-
-  function buildTeamLeaveRow(row) {
-    const employeeName = displayPersonName(row.employee?.full_name || state.currentEmployee || 'Employee', 'Employee');
-    const dateLabel = formatLeaveDateRange(row.start_date, row.end_date) + (row.is_half_day ? ' (½ day)' : '');
-    const statusMeta = leaveStatusMeta(row.status);
-    const tr = document.createElement('tr');
-    tr.dataset.requestId = row.id;
-    tr.innerHTML = `
-      <td data-label="Date">${dateLabel}</td>
-      <td data-label="Person">${escapeHtml(employeeName)}</td>
-      <td data-label="Type">${escapeHtml(row.leave_type)}</td>
-      <td data-label="Status"><span class="chip ${statusMeta.chipClass} leave-calendar-status">${statusMeta.label}</span></td>
-    `;
-    return tr;
-  }
-
-  function renderTeamLeaveCalendar() {
-    if (!teamLeaveBody) return;
-    teamLeaveBody.innerHTML = '';
-    const visible = showAllTeamLeave ? allTeamLeave : next30Leave.slice(0, 5);
-    if (!visible.length) {
-      const emptyLeave = document.createElement('tr');
-      emptyLeave.innerHTML = `<td colspan="4">No ${showAllTeamLeave ? '' : 'upcoming '}team leave${showAllTeamLeave ? '.' : ' in the next 30 days.'}</td>`;
-      teamLeaveBody.appendChild(emptyLeave);
-    } else {
-      visible.forEach((row) => teamLeaveBody.appendChild(buildTeamLeaveRow(row)));
-    }
-    if (teamLeaveHeading) {
-      teamLeaveHeading.textContent = showAllTeamLeave ? 'All Upcoming Team Leave' : 'Team Leave (Next 30 Days)';
-    }
-    if (teamLeaveToggle) {
-      if (allTeamLeave.length > 0 && (showAllTeamLeave || next30Leave.length > 5 || allTeamLeave.length > next30Leave.length)) {
-        teamLeaveToggle.classList.remove('hidden');
-        teamLeaveToggle.textContent = showAllTeamLeave ? 'Show next 30 days only' : 'See all team leave';
-      } else if (allTeamLeave.length > 0) {
-        teamLeaveToggle.classList.remove('hidden');
-        teamLeaveToggle.textContent = 'See all team leave';
-      } else {
-        teamLeaveToggle.classList.add('hidden');
-      }
-    }
-  }
-
-  renderTeamLeaveCalendar();
-
-  if (teamLeaveToggle) {
-    teamLeaveToggle.onclick = () => {
-      showAllTeamLeave = !showAllTeamLeave;
-      renderTeamLeaveCalendar();
-    };
-  }
-
+  renderLeaveNext30(rows);
+  renderMyLeaveThisYear();
   refreshLeavePendingCount();
-  refreshOnLeaveTodayBadge();
 }
+
+// Who's out and the office holidays, next 30 days, in one list. Everyone's
+// leave comes from home_whos_out (dates only), so it is the same for every
+// viewer; leadership's own rows are the fallback while it loads.
+function renderLeaveNext30(rows) {
+  const list = teamLeaveCalendarTable;
+  if (!list) return;
+  const todayIso = toISODateLocal();
+  const untilIso = shiftIsoDays(todayIso, 30);
+  const items = [];
+  const out = state.leaveWhosOut || (rows || []).map((r) => ({ id: r.id, full_name: r.employee?.full_name, leave_type: r.leave_type, status: r.status, start_date: r.start_date, end_date: r.end_date, is_half_day: r.is_half_day }));
+  const seen = new Set();
+  out.forEach((r) => {
+    if (!['approved', 'pending'].includes(r.status) || r.end_date < todayIso || r.start_date > untilIso) return;
+    const key = `${r.full_name}|${r.start_date}|${r.end_date}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const first = displayPersonName(r.full_name, 'Someone').split(' ')[0];
+    const date = r.start_date < todayIso ? todayIso : r.start_date;
+    const tail = [r.start_date !== r.end_date ? `till ${leaveDayLabel(r.end_date)}` : '', r.is_half_day ? 'half day' : ''].filter(Boolean).join(' · ');
+    items.push({ date, id: r.id, pending: r.status === 'pending', text: `${first} · ${leaveTypeShort(r.leave_type)}${tail ? ` · ${tail}` : ''}` });
+  });
+  holidayRuns().forEach((h) => {
+    if (h.end < todayIso || h.date > untilIso) return;
+    const till = h.end !== h.date ? ` till ${leaveDayLabel(h.end)}` : '';
+    items.push({ date: h.date < todayIso ? todayIso : h.date, text: `${h.name} · office closed${till}`, holiday: true });
+  });
+  items.sort((a, b) => a.date.localeCompare(b.date) || (a.holiday ? -1 : 1));
+  list.innerHTML = items.length
+    ? items.map((it) => `<li${it.id ? ` data-request-id="${escapeHtml(it.id)}"` : ''}><span class="leave-next-day">${escapeHtml(it.date === todayIso ? 'Today' : leaveDayLabel(it.date))}</span><span>${escapeHtml(it.text)}${it.pending ? ' <span class="leave-calendar-status pending">pending</span>' : ''}</span></li>`).join('')
+    : '<li class="mini-meta">Nothing in the next 30 days.</li>';
+}
+
+// Your own requests this leave year, newest first (folded by default).
+function renderMyLeaveThisYear() {
+  const list = document.getElementById('leaveMineList');
+  const meta = document.getElementById('leaveMineMeta');
+  if (!list) return;
+  const start = state.leaveCycleSummary?.cycle_start || '';
+  const mine = [...(state.leaveRowsById?.values() || [])]
+    .filter((r) => r.employee_id === state.currentEmployeeId && (!start || r.end_date >= start) && r.status !== 'cancelled')
+    .sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)));
+  const tone = { approved: 'good', pending: 'pending', rejected: 'bad' };
+  list.innerHTML = mine.length
+    ? mine.map((r) => `<li data-request-id="${escapeHtml(r.id)}"><span class="leave-next-day">${escapeHtml(leaveRangeLabel(r.start_date, r.end_date))}</span><span>${escapeHtml(leaveTypeShort(r.leave_type))}${r.is_half_day ? ' · half day' : ''}${r.reason ? ` <span class="mini-meta">· ${escapeHtml(r.reason)}</span>` : ''}${r.marked_by_employee_id ? ` <span class="mini-meta">· added by ${escapeHtml(displayPersonName(getEmployeeNameById(r.marked_by_employee_id), 'your manager').split(' ')[0])}</span>` : ''}</span><span class="leave-mine-status is-${tone[r.status] || 'muted'}">${escapeHtml(leaveStatusMeta(r.status).label)}</span></li>`).join('')
+    : '<li class="mini-meta">No leave yet this year.</li>';
+  if (meta) {
+    const s = state.leaveCycleSummary || {};
+    const taken = (s.pl?.taken || 0) + (s.cl?.taken || 0) + (s.sl?.taken || 0);
+    const waiting = mine.filter((r) => r.status === 'pending').length;
+    meta.textContent = [`${leaveDayText(taken)} day${taken === 1 ? '' : 's'} taken`, waiting ? `${waiting} waiting` : ''].filter(Boolean).join(' · ');
+  }
+}
+
+// The type as three (or four) buttons over the hidden select, so every rule
+// that reads leaveType.value keeps working unchanged.
+function renderLeaveTypePick() {
+  const pick = document.getElementById('leaveTypePick');
+  if (!pick || !leaveType) return;
+  pick.innerHTML = [...leaveType.options].filter((o) => !o.hidden && !o.disabled).map((o) =>
+    `<button type="button" role="radio" aria-checked="${o.value === leaveType.value}" class="leave-type-btn${o.value === leaveType.value ? ' is-on' : ''}" data-leave-type="${o.value}">${escapeHtml(o.textContent)}</button>`).join('');
+}
+document.getElementById('leaveTypePick')?.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-leave-type]');
+  if (!b || !leaveType) return;
+  leaveType.value = b.dataset.leaveType;
+  leaveType.dispatchEvent(new Event('change'));
+  renderLeaveTypePick();
+});
 
 async function loadLeaveRequestsFromSupabase() {
   if (!state.supabase || !state.isAuthenticated) {
@@ -9011,6 +9914,7 @@ async function loadLeaveRequestsFromSupabase() {
       approver_emails,
       created_at,
       decided_at,
+      marked_by_employee_id,
       employee:employees!leave_requests_employee_id_fkey (
         id,
         full_name,
@@ -9033,9 +9937,15 @@ async function loadLeaveRequestsFromSupabase() {
     return;
   }
 
+  // Who's out in the next 30 days, for everyone (dates only, via RPC).
+  const todayIso = toISODateLocal();
+  const outRes = await state.supabase.rpc('home_whos_out', { p_from: todayIso, p_until: shiftIsoDays(todayIso, 30) });
+  state.leaveWhosOut = outRes.error ? null : (outRes.data || []);
+  loadMyOutOfOffice().catch(actionFailed);
   renderLeaveRows(leaveRowsResult.data || []);
+  loadLeaveForPicker().catch(() => {});
   await loadLeaveCycleSummaryFromSupabase();
-  if (isLeadershipRole()) loadReporteeLeaveSnapshot();
+  loadLeaveBalancesPanel().catch((e) => console.error('Team balances failed:', e));
 }
 
 function computeNextLeaveMap() {
@@ -9082,7 +9992,7 @@ function renderReporteeLeaveSnapshotRows(employees, summaryMap, nextLeaveMap) {
   reporteeLeaveSnapshotBody.innerHTML = '';
   if (!employees.length) {
     const row = document.createElement('tr');
-    row.innerHTML = '<td colspan="7">No reportees with leave tracking.</td>';
+    row.innerHTML = '<td colspan="7">No one to show for this year.</td>';
     reporteeLeaveSnapshotBody.appendChild(row);
     return;
   }
@@ -9120,79 +10030,164 @@ function renderReporteeLeaveSnapshotRows(employees, summaryMap, nextLeaveMap) {
   });
 }
 
-async function loadReporteeLeaveSnapshot() {
-  if (!isLeadershipRole() || !state.supabase || !reporteeLeaveSnapshotBody) return;
-  const managerEmail = normalizeEmail(state.employeeProfile?.email || state.session?.user?.email || '');
-  const reportees = reporteeEmployeesForManager(managerEmail)
-    .filter((e) => e.leave_tracking_enabled !== false);
-  if (!reportees.length) {
-    renderReporteeLeaveSnapshotRows([], new Map(), new Map());
-    return;
-  }
-  const employeeIds = reportees.map((e) => e.id);
-  try {
-    const response = await state.supabase.rpc('get_leave_summaries_for_employees', {
-      p_employee_ids: employeeIds,
-      p_as_of_date: toISODateLocal()
-    });
-    if (response.error) {
-      console.error('Reportee leave snapshot error:', response.error);
-      reporteeLeaveSnapshotBody.innerHTML = `<tr><td colspan="7">Unable to load: ${escapeHtml(response.error.message)}</td></tr>`;
-      return;
-    }
-    const summaries = Array.isArray(response.data) ? response.data : [];
-    const summaryMap = new Map();
-    summaries.forEach((s) => summaryMap.set(s.employee_id, s));
-    const nextLeaveMap = computeNextLeaveMap();
-    renderReporteeLeaveSnapshotRows(reportees, summaryMap, nextLeaveMap);
-  } catch (error) {
-    console.error('Reportee leave snapshot failed:', error);
-  }
+// Team balances: leadership (their reportees, or everyone) and the leave
+// viewers on app_config.leave_viewer_emails (Blake, accounts: everyone,
+// read-only; 28 Oct 2026). Numbers come from get_leave_summaries_for_employees,
+// which checks the same thing; leave_requests RLS still hides everyone else's
+// requests. "Last year" reads the archived April-March before this one.
+const leaveBalancesYear = document.getElementById('leaveBalancesYear');
+state.leaveBalances = state.leaveBalances || { scope: 'reportees', year: 'current' };
+
+function fiscalYearLabel(startYear) {
+  return `${startYear}–${String(startYear + 1).slice(-2)}`;
 }
 
-async function loadAllEmployeeLeaveSnapshot() {
-  if (!isLeadershipRole() || !state.supabase || !reporteeLeaveSnapshotBody) return;
-  const allEmployees = state.employeeDirectory
-    .filter((e) => e.leave_tracking_enabled !== false && e.is_active !== false);
-  if (!allEmployees.length) {
-    renderReporteeLeaveSnapshotRows([], new Map(), new Map());
+async function loadLeaveBalancesPanel() {
+  const panel = document.getElementById('reporteeLeaveSnapshotPanel');
+  if (!panel || !state.supabase) return;
+  if (state.isLeaveViewer === undefined) {
+    const { data } = await state.supabase.rpc('is_leave_viewer');
+    state.isLeaveViewer = data === true;
+  }
+  const leadership = isLeadershipRole();
+  panel.classList.toggle('hidden', !(leadership || state.isLeaveViewer));
+  if (!leadership && !state.isLeaveViewer) return;
+  // A viewer sees everyone; leadership starts on their reportees.
+  if (!leadership) state.leaveBalances.scope = 'all';
+  if (seeAllLeavesBtn) seeAllLeavesBtn.hidden = !leadership || state.leaveBalances.scope === 'all';
+  const today = toISODateLocal();
+  const fyStart = Number(today.slice(5, 7)) >= 4 ? Number(today.slice(0, 4)) : Number(today.slice(0, 4)) - 1;
+  if (leaveBalancesYear && !leaveBalancesYear.dataset.labelled) {
+    leaveBalancesYear.options[0].textContent = `This year (${fiscalYearLabel(fyStart)})`;
+    leaveBalancesYear.options[1].textContent = `Last year (${fiscalYearLabel(fyStart - 1)})`;
+    leaveBalancesYear.dataset.labelled = '1';
+  }
+  await loadLeaveBalances();
+}
+
+async function loadLeaveBalances() {
+  if (!state.supabase || !reporteeLeaveSnapshotBody) return;
+  const { scope, year } = state.leaveBalances;
+  const today = toISODateLocal();
+  const fyStart = Number(today.slice(5, 7)) >= 4 ? Number(today.slice(0, 4)) : Number(today.slice(0, 4)) - 1;
+  const asOf = year === 'previous' ? `${fyStart}-03-31` : today;
+  let people = (state.employeeDirectory || []).filter((e) => e.leave_tracking_enabled !== false && e.is_active !== false);
+  if (scope !== 'all') {
+    const managerEmail = normalizeEmail(state.employeeProfile?.email || state.session?.user?.email || '');
+    people = reporteeEmployeesForManager(managerEmail).filter((e) => e.leave_tracking_enabled !== false);
+  }
+  if (!people.length) { renderReporteeLeaveSnapshotRows([], new Map(), new Map()); return; }
+  const response = await state.supabase.rpc('get_leave_summaries_for_employees', {
+    p_employee_ids: people.map((e) => e.id),
+    p_as_of_date: asOf
+  });
+  if (response.error) {
+    console.error('Team balances error:', response.error);
+    reporteeLeaveSnapshotBody.innerHTML = `<tr><td colspan="7">Unable to load: ${escapeHtml(response.error.message)}</td></tr>`;
     return;
   }
-  const employeeIds = allEmployees.map((e) => e.id);
-  try {
-    const response = await state.supabase.rpc('get_leave_summaries_for_employees', {
-      p_employee_ids: employeeIds,
-      p_as_of_date: toISODateLocal()
-    });
-    if (response.error) {
-      console.error('All employee leave snapshot error:', response.error);
-      return;
-    }
-    const summaries = Array.isArray(response.data) ? response.data : [];
-    const summaryMap = new Map();
-    summaries.forEach((s) => summaryMap.set(s.employee_id, s));
-    const nextLeaveMap = computeNextLeaveMap();
-    renderReporteeLeaveSnapshotRows(allEmployees, summaryMap, nextLeaveMap);
-  } catch (error) {
-    console.error('All employee leave snapshot failed:', error);
+  const summaryMap = new Map((Array.isArray(response.data) ? response.data : []).map((s) => [s.employee_id, s]));
+  if (year === 'previous') {
+    // Only people Colony tracked that year; no "next leave" for a past year.
+    renderReporteeLeaveSnapshotRows(people.filter((e) => summaryMap.has(e.id)), summaryMap, new Map());
+    return;
   }
+  // A viewer's own leave rows hold only their own leave, so their "next
+  // leave" comes from the dates-only who's-out list (next 30 days).
+  const nextLeaveMap = computeNextLeaveMap();
+  const idByEmail = new Map((state.employeeDirectory || []).map((e) => [normalizeEmail(e.email), e.id]));
+  (state.leaveWhosOut || []).forEach((o) => {
+    const id = idByEmail.get(normalizeEmail(o.email));
+    const start = String(o.start_date).slice(0, 10);
+    if (id && start > today && (!nextLeaveMap.has(id) || start < nextLeaveMap.get(id))) nextLeaveMap.set(id, start);
+  });
+  renderReporteeLeaveSnapshotRows(people, summaryMap, nextLeaveMap);
 }
+
+leaveBalancesYear?.addEventListener('change', () => {
+  state.leaveBalances.year = leaveBalancesYear.value === 'previous' ? 'previous' : 'current';
+  loadLeaveBalances().catch((e) => console.error('Team balances failed:', e));
+});
 
 if (seeAllLeavesBtn) {
   seeAllLeavesBtn.addEventListener('click', async () => {
     seeAllLeavesBtn.disabled = true;
     seeAllLeavesBtn.textContent = 'Loading...';
     try {
-      await loadAllEmployeeLeaveSnapshot();
-      seeAllLeavesBtn.textContent = 'Showing all employees';
+      state.leaveBalances.scope = 'all';
+      await loadLeaveBalances();
+      seeAllLeavesBtn.hidden = true;
     } catch (err) {
       console.error('Failed to load all employee leave snapshot:', err);
-      seeAllLeavesBtn.textContent = 'See all employees';
     } finally {
       seeAllLeavesBtn.disabled = false;
+      seeAllLeavesBtn.textContent = 'See all employees';
     }
   });
 }
+
+// Out of office (4 Nov 2026). Own entries, today onwards, each removable.
+async function loadMyOutOfOffice() {
+  const list = document.getElementById('oooMineList');
+  if (!list || !state.supabase || !state.currentEmployeeId || document.getElementById('oooForm')?.classList.contains('hidden')) return;
+  const { data, error } = await state.supabase.from('out_of_office')
+    .select('id, start_date, end_date, is_half_day, note')
+    .eq('employee_id', state.currentEmployeeId)
+    .gte('end_date', toISODateLocal())
+    .order('start_date');
+  if (error) throw error;
+  list.innerHTML = (data || []).map((r) => {
+    const dates = r.start_date === r.end_date ? leaveDayLabel(r.start_date) : `${leaveDayLabel(r.start_date)} till ${leaveDayLabel(r.end_date)}`;
+    const tail = [r.is_half_day ? 'half day' : '', r.note || ''].filter(Boolean).join(' · ');
+    return `<li><span>${escapeHtml(dates)}${tail ? ` <span class="mini-meta">· ${escapeHtml(tail)}</span>` : ''}</span><button type="button" class="ghost small" data-ooo-remove="${escapeHtml(r.id)}">Remove</button></li>`;
+  }).join('');
+}
+
+async function submitOutOfOffice() {
+  const btn = document.getElementById('oooSubmitBtn');
+  const notice = document.getElementById('oooNotice');
+  const start = document.getElementById('oooStart')?.value;
+  const end = document.getElementById('oooEnd')?.value || start;
+  const half = Boolean(document.getElementById('oooHalfDay')?.checked) && start === end;
+  const note = String(document.getElementById('oooNote')?.value || '').trim();
+  const say = (text, cls = 'mini-meta') => { if (notice) { notice.textContent = text; notice.className = cls; } };
+  if (!start || end < start) { say('Pick the dates you are out.', 'status error'); return; }
+  btn.disabled = true;
+  try {
+    const { data, error } = await state.supabase.from('out_of_office')
+      .insert({ employee_id: state.currentEmployeeId, start_date: start, end_date: end, is_half_day: half, note: note || null })
+      .select('id').single();
+    if (error) { say(error.message, 'status error'); return; }
+    let mailed = false;
+    try {
+      const res = await fetch('/api/ooo-notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session?.access_token}` },
+        body: JSON.stringify({ outOfOfficeId: data.id })
+      });
+      const body = await res.json().catch(() => ({}));
+      mailed = res.ok && !body.skipped;
+    } catch (e) { console.error('Out-of-office email failed:', e); }
+    ['oooStart', 'oooEnd', 'oooNote'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+    const halfEl = document.getElementById('oooHalfDay'); if (halfEl) halfEl.checked = false;
+    say(mailed ? 'Marked out. Your manager has an FYI email.' : 'Marked out. The email to your manager did not go, so let them know.', mailed ? 'mini-meta ts-fresh' : 'status warn');
+    await loadLeaveRequestsFromSupabase();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('oooSubmitBtn')?.addEventListener('click', () => submitOutOfOffice().catch(actionFailed));
+document.getElementById('oooMineList')?.addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-ooo-remove]');
+  if (!btn) return;
+  (async () => {
+    btn.disabled = true;
+    const { error } = await state.supabase.from('out_of_office').delete().eq('id', btn.dataset.oooRemove);
+    if (error) { notSaved('Removing that day', error); btn.disabled = false; return; }
+    await loadLeaveRequestsFromSupabase();
+  })().catch(actionFailed);
+});
 
 async function notifyApproverOnLeaveSubmit(leaveRequestId) {
   if (!state.session?.access_token || !leaveRequestId) return;
@@ -9221,6 +10216,13 @@ function updateLeaveHint() {
     leaveRuleHint.textContent = 'Leave workflow is unavailable for fractional or leave-excluded employees.';
     leaveRuleHint.className = 'status warn';
     return;
+  }
+
+  // A streak reward is always one half-day: tick it and pin the end date.
+  if (leaveType.value === 'SR') {
+    const halfEl = document.getElementById('leaveHalfDay');
+    if (halfEl) halfEl.checked = true;
+    if (leaveStart.value && leaveEnd.value !== leaveStart.value) leaveEnd.value = leaveStart.value;
   }
 
   const startValue = leaveStart.value;
@@ -9264,24 +10266,64 @@ function updateLeaveHint() {
   }
   let days = calendarDayCount(start, end);
   if (halfDay && days === 1) days = 0.5;
+  // Only what needs attention (13 Oct 2026: no extra text).
   const check = leavePolicyCheck(leaveType.value, days);
-  leaveRuleHint.textContent = check.text;
+  leaveRuleHint.textContent = check.level === 'warn' ? check.text.replace(/^Policy check: /, '') : '';
   leaveRuleHint.className = check.level === 'warn' ? 'status warn' : 'status';
 }
+
+// "For": a manager can mark one of their own reports out (14 Oct
+// 2026). Shown only to someone who has reports; the database refuses anyone
+// else (mark_leave_for).
+async function loadLeaveForPicker() {
+  const label = document.getElementById('leaveForLabel');
+  const sel = document.getElementById('leaveFor');
+  if (!label || !sel || !state.supabase) return;
+  const { data, error } = await state.supabase.rpc('my_leave_reports');
+  const hidden = getHiddenEmployeeEmails();
+  const emailById = new Map((state.employeeDirectory || []).map((e) => [e.id, normalizeEmail(e.email)]));
+  const reports = (error ? [] : (data || [])).filter((r) => !hidden.includes(emailById.get(r.id)));
+  label.classList.toggle('hidden', !reports.length);
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Me</option>' + reports.map((r) => `<option value="${escapeHtml(r.id)}">${escapeHtml(displayPersonName(r.full_name, 'Someone'))}</option>`).join('');
+  if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+  syncLeaveFor();
+}
+function leaveForTarget() { return document.getElementById('leaveFor')?.value || ''; }
+function leaveForName() {
+  const sel = document.getElementById('leaveFor');
+  return String(sel?.selectedOptions?.[0]?.textContent || '').split(' ')[0];
+}
+function syncLeaveFor() {
+  const forId = leaveForTarget();
+  if (submitLeaveBtn && !submitLeaveBtn.disabled) submitLeaveBtn.textContent = forId ? `Mark ${leaveForName()} out` : 'Request leave';
+  // A streak reward is the person's own; a certificate can follow later.
+  const sr = leaveType?.querySelector('option[value="SR"]');
+  if (sr && forId) { sr.hidden = true; sr.disabled = true; if (leaveType.value === 'SR') leaveType.value = 'PL'; }
+  else if (!forId) renderStreakRewardOption();
+  document.getElementById('medCertLabel')?.classList.toggle('hidden', Boolean(forId) || leaveType?.value !== 'SL');
+  const note = document.getElementById('leaveReason');
+  if (note) note.placeholder = forId ? 'Note (optional)' : 'Note for your manager (optional)';
+  renderLeaveTypePick();
+}
+document.getElementById('leaveFor')?.addEventListener('change', syncLeaveFor);
 
 if (document.getElementById('leaveHalfDay')) {
   document.getElementById('leaveHalfDay').addEventListener('change', updateLeaveHint);
 }
 
+// @circle-omit Colony-only wiring
 [leaveType, leaveStart, leaveEnd].forEach((el) => {
   if (el) el.addEventListener('change', updateLeaveHint);
 });
 updateLeaveHint();
+renderLeaveTypePick();
+// @circle-omit-end
 
 const medCertLabel = document.getElementById('medCertLabel');
 if (leaveType && medCertLabel) {
   const toggleMedCert = () => {
-    medCertLabel.classList.toggle('hidden', leaveType.value !== 'SL');
+    medCertLabel.classList.toggle('hidden', leaveType.value !== 'SL' || Boolean(leaveForTarget()));
   };
   leaveType.addEventListener('change', toggleMedCert);
   toggleMedCert();
@@ -9312,7 +10354,7 @@ if (submitLeaveBtn) {
       return;
     }
 
-    if (state.leaveCycleSummary) {
+    if (state.leaveCycleSummary && !leaveForTarget()) {
       const s = state.leaveCycleSummary;
       const totalRemaining = (s.pl?.remaining ?? 0) + (s.cl?.remaining ?? 0) + (s.sl?.remaining ?? 0);
       if (totalRemaining <= 0) {
@@ -9330,6 +10372,24 @@ if (submitLeaveBtn) {
 
     try {
       if (state.supabase && state.isAuthenticated) {
+        // A manager marking their report out (14 Oct 2026): approved at once,
+        // and the person gets the email instead of an approver.
+        const forId = leaveForTarget();
+        if (forId) {
+          const marked = await state.supabase.rpc('mark_leave_for', {
+            p_employee_id: forId, p_leave_type: leaveCode, p_start_date: leaveStart?.value, p_end_date: leaveEnd?.value,
+            p_reason: reason || null, p_is_half_day: Boolean(document.getElementById('leaveHalfDay')?.checked) && leaveStart?.value === leaveEnd?.value
+          });
+          if (marked.error) {
+            if (leaveEmailNotice) { leaveEmailNotice.textContent = marked.error.message; leaveEmailNotice.className = 'mini-meta'; }
+            return;
+          }
+          await notifyApproverOnLeaveSubmit(marked.data?.id);
+          await loadLeaveRequestsFromSupabase();
+          if (leaveEmailNotice) { leaveEmailNotice.textContent = `Marked ${leaveForName()} out. They have the email.`; leaveEmailNotice.className = 'mini-meta'; }
+          submitLeaveBtn.textContent = 'Done';
+          return;
+        }
         const leaveResult = await state.supabase.rpc('submit_leave_request', {
           p_leave_type: leaveCode,
           p_start_date: leaveStart?.value,
@@ -9356,7 +10416,7 @@ if (submitLeaveBtn) {
       }
 
       if (leaveEmailNotice) {
-        leaveEmailNotice.textContent = 'Leave submitted. Leadership has been notified by email for approval.';
+        leaveEmailNotice.textContent = 'Sent. Your approver has the email.';
         leaveEmailNotice.classList.add('ts-fresh');
       }
       if (leaveApprovalNotice) {
@@ -9459,7 +10519,9 @@ if (leaveApprovalTableBody) {
   });
 }
 
+// @circle-omit Colony-only wiring
 refreshLeavePendingCount();
+// @circle-omit-end
 
 const plannerMonth = document.getElementById('plannerMonth');
 const weekPrevBtn = document.getElementById('weekPrev');
@@ -9673,13 +10735,14 @@ const PLANNER_CLIENT_COLORS = [
 const _clientColorMap = new Map();
 function getClientColor(clientName) {
   const key = normalizeClientNameKey(clientName);
-  if (key === 'internal') return 'rgba(var(--text-rgb), 0.12)';
   if (!_clientColorMap.has(key)) {
     _clientColorMap.set(key, PLANNER_CLIENT_COLORS[_clientColorMap.size % PLANNER_CLIENT_COLORS.length]);
   }
   return _clientColorMap.get(key);
 }
+// @circle-omit Colony-only wiring
 if (typeof window !== 'undefined') window.getClientColor = getClientColor;
+// @circle-omit-end
 
 function renderActivePlannerView() {
   if (_plannerActiveView === 'clients') {
@@ -9711,9 +10774,7 @@ function renderPlannerPeopleView() {
 
       // Build stacked bar segments
       const projects = [...metric.projMap.entries()]
-        .filter(([n]) => normalizeClientNameKey(n) !== 'internal')
         .sort((a, b) => b[1] - a[1]);
-      const internalPct = Math.round(metric.projMap.get('Internal') || 0);
 
       let barSegments = '';
       projects.forEach(([name, pct]) => {
@@ -9721,15 +10782,11 @@ function renderPlannerPeopleView() {
         if (w <= 0) return;
         barSegments += `<div class="rp-bar-seg" style="width:${w}%;background:${getClientColor(name)}" title="${escapeHtml(name)} ${w}%"></div>`;
       });
-      if (internalPct > 0) {
-        barSegments += `<div class="rp-bar-seg" style="width:${internalPct}%;background:rgba(var(--text-rgb),0.12)" title="Internal ${internalPct}%"></div>`;
-      }
 
       // Client labels below bar
       const labels = projects.map(([name, pct]) =>
         `<span class="rp-client-label"><span class="rp-client-dot" style="background:${getClientColor(name)}"></span>${escapeHtml(name)} ${Math.round(pct)}%</span>`
       ).join('');
-      const internalLabel = internalPct > 0 ? `<span class="rp-client-label"><span class="rp-client-dot" style="background:rgba(var(--text-rgb),0.12)"></span>Internal ${internalPct}%</span>` : '';
 
       html += `
         <div class="rp-person${overClass}" data-emp-name="${(emp.full_name || '').toLowerCase()}" data-emp-dept="${(dept || '').toLowerCase()}">
@@ -9739,7 +10796,7 @@ function renderPlannerPeopleView() {
             <span class="rp-person-free ${freeClass}">${freePct}% free</span>
           </div>
           <div class="rp-bar">${barSegments}</div>
-          <div class="rp-client-labels">${labels}${internalLabel}</div>
+          <div class="rp-client-labels">${labels}</div>
         </div>`;
     });
     html += `</div>`;
@@ -9760,7 +10817,6 @@ function renderPlannerClientView() {
     (byDept.get(dept) || []).forEach((metric) => {
       const empName = displayPersonName(metric.employee.full_name, 'Employee');
       metric.projMap.forEach((pct, projName) => {
-        if (normalizeClientNameKey(projName) === 'internal') return;
         if (pct <= 0) return;
         if (!clientMap.has(projName)) clientMap.set(projName, { people: [], totalPct: 0 });
         const entry = clientMap.get(projName);
@@ -9823,6 +10879,14 @@ function renderPlannerClientView() {
 }
 
 async function loadTeamDashboardFromSupabase() {
+  // Called by the directory load, the allocation load and the client list's
+  // filter refresh, all during sign-in (P1). The directory size is in the key
+  // so the call that arrives once the directory has loaded still runs.
+  const key = ['teamDashboard', JSON.stringify(plannerMonthWindow()), (state.employeeDirectory || []).length, state.role].join('|');
+  return shareInFlight(key, loadTeamDashboardNow);
+}
+
+async function loadTeamDashboardNow() {
   if (!canAccessTeamDashboard()) {
     renderTeamDashboardEmpty('Team dashboard is available only for leadership and finance.');
     setTeamDashboardScopeNote('Team dashboard is available only for leadership and finance.');
@@ -9916,7 +10980,7 @@ function resetClientEditor() {
   editingClientId = null;
   if (addClientBtn) addClientBtn.textContent = 'Add Client';
   if (cancelClientEditBtn) cancelClientEditBtn.classList.add('hidden');
-  if (newClientName) newClientName.value = '';
+  if (newClientName) { newClientName.value = ''; newClientName.readOnly = false; newClientName.title = ''; }
   if (newClientType) newClientType.value = 'retainer';
   renderClientOwnerOptions();
 }
@@ -9926,7 +10990,14 @@ function startClientEdit(clientId) {
   if (!target) return;
 
   editingClientId = target.id;
-  if (newClientName) newClientName.value = target.name || '';
+  // Only Alex renames a client (3 Nov 2026): other rows match on the name as
+  // text (partners' org, briefs, projects, task tags). The DB refuses it too
+  // (app_private.guard_client_rename).
+  if (newClientName) {
+    newClientName.value = target.name || '';
+    newClientName.readOnly = !isSuperadminUser();
+    newClientName.title = newClientName.readOnly ? 'Only Alex can rename a client.' : '';
+  }
   if (newClientType) newClientType.value = target.type === 'retainer' ? 'retainer' : target.type === 'pitch' ? 'pitch' : 'project';
 
   if (newClientOwner) {
@@ -10037,9 +11108,12 @@ async function renderClientRegistryTable() {
   const showDelete = canDeleteClients();
   const showArchiveGlobal = canArchiveClients();
 
-  // Fetch which clients have analytics data (distinct client_ids)
+  // Fetch which clients have analytics data (distinct client_ids). Only for a
+  // signed-in session: resetToSignedOutState() redraws this (empty) table, and
+  // the query then went out with the anon key and logged a 401 on every
+  // signed-out load (Q1, 24 Sep 2026).
   let clientsWithAnalytics = new Set();
-  try {
+  if (state.isAuthenticated && state.supabase) try {
     const { data: analyticsRows } = await state.supabase
       .from('client_analytics')
       .select('client_id');
@@ -10054,7 +11128,7 @@ async function renderClientRegistryTable() {
 
   portfolioTableBody.innerHTML = '';
   const visibleClients = state.clients.filter((entry) =>
-    normalizeClientNameKey(entry.name) !== 'internal' && entry.is_active !== false
+    entry.is_active !== false
   );
   const totalCols = hasAnyAction ? 5 : 4;
   if (!visibleClients.length) {
@@ -10284,66 +11358,6 @@ async function syncRenamedClientReferencesInSupabase({ previousName, nextName, o
   if (taskUpdate.error) {
     console.warn('Unable to sync renamed daily task references:', taskUpdate.error.message);
   }
-
-  const internalClient = await state.supabase.from('clients').select('id').eq('name', 'Internal').maybeSingle();
-  if (internalClient.error) {
-    console.warn('Unable to locate Internal client for rename sync:', internalClient.error.message);
-    return;
-  }
-  if (!internalClient.data?.id) return;
-
-  let projectsQuery = state.supabase
-    .from('projects')
-    .select('id, name, owner_employee_id')
-    .eq('client_id', internalClient.data.id)
-    .in('name', [oldName, newName]);
-  if (!leadershipMode) {
-    projectsQuery = projectsQuery.eq('owner_employee_id', state.currentEmployeeId);
-  }
-  const projectsResult = await projectsQuery;
-  if (projectsResult.error) {
-    console.warn('Unable to load Internal projects for rename sync:', projectsResult.error.message);
-    return;
-  }
-
-  const projects = projectsResult.data || [];
-  const oldProject = projects.find((row) => row.name === oldName) || null;
-  const nextProject = projects.find((row) => row.name === newName) || null;
-
-  if (!oldProject) return;
-
-  if (!nextProject) {
-    const renameProject = await state.supabase
-      .from('projects')
-      .update({
-        name: newName,
-        owner_employee_id: ownerId || null
-      })
-      .eq('id', oldProject.id);
-    if (renameProject.error) {
-      console.warn('Unable to rename Internal project during client rename sync:', renameProject.error.message);
-    }
-    return;
-  }
-
-  let allocationUpdateQuery = state.supabase
-    .from('allocations')
-    .update({ project_id: nextProject.id })
-    .eq('project_id', oldProject.id);
-  if (!leadershipMode) {
-    allocationUpdateQuery = allocationUpdateQuery.eq('employee_id', state.currentEmployeeId);
-  }
-  const migrateAllocations = await allocationUpdateQuery;
-  if (migrateAllocations.error) {
-    console.warn('Unable to migrate allocation project references during client rename sync:', migrateAllocations.error.message);
-  }
-
-  if (leadershipMode) {
-    const deleteOldProject = await state.supabase.from('projects').delete().eq('id', oldProject.id);
-    if (deleteOldProject.error) {
-      console.warn('Unable to delete old Internal project during client rename sync:', deleteOldProject.error.message);
-    }
-  }
 }
 
 async function updateClientInSupabase({ clientId, client, type, owner }) {
@@ -10371,13 +11385,19 @@ async function updateClientInSupabase({ clientId, client, type, owner }) {
 
   const projectLookup = await state.supabase
     .from('projects')
-    .select('id')
+    .select('id, name')
     .eq('client_id', clientId)
     .order('created_at', { ascending: true });
   if (projectLookup.error) throw projectLookup.error;
 
+  // Rename the project that carries the client's name, not simply the oldest:
+  // a client can hold several (Misc/Bizdev also holds Pitches/BD, 27 Sep 2026)
+  // and renaming the wrong one breaks how allocations find it by name.
+  const projectRows = projectLookup.data || [];
+  const namedProject = projectRows.find((p) => String(p.name || '').trim().toLowerCase() === previousName.toLowerCase())
+    || (projectRows.length === 1 ? projectRows[0] : null);
   const normalizedType = type === 'retainer' ? 'retainer' : type === 'pitch' ? 'pitch' : 'project';
-  if ((projectLookup.data || []).length) {
+  if (namedProject) {
     const updateProject = await state.supabase
       .from('projects')
       .update({
@@ -10386,9 +11406,9 @@ async function updateClientInSupabase({ clientId, client, type, owner }) {
         status: 'active',
         owner_employee_id: ownerId
       })
-      .eq('id', projectLookup.data[0].id);
+      .eq('id', namedProject.id);
     if (updateProject.error) throw updateProject.error;
-  } else {
+  } else if (!projectRows.length) {
     const insertProject = await state.supabase.from('projects').insert({
       client_id: clientId,
       name: normalizedName,
@@ -10582,7 +11602,7 @@ function renderArchivedClientsTable() {
   const archivedPanel = document.getElementById('archivedClientsPanel');
 
   const archivedClients = state.clients.filter((entry) =>
-    normalizeClientNameKey(entry.name) !== 'internal' && entry.is_active === false
+    entry.is_active === false
   );
 
   archivedBody.innerHTML = '';
@@ -10599,6 +11619,8 @@ function renderArchivedClientsTable() {
   }
 
   if (archivedPanel) archivedPanel.style.display = '';
+  const archivedCount = document.getElementById('archivedClientsCount');
+  if (archivedCount) archivedCount.textContent = `(${visibleArchived.length})`;
   visibleArchived.sort((a, b) => a.name.localeCompare(b.name)).forEach((entry) => {
     const row = document.createElement('tr');
     const normalizedType = entry.type === 'retainer' ? 'Retainer' : entry.type === 'pitch' ? 'Pitch' : 'Project';
@@ -10864,13 +11886,40 @@ function scopeDeptLabel(name) {
 // every extracted row next to its send and confirms before anything is saved.
 async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
   if (detectedLabel) { detectedLabel.textContent = 'Comms report (screenshots) detected'; detectedLabel.style.display = ''; }
-  if (metaEl) metaEl.textContent = 'Reading document\u2026';
+  if (metaEl) metaEl.textContent = 'Reading document…';
 
   const entries = await extractZipEntries(await file.arrayBuffer());
   const docXml = new TextDecoder().decode(entries['word/document.xml'] || new Uint8Array());
   const relsXml = new TextDecoder().decode(entries['word/_rels/document.xml.rels'] || new Uint8Array());
-  const sends = parseCommsDocxStructure(docXml, relsXml);
-  if (!sends.length) throw new Error('No send sections with screenshots found in this document.');
+  // Titled sends ("5 May 2026 Dispatch") first; otherwise one send per
+  // section, as a tabbed Google Doc exports (Rhea's report, 27 Oct 2026).
+  let sends = parseCommsDocxStructure(docXml, relsXml);
+  const bySection = !sends.length;
+  if (bySection) {
+    sends = parseCommsDocxSections(docXml, relsXml).map((s, i) => ({
+      ...s, sendType: '', heading: `Send ${i + 1}${s.time ? ` (${s.time})` : ''}`
+    }));
+  }
+  if (!sends.length) throw new Error('No screenshots found in this document. Each send needs its dashboard screenshots in the file.');
+
+  const { data: existing } = await state.supabase
+    .from('client_analytics')
+    .select('report_label, metrics_data, demographics_data')
+    .eq('client_id', analyticsCurrentClientId)
+    .eq('report_type', 'community_pulse')
+    .maybeSingle();
+  const oldMetrics = existing?.metrics_data || [];
+
+  // The report keeps growing and is uploaded whole each time: a send whose
+  // LeadConnector link is already saved is not read again.
+  const known = new Set(oldMetrics.map((r) => r.link_id).filter(Boolean));
+  const toRead = sends.filter((s) => !(s.linkId && known.has(s.linkId)));
+  const alreadySaved = sends.length - toRead.length;
+  if (!toRead.length) {
+    if (metaEl) metaEl.textContent = '';
+    appAlert(`All ${sends.length} sends in this file are already in Colony.`);
+    return;
+  }
 
   const token = state.session?.access_token;
   if (!token) throw new Error('Not authenticated');
@@ -10880,28 +11929,31 @@ async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
     return btoa(bin);
   };
 
+  // Three at a time: a 20-send report read one by one took minutes.
   const rows = [];
   const failures = [];
-  for (let i = 0; i < sends.length; i++) {
-    const send = sends[i];
-    if (metaEl) metaEl.textContent = `Reading screenshots ${i + 1}/${sends.length}\u2026`;
+  let done = 0;
+  const readOne = async (send) => {
     const images = send.imagePaths
       .filter((path) => entries[path])
       .map((path) => ({ data: toB64(entries[path]), mediaType: path.endsWith('.jpeg') || path.endsWith('.jpg') ? 'image/jpeg' : 'image/png' }));
-    if (!images.length) { failures.push(send.heading); continue; }
+    if (!images.length) { failures.push(`${send.heading} (no screenshots)`); return; }
     try {
       const res = await fetch('/.netlify/functions/extract-send-stats', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ heading: send.heading, images })
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { stats } = await res.json();
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(res.status === 413 ? 'screenshots too large' : (body.error || `HTTP ${res.status}`));
+      const { stats } = body;
       const n = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
       rows.push({
-        date: send.dateIso,
+        order: sends.indexOf(send),
+        date: send.dateIso || '',
         name: send.heading,
         send_type: send.sendType === 'Dispatch' ? 'Dispatches' : send.sendType,
+        link_id: send.linkId || undefined,
         delivered: Math.round(n(stats.delivered)),
         delivered_rate: n(stats.delivered_rate),
         opened: Math.round(n(stats.opened)),
@@ -10914,14 +11966,24 @@ async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
       });
     } catch (err) {
       failures.push(`${send.heading} (${err.message})`);
+    } finally {
+      done += 1;
+      if (metaEl) metaEl.textContent = `Reading screenshots ${done}/${toRead.length}…`;
     }
-  }
+  };
+  const queue = toRead.slice();
+  await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
+    while (queue.length) await readOne(queue.shift());
+  }));
+  rows.sort((a, b) => a.order - b.order);
+  rows.forEach((r) => { delete r.order; });
   if (metaEl) metaEl.textContent = '';
-  if (!rows.length) throw new Error('No sends could be read.' + (failures.length ? ` Failed: ${failures.join(', ')}` : ''));
+  if (!rows.length) throw new Error('No sends could be read.' + (failures.length ? ` ${failures.join(', ')}` : ''));
 
-  const approved = await showCommsReviewModal(rows, failures);
+  const approved = await showCommsReviewModal(rows, failures, { bySection, alreadySaved });
   if (!approved) { if (metaEl) metaEl.textContent = 'Upload cancelled — nothing saved.'; return; }
-  if (metaEl) metaEl.textContent = 'Saving\u2026';
+  if (!approved.length) { if (metaEl) metaEl.textContent = 'Nothing saved — every send was left out.'; return; }
+  if (metaEl) metaEl.textContent = 'Saving…';
 
   // Raw file to storage for the record, like every other upload
   const filePath = `${analyticsCurrentClientId}/${Date.now()}_${file.name}`;
@@ -10933,18 +11995,13 @@ async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
     objectName: filePath.split('/').pop()
   });
 
-  const { data: existing } = await state.supabase
-    .from('client_analytics')
-    .select('report_label, metrics_data, demographics_data')
-    .eq('client_id', analyticsCurrentClientId)
-    .eq('report_type', 'community_pulse')
-    .maybeSingle();
-
-  // Same merge rule as the workbook path: sends merge by date+name.
+  // Same merge rule as the workbook path: sends merge by date+name. A send
+  // saved before with the same link is replaced, whatever its date or name.
   // Demographics are untouched — this file has none, and wiping the workbook's
   // subscriber/forum snapshot with null would be data loss.
-  const oldMetrics = existing?.metrics_data || [];
-  const mergedMetrics = mergeByKey(oldMetrics, rows, (r) => `${r.date}|${r.name}`)
+  const incomingLinks = new Set(approved.map((r) => r.link_id).filter(Boolean));
+  const keptOld = oldMetrics.filter((r) => !(r.link_id && incomingLinks.has(r.link_id)));
+  const mergedMetrics = mergeByKey(keptOld, approved, (r) => `${r.date}|${r.name}`)
     .sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const mergedSummary = communityPulseSummary(mergedMetrics, existing?.demographics_data || { subscribers: null, forum: null });
 
@@ -10952,7 +12009,7 @@ async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
     client_id: analyticsCurrentClientId,
     report_type: 'community_pulse',
     report_label: mergedSummary.date_from && mergedSummary.date_to
-      ? `${mergedSummary.date_from} \u2013 ${mergedSummary.date_to}` : file.name,
+      ? `${mergedSummary.date_from} – ${mergedSummary.date_to}` : file.name,
     file_name: file.name,
     file_path: filePath,
     file_size_bytes: file.size,
@@ -10970,32 +12027,41 @@ async function handleCommsDocxUpload(file, metaEl, detectedLabel) {
   if (dbError) throw new Error('Database save failed: ' + dbError.message);
 
   const added = mergedMetrics.length - oldMetrics.length;
-  if (metaEl) metaEl.textContent = `\u2713 Comms report saved \u2014 ${added > 0 ? `${added} new send${added > 1 ? 's' : ''}` : 'sends updated'}`;
+  if (metaEl) metaEl.textContent = `✓ Comms report saved — ${added > 0 ? `${added} new send${added > 1 ? 's' : ''}` : 'sends updated'}`;
   await renderClientAnalyticsTab(analyticsCurrentClientId);
 }
 
-// Review table: every extracted row, editable nowhere — approve or cancel.
+// Review table: every extracted number is read-only — approve or cancel.
 // (Editing invites silently "fixing" a misread into a different wrong number;
-// if a row is wrong, cancel and tell Alex/the board.)
-function showCommsReviewModal(rows, failures) {
+// if a row is wrong, cancel and tell Alex/the board.) What the file cannot
+// say is asked here: for a report without send titles, each row's date (pre-
+// filled from its link where it has one) and its type, or "Leave out".
+// Resolves with the rows to save, or null on cancel.
+const COMMS_TYPES = [['Dispatches', 'Dispatch'], ['Newsletter', 'Newsletter'], ['Survey', 'Survey'], ['skip', 'Leave out']];
+function showCommsReviewModal(rows, failures, { bySection = false, alreadySaved = 0 } = {}) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;';
     const pct = (f) => `${((f || 0) * 100).toFixed(1)}%`;
+    const typeSelect = (r, i) => `<select class="comms-pick" data-comms-type="${i}">
+        <option value="">Choose</option>
+        ${COMMS_TYPES.map(([v, l]) => `<option value="${v}"${r.send_type === v ? ' selected' : ''}>${l}</option>`).join('')}
+      </select>`;
     overlay.innerHTML = `
-      <div style="background:var(--bg);border-radius:14px;max-width:820px;width:100%;max-height:85vh;overflow:auto;padding:22px;">
+      <div style="background:var(--bg);border-radius:14px;max-width:860px;width:100%;max-height:85vh;overflow:auto;padding:22px;">
         <h3 style="margin-top:0">Review extracted sends</h3>
-        <p class="mini-meta">These numbers were read from the screenshots in the document. Check them against the file before saving \u2014 nothing is stored until you confirm.</p>
+        <p class="mini-meta">${bySection
+          ? 'Numbers were read from the screenshots. Add the date and type for each send; the file doesn’t say.'
+          : 'These numbers were read from the screenshots in the document. Check them against the file before saving — nothing is stored until you confirm.'}${alreadySaved ? ` ${alreadySaved} send${alreadySaved > 1 ? 's are' : ' is'} already in Colony and skipped.` : ''}</p>
         <table class="m-card-table" style="font-size:13px">
-          <thead><tr><th>Date</th><th>Send</th><th>Type</th><th style="text-align:right">Delivered</th><th style="text-align:right">Open</th><th style="text-align:right">Click</th><th style="text-align:right">Unsubs</th></tr></thead>
+          <thead><tr><th>Date</th><th>${bySection ? 'Type' : 'Send'}</th>${bySection ? '' : '<th>Type</th>'}<th style="text-align:right">Delivered</th><th style="text-align:right">Open</th><th style="text-align:right">Click</th><th style="text-align:right">Unsubs</th></tr></thead>
           <tbody>
-            ${rows.map((r) => `<tr>
-              <td>${escapeHtml(r.date)}</td>
-              <td>${escapeHtml(String(r.name).slice(0, 40))}</td>
-              <td>${escapeHtml(r.send_type)}</td>
-              <td style="text-align:right">${r.delivered ? r.delivered.toLocaleString() : '\u2014'}</td>
-              <td style="text-align:right">${r.open_rate ? pct(r.open_rate) : '\u2014'}</td>
-              <td style="text-align:right">${r.click_rate ? pct(r.click_rate) : '\u2014'}</td>
+            ${rows.map((r, i) => `<tr>
+              <td>${bySection ? `<input type="date" class="comms-pick" data-comms-date="${i}" value="${escapeHtml(r.date)}">` : escapeHtml(r.date)}</td>
+              ${bySection ? `<td>${typeSelect(r, i)}</td>` : `<td>${escapeHtml(String(r.name).slice(0, 40))}</td><td>${escapeHtml(r.send_type)}</td>`}
+              <td style="text-align:right">${r.delivered ? r.delivered.toLocaleString() : '—'}</td>
+              <td style="text-align:right">${r.open_rate ? pct(r.open_rate) : '—'}</td>
+              <td style="text-align:right">${r.click_rate ? pct(r.click_rate) : '—'}</td>
               <td style="text-align:right">${r.unsubscribed || 0}</td>
             </tr>`).join('')}
           </tbody>
@@ -11003,14 +12069,33 @@ function showCommsReviewModal(rows, failures) {
         ${failures.length ? `<p class="status warn" style="margin-top:10px">Could not read: ${escapeHtml(failures.join(', '))}</p>` : ''}
         <div class="editor-bar action-row" style="margin-top:14px;justify-content:flex-end;gap:10px">
           <button type="button" class="ghost" data-comms-cancel>Cancel</button>
-          <button type="button" class="primary" data-comms-save>Save ${rows.length} send${rows.length > 1 ? 's' : ''}</button>
+          <button type="button" class="primary" data-comms-save></button>
         </div>
       </div>`;
+    const saveBtn = overlay.querySelector('[data-comms-save]');
+    const picked = () => rows.map((r, i) => ({
+      ...r,
+      date: bySection ? overlay.querySelector(`[data-comms-date="${i}"]`).value : r.date,
+      send_type: bySection ? overlay.querySelector(`[data-comms-type="${i}"]`).value : r.send_type
+    }));
+    const refresh = () => {
+      const list = picked();
+      const keep = list.filter((r) => r.send_type !== 'skip');
+      const missing = keep.filter((r) => !r.date || !r.send_type).length;
+      saveBtn.disabled = missing > 0;
+      saveBtn.textContent = missing ? `${missing} to fill in` : `Save ${keep.length} send${keep.length === 1 ? '' : 's'}`;
+    };
+    overlay.addEventListener('input', refresh);
+    overlay.addEventListener('change', refresh);
     overlay.addEventListener('click', (e) => {
-      if (e.target.closest('[data-comms-save]')) { overlay.remove(); resolve(true); }
-      else if (e.target.closest('[data-comms-cancel]') || e.target === overlay) { overlay.remove(); resolve(false); }
+      if (e.target.closest('[data-comms-save]') && !saveBtn.disabled) {
+        const keep = picked().filter((r) => r.send_type !== 'skip')
+          .map((r) => (bySection ? { ...r, name: commsSendName(r.date, r.send_type) } : r));
+        overlay.remove(); resolve(keep);
+      } else if (e.target.closest('[data-comms-cancel]') || isBackdropClick(e, overlay)) { overlay.remove(); resolve(null); }
     });
     document.body.appendChild(overlay);
+    refresh();
   });
 }
 
@@ -11033,6 +12118,55 @@ async function logAnalyticsUpload({ clientId, reportType, fileName, objectName }
   }
 }
 
+// Beehiiv subscriber export -> the 'newsletter' row (3 Nov 2026). The export
+// is the whole list every time, so the row is rebuilt, not merged. The copy
+// archived in storage has emails and names stripped.
+async function isBeehiivCsvFile(file) {
+  try {
+    const firstLine = (await file.slice(0, 4096).text()).split(/\r?\n/)[0];
+    return isBeehiivSubscriberHeader(parseCsvText(firstLine)[0]);
+  } catch (_) { return false; }
+}
+async function processNewsletterCsv(file) {
+  const metaEl = document.getElementById('analyticsClientMeta');
+  try {
+    const rows = parseCsvText(await file.text());
+    const through = (file.name.match(/(\d{4}-\d{2}-\d{2})/) || [])[1] || toISODateLocal();
+    const parsed = parseBeehiivSubscribers(rows, through);
+    const publication = (file.name.match(/^(.*?)-subscribers/) || [])[1];
+    const label = publication
+      ? publication.split('-').map((w, i) => (i && ['by', 'of', 'the', 'and'].includes(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ')
+      : 'Newsletter';
+    const stripped = new Blob([toCsvText(stripBeehiivPersonalColumns(rows))], { type: 'text/csv' });
+    const filePath = `${analyticsCurrentClientId}/${Date.now()}_${file.name}`;
+    const { error: upErr } = await state.supabase.storage.from('client-analytics').upload(filePath, stripped, { upsert: false, contentType: 'text/csv' });
+    if (upErr) throw new Error('File save failed: ' + upErr.message);
+    await logAnalyticsUpload({ clientId: analyticsCurrentClientId, reportType: 'newsletter', fileName: file.name, objectName: filePath.split('/').pop() });
+    const record = {
+      client_id: analyticsCurrentClientId,
+      report_type: 'newsletter',
+      report_label: label,
+      file_name: file.name,
+      file_path: filePath,
+      file_size_bytes: stripped.size,
+      uploaded_by: state.currentEmployeeId,
+      uploaded_at: new Date().toISOString(),
+      insights_cache: {},
+      metrics_data: parsed.weeks,
+      demographics_data: { months: parsed.months, sources: parsed.sources },
+      summary: parsed.summary,
+      data_through: parsed.data_through
+    };
+    const { error: dbError } = await state.supabase.from('client_analytics').upsert(record, { onConflict: 'client_id,report_type' });
+    if (dbError) throw new Error('Database save failed: ' + dbError.message);
+    if (metaEl) metaEl.textContent = `\u2713 ${label}: ${parsed.summary.subscribers} subscribers`;
+    return { ok: true, name: file.name };
+  } catch (err) {
+    console.error('Newsletter upload failed:', err);
+    return { ok: false, name: file.name, error: err.message };
+  }
+}
+
 // One spreadsheet, start to finish: detect → parse → merge → upsert. Returns a
 // RESULT instead of alerting, so a batch can report per file (24 Aug
 // 2026). Batches must run these one at a time: every file merges into the
@@ -11042,6 +12176,7 @@ async function processAnalyticsSpreadsheet(file, batch = {}) {
     const detectedLabel = document.getElementById('analyticsDetectedType');
     const metaEl = document.getElementById('analyticsClientMeta');
     try {
+      await loadSheetJS();   // fetched on first upload, not with the page
       // Auto-detect report type from sheet names
       const { type: reportType, workbook } = await detectReportType(file);
       // Instagram metrics CSVs live on the same DB row as the post export
@@ -11167,7 +12302,7 @@ async function processAnalyticsSpreadsheet(file, batch = {}) {
       if (reportType === 'content') {
         const oldMetrics = existing?.metrics_data || [];
         const oldPosts = existing?.posts_data || [];
-        mergedMetrics = mergeByKey(oldMetrics, parsed.metrics_data, r => r.week).sort((a, b) => a.week.localeCompare(b.week));
+        mergedMetrics = liWithRates(liMergeWeeks(oldMetrics, parsed.metrics_data).sort((a, b) => a.week.localeCompare(b.week)));
         mergedPosts = mergeByKey(oldPosts, parsed.posts_data, r => r['Post link']).sort((a, b) => (b.engagement_score || 0) - (a.engagement_score || 0));
         newItemCount = mergedMetrics.length - oldMetrics.length;
         const newPostCount = mergedPosts.length - oldPosts.length;
@@ -11180,7 +12315,7 @@ async function processAnalyticsSpreadsheet(file, batch = {}) {
         const comments = mergedMetrics.reduce((s, w) => s + (w['Comments (total)'] || 0), 0);
         const reposts = mergedMetrics.reduce((s, w) => s + (w['Reposts (total)'] || 0), 0);
         const new_followers = mergedMetrics.reduce((s, w) => s + (w['New followers (total)'] || 0), 0);
-        const avgEng = mergedMetrics.length ? mergedMetrics.reduce((s, w) => s + (w['Engagement rate (total)'] || 0), 0) / mergedMetrics.length : 0;
+        const avgEng = liEngagementRate(mergedMetrics);
         let dateFrom = '', dateTo = '';
         if (mergedMetrics.length) { dateFrom = weekLabelAnalytics(mergedMetrics[0].week); dateTo = weekLabelAnalytics(mergedMetrics[mergedMetrics.length - 1].week); }
         mergedSummary = { impressions_total, impressions_organic, impressions_sponsored, clicks, reactions, comments, reposts, new_followers, avg_engagement: (avgEng * 100).toFixed(1), total_posts: mergedPosts.length, date_from: dateFrom, date_to: dateTo };
@@ -11412,7 +12547,9 @@ if (analyticsFileInput) {
         detectedLabel.textContent = `Processing ${i + 1} of ${sheets.length}…`;
         detectedLabel.style.display = '';
       }
-      const result = await processAnalyticsSpreadsheet(sheets[i].file, batch);
+      const result = sheets[i].ext === 'csv' && await isBeehiivCsvFile(sheets[i].file)
+        ? await processNewsletterCsv(sheets[i].file)
+        : await processAnalyticsSpreadsheet(sheets[i].file, batch);
       (result?.ok ? ok : failed).push(result || { name: sheets[i].file.name, error: 'unknown error' });
       if (batch.ambiguousTotal > 1) batch.ambiguousTotal -= 1;
     }
@@ -11482,7 +12619,9 @@ function currentAnalyticsPersona() {
 }
 
 // State for current analytics data
+// @circle-omit Colony-only wiring
 window._analyticsReports = {}; // { content, followers, visitors }
+// @circle-omit-end
 
 // --- Main Analytics Screen Renderer ---
 // ────────── Client Scope & Coverage (leadership-only) ──────────
@@ -11552,6 +12691,7 @@ function setText(id, value) {
   if (el) el.textContent = value;
 }
 
+// @circle-omit Colony-only wiring
 (function wireScopeCoverageBackLink() {
   document.addEventListener('click', (event) => {
     const link = event.target.closest('#scBackToClients, #scBackBtn');
@@ -11569,6 +12709,7 @@ function setText(id, value) {
     renderScopeBlocks();
   });
 })();
+// @circle-omit-end
 
 function renderMonthSwitcher() {
   const el = document.getElementById('scMonthLabel');
@@ -11691,8 +12832,10 @@ function getDeptName(deptId) {
   const d = scopeCoverageState.deptOptions.find((x) => x.id === deptId);
   return d ? scopeDeptLabel(d.name) : '—';
 }
+// @circle-omit Colony-only wiring
 window.getDeptName = getDeptName;
 window.scopeDeptLabel = scopeDeptLabel;
+// @circle-omit-end
 
 // ── Coverage brain ─────────────────────────────────────────────
 // Returns coverage class for a single (scopeItem, deptId, percentNeed) tuple
@@ -11979,7 +13122,7 @@ function renderScopeBlock(item) {
     const empSource = (state.employeeDirectory || [])
       .filter((e) => e.is_active !== false && !scHidden.includes(normalizeEmail(e.email)))
       .map((e) => ({ id: e.id, full_name: e.full_name, department_id: e.department?.id || '' }))
-      .sort((a, b) => a.full_name.localeCompare(b.full_name));
+      .sort(compareByFirstName);
     const empOpts = '<option value="">Select person</option>' + empSource
       .map((e) => `<option value="${escapeHtml(e.id)}" data-dept-id="${escapeHtml(e.department_id)}"${e.id === data.employee_id ? ' selected' : ''}>${escapeHtml(e.full_name)}</option>`).join('');
     return `
@@ -12305,9 +13448,7 @@ function renderAvailableEmployees() {
       available: Math.max(0, 100 - Math.round(used)),
       segments: [...byClient.entries()].sort((a, b) => b[1] - a[1])
     };
-  }).sort((a, b) => {
-    return a.used - b.used || a.full_name.localeCompare(b.full_name);
-  });
+  }).sort(compareByFirstName);
 
   if (!rows.length) {
     wrap.innerHTML = '<div class="sc-empty" style="padding:10px 0">No employees loaded.</div>';
@@ -12390,14 +13531,14 @@ function renderAllocRow(alloc) {
     : null;
   const scopeLabel = scope
     ? escapeHtml(scope.title || '')
-    : '<span style="color:var(--text-muted,#8b95a8)">—</span>';
+    : '<span style="color:var(--muted)">—</span>';
   return `
     <tr>
       <td><b>${escapeHtml(getEmployeeName(alloc.employee_id))}</b></td>
       <td>${escapeHtml(getDeptName(alloc.department_id))}</td>
       <td style="font-size:12px">${scopeLabel}</td>
       <td>${Number(alloc.percent || 0).toFixed(0)}%</td>
-      <td><div class="sc-bar ${barCls}"><span style="width:${barWidth}%"></span></div> <span style="font-size:11px;color:var(--text-muted,#8b95a8)">${totalUtil.toFixed(0)}%</span></td>
+      <td><div class="sc-bar ${barCls}"><span style="width:${barWidth}%"></span></div> <span style="font-size:11px;color:var(--muted)">${totalUtil.toFixed(0)}%</span></td>
       <td><span class="sc-pill ${pillCls}">${pillLabel}</span></td>
       <td>
         <button class="sc-btn" type="button" data-sc-action="edit-alloc" data-id="${eid}">Edit</button>
@@ -12427,7 +13568,7 @@ function renderAllocFormRow(formState) {
   return `
     <tr class="sc-alloc-form-row">
       <td><select data-sc-alloc="employee_id" onchange="(function(s){var o=s.options[s.selectedIndex];var did=o&&o.getAttribute('data-dept-id')||'';var row=s.closest('tr');row.querySelector('[data-sc-alloc=&quot;department_id&quot;]').value=did;row.querySelector('[data-sc-dept-label]').textContent=did?window.getDeptName(did):'—';})(this)">${empOpts}</select></td>
-      <td><span data-sc-dept-label style="color:var(--text-muted,#8b95a8)">${escapeHtml(currentDeptLabel)}</span><input type="hidden" data-sc-alloc="department_id" value="${escapeHtml(data.department_id || '')}" /></td>
+      <td><span data-sc-dept-label style="color:var(--muted)">${escapeHtml(currentDeptLabel)}</span><input type="hidden" data-sc-alloc="department_id" value="${escapeHtml(data.department_id || '')}" /></td>
       <td><select data-sc-alloc="scope_item_id" style="width:100%"><option value="">Select</option>${(scopeCoverageState.scopeItems || []).map((it) => `<option value="${escapeHtml(it.id)}"${(data.scope_item_id || '') === it.id ? ' selected' : ''}>${escapeHtml(it.title || '')}</option>`).join('')}</select></td>
       <td><input type="number" min="0" max="200" step="1" value="${data.percent === '' || data.percent == null ? '' : Number(data.percent)}" placeholder="0" data-sc-alloc="percent" style="width:70px" />%</td>
       <td></td>
@@ -12537,6 +13678,7 @@ async function removeAllocation(allocId) {
 }
 
 // ── Click delegation for the whole screen ─────────────────────
+// @circle-omit Colony-only wiring
 (function wireScopeCoverageClicks() {
   document.addEventListener('click', (event) => {
     const screen = document.getElementById('client-scope-coverage');
@@ -12623,6 +13765,7 @@ async function removeAllocation(allocId) {
     if (action === 'save-alloc') { saveAllocForm(); return; }
   });
 })();
+// @circle-omit-end
 
 async function renderClientAnalyticsTab(clientId) {
   const overviewPanel = document.getElementById('analyticsTabOverview');
@@ -12659,6 +13802,17 @@ async function renderClientAnalyticsTab(clientId) {
   (reports || []).forEach(r => {
     if (!grouped[r.report_type]) grouped[r.report_type] = r;
   });
+  // LinkedIn weeks saved before 2 Nov 2026 hold averaged rates: recompute
+  // every week and the headline from the summed counts.
+  if (grouped.content && Array.isArray(grouped.content.metrics_data)) {
+    const weeks = liWithRates(grouped.content.metrics_data);
+    grouped.content = { ...grouped.content, metrics_data: weeks,
+      summary: { ...(grouped.content.summary || {}), avg_engagement: (liEngagementRate(weeks) * 100).toFixed(1) } };
+  }
+  // Registrations (Rishi's sheet, 5 Nov 2026) are in test: only the superadmin
+  // sees them until app_config.registrations_team is true. No deploy needed
+  // to open them up.
+  if (grouped.registrations && !registrationsVisible()) delete grouped.registrations;
   window._analyticsReports = grouped;
 
   const contentReport = grouped.content || null;
@@ -12667,6 +13821,7 @@ async function renderClientAnalyticsTab(clientId) {
   const instagramReport = grouped.instagram || null;
   const facebookReport = grouped.facebook || null;
   const instagramAudienceReport = grouped.instagram_audience || null;
+  const websiteReport = grouped.website || null;
 
   // Header meta shows DATA coverage, not upload-click time — uploaded_at lies
   // both ways (frozen stamps under fresh data: Example Materials; fresh re-upload of an
@@ -12688,7 +13843,11 @@ async function renderClientAnalyticsTab(clientId) {
     linkedin: coverageOf(contentReport, followersReport, visitorsReport),
     instagram: coverageOf(instagramReport, instagramAudienceReport),
     facebook: coverageOf(facebookReport),
-    community: coverageOf(grouped.community_pulse)
+    community: coverageOf(grouped.community_pulse),
+    website: coverageOf(websiteReport),
+    search: websiteReport?.demographics_data?.search?.data_through || null,
+    newsletter: coverageOf(grouped.newsletter),
+    registrations: coverageOf(grouped.registrations)
   };
   renderAnalyticsCoverageMeta('overview');
   renderUploadedFilesPanel(clientId).catch((e) => console.warn('Uploaded files list failed:', e));
@@ -12713,6 +13872,10 @@ async function renderClientAnalyticsTab(clientId) {
   setTabVisible('instagram', Boolean(instagramReport));
   setTabVisible('facebook', Boolean(facebookReport));
   setTabVisible('community', Boolean(communityReport));
+  setTabVisible('website', Boolean(websiteReport));
+  setTabVisible('search', Array.isArray(websiteReport?.demographics_data?.search?.weeks) || Boolean(websiteReport?.demographics_data?.search?.error));
+  setTabVisible('newsletter', Boolean(grouped.newsletter));
+  setTabVisible('registrations', Boolean(grouped.registrations));
   wireAnalyticsInnerTabs();
   if (renderClientAnalyticsTab._lastClient !== clientId) {
     renderClientAnalyticsTab._lastClient = clientId;
@@ -12723,19 +13886,20 @@ async function renderClientAnalyticsTab(clientId) {
   }
 
   if (!contentReport && !followersReport && !visitorsReport && !instagramReport
-      && !facebookReport && !communityReport) {
+      && !facebookReport && !communityReport && !websiteReport && !grouped.newsletter && !grouped.registrations) {
     overviewPanel.innerHTML = `
       <div class="analytics-empty">
         <div class="analytics-empty-icon">📊</div>
         <p>No analytics reports uploaded yet.</p>
-        ${canUploadAnalytics() ? '<p class="mini-meta">Upload LinkedIn (Content/Followers/Visitors) or Instagram (Meta) exports, or the community comms workbook, to see data.</p>' : ''}
-      </div>`;
+        ${canUploadAnalytics() ? '<p class="mini-meta">Upload LinkedIn (Content/Followers/Visitors) or Instagram (Meta) exports, a Beehiiv subscriber export, or the community comms workbook, to see data.</p>' : ''}
+      </div>${registrationsRefreshHtml()}`;
     if (liOverviewSection) liOverviewSection.innerHTML = '';
     if (audiencePanel) audiencePanel.innerHTML = '';
     if (postsPanel) postsPanel.innerHTML = '';
     if (instagramPanel) instagramPanel.innerHTML = '';
     document.getElementById('analyticsTabFacebook')?.replaceChildren();
     if (communityPanel) communityPanel.innerHTML = '';
+    document.getElementById('analyticsTabWebsite')?.replaceChildren();
     return;
   }
 
@@ -12762,6 +13926,15 @@ async function renderClientAnalyticsTab(clientId) {
   // Render Community Pulse tab (newsletter/dispatch/survey sends + community)
   renderAnalyticsCommunity(communityReport);
 
+  // Website tab (filled by Colony from Google Analytics every Monday)
+  renderWebsiteTab(websiteReport);
+  // Google Search tab (Search Console, same Monday pull, own tab: Alex 3 Nov)
+  renderSearchTab(websiteReport);
+  // Newsletter tab (Beehiiv subscriber export, uploaded weekly: 3 Nov 2026)
+  renderNewsletterTab(grouped.newsletter);
+  // Registrations tab (Rishi's media dashboard sheet, read every morning: 5 Nov 2026)
+  renderRegistrationsTab(grouped.registrations);
+
   // Wire inner tab switching
   wireAnalyticsInnerTabs();
 }
@@ -12771,7 +13944,9 @@ function renderAnalyticsCoverageMeta(tabKey) {
   const metaEl = document.getElementById('analyticsClientMeta');
   if (!metaEl) return;
   const iso = (window._analyticsCoverageByTab || {})[tabKey];
-  if (!iso) { metaEl.textContent = ''; return; }
+  // Overview: each card names its own period, so a page-wide "data through"
+  // only competed with them (9 Oct 2026).
+  if (!iso || tabKey === 'overview') { metaEl.textContent = ''; return; }
   const d = new Date(iso + 'T00:00:00');
   if (isNaN(d)) { metaEl.textContent = ''; return; }
   metaEl.style.whiteSpace = 'nowrap';
@@ -12793,6 +13968,10 @@ function activateAnalyticsTab(key) {
     key === 'linkedin' ? 'analyticsTabLinkedIn' :
     key === 'instagram' ? 'analyticsTabInstagram' :
     key === 'facebook' ? 'analyticsTabFacebook' :
+    key === 'website' ? 'analyticsTabWebsite' :
+    key === 'search' ? 'analyticsTabSearch' :
+    key === 'newsletter' ? 'analyticsTabNewsletter' :
+    key === 'registrations' ? 'analyticsTabRegistrations' :
     'analyticsTabCommunity'
   );
   if (!panel) return;
@@ -12845,15 +14024,22 @@ function renderAnalyticsSnapshot(grouped) {
       ? `<span class="chip warn">⚠ data through ${label} · ${Math.floor(days / 7)} weeks old</span>`
       : `<span class="chip approved">data through ${label}</span>`;
   };
+  // The period a card's numbers cover, and what they are compared with, in
+  // the card's corner (9 Oct 2026). Old data says how old.
+  const periodChip = (range, vs, endIso) => {
+    const days = endIso ? Math.floor((Date.parse(toISODateLocal()) - Date.parse(String(endIso).slice(0, 10))) / 86400000) : 0;
+    const stale = days > 21;
+    return `<span class="chip ${stale ? 'warn' : 'approved'}">${stale ? '⚠ ' : ''}${escapeHtml(range)}${vs ? ' · vs previous week' : ''}${stale ? ` · ${Math.floor(days / 7)} weeks old` : ''}</span>`;
+  };
   const maxThrough = (...reports) => reports
     .map(r => r?.data_through || '').filter(Boolean).sort().pop() || null;
   const kpiCell = (label, value, arrow) =>
     `<div class="snap-kpi"><span class="snap-kpi-label">${escapeHtml(label)}</span><span class="snap-kpi-value">${value}${arrow || ''}</span></div>`;
-  const card = (title, tabKey, freshIso, kpisHtml, note) => `
+  const card = (title, tabKey, freshIso, kpisHtml, note, chip) => `
     <div class="panel snap-card">
       <div class="snap-card-head">
         <h3>${escapeHtml(title)}</h3>
-        ${freshChip(freshIso)}
+        ${chip || freshChip(freshIso)}
       </div>
       <div class="snap-kpis">${kpisHtml}</div>
       ${note ? `<p class="mini-meta">${note}</p>` : ''}
@@ -12864,9 +14050,10 @@ function renderAnalyticsSnapshot(grouped) {
   // LinkedIn — reuse the tested week-on-week KPI math
   const cr = grouped.content, fr = grouped.followers, vr = grouped.visitors;
   if (cr || fr || vr) {
-    const { kpis, kpiPeriod, weekInProgress } = computeOverviewKpis(cr, fr, vr, toISODateLocal());
+    const { kpis, kpiPeriod, comparePeriod, weekEnd } = computeOverviewKpis(cr, fr, vr, toISODateLocal());
     cards.push(card('LinkedIn', 'linkedin', maxThrough(cr, fr, vr),
-      kpis.map(k => kpiCell(k.label, k.value, k.arrow)).join(''), escapeHtml(kpiPeriod)));
+      kpis.map(k => kpiCell(k.label, k.value, k.arrow)).join(''), '',
+      weekEnd ? periodChip(kpiPeriod, comparePeriod, weekEnd) : null));
   }
 
   // Instagram — WoW from daily metrics when present, else post-export totals
@@ -12892,9 +14079,13 @@ function renderAnalyticsSnapshot(grouped) {
       igKpis.push(kpiCell('Views', fmt(ig.summary.total_views)));
       igKpis.push(kpiCell('Eng. rate', `${ig.summary.avg_engagement || '0.00'}%`));
     }
+    // The last 7 days of data vs the 7 before, by their real dates.
+    const dayIso = (r) => normalizeDateStr(r?.date || '').slice(0, 10);
+    const igChip = daily.length >= 14 && dayIso(daily[daily.length - 7]) && dayIso(daily[daily.length - 14])
+      ? periodChip(weekRangeLabel(dayIso(daily[daily.length - 7])), weekRangeLabel(dayIso(daily[daily.length - 14])), dayIso(daily[daily.length - 1]))
+      : null;
     cards.push(card('Instagram', 'instagram', ig.data_through,
-      igKpis.join('') || '<p class="mini-meta">Data uploaded — open the tab for details.</p>',
-      daily.length >= 14 ? 'Last 7 days · vs previous 7' : ''));
+      igKpis.join('') || '<p class="mini-meta">Data uploaded — open the tab for details.</p>', '', igChip));
   }
 
   // Community Pulse — base size + the latest send's performance
@@ -12912,7 +14103,57 @@ function renderAnalyticsSnapshot(grouped) {
       lastSend ? `Latest: ${escapeHtml(lastSend.name || '')} (${escapeHtml(lastSend.send_type || 'send')})` : ''));
   }
 
-  panel.innerHTML = `<div class="snap-grid">${cards.join('')}</div>`;
+  // Website — last Monday-Sunday vs the week before (Google Analytics, weekly)
+  const ws = grouped.website;
+  const wsWeeks = Array.isArray(ws?.metrics_data) ? ws.metrics_data : [];
+  if (wsWeeks.length >= 2) {
+    const a = wsWeeks[wsWeeks.length - 1], b = wsWeeks[wsWeeks.length - 2];
+    cards.push(card('Website', 'website', ws.data_through, [
+      kpiCell('Visitors', fmt(a.users), trendArrow(a.users, b.users)),
+      kpiCell('New', fmt(a.new_users), trendArrow(a.new_users, b.new_users)),
+      kpiCell('Page views', fmt(a.views), trendArrow(a.views, b.views)),
+      kpiCell('Time on site', websiteSecondsLabel(a.avg_engagement_seconds), trendArrow(a.avg_engagement_seconds, b.avg_engagement_seconds))
+    ].join(''), '', periodChip(weekRangeLabel(a.week_start), weekRangeLabel(b.week_start), a.week_end)));
+  }
+
+  // Google Search — the same week from Search Console (3 Nov 2026)
+  const scWeeks = Array.isArray(ws?.demographics_data?.search?.weeks) ? ws.demographics_data.search.weeks : [];
+  if (scWeeks.length >= 2) {
+    const a = scWeeks[scWeeks.length - 1], b = scWeeks[scWeeks.length - 2];
+    const ctr = (w) => (w.impressions ? w.clicks / w.impressions : 0);
+    cards.push(card('Google Search', 'search', ws.demographics_data.search.data_through, [
+      kpiCell('Clicks', fmt(a.clicks), trendArrow(a.clicks, b.clicks)),
+      kpiCell('Times shown', fmt(a.impressions), trendArrow(a.impressions, b.impressions)),
+      kpiCell('Click rate', pctAnalytics(ctr(a)), trendArrowPoints(ctr(a), ctr(b)))
+    ].join(''), '', periodChip(weekRangeLabel(a.week_start), weekRangeLabel(b.week_start), ws.demographics_data.search.data_through)));
+  }
+
+  // Newsletter — last week's list size and sign-ups (Beehiiv export, 3 Nov 2026)
+  const nl = grouped.newsletter;
+  const nlWeeks = Array.isArray(nl?.metrics_data) ? nl.metrics_data : [];
+  if (nlWeeks.length) {
+    const a = nlWeeks[nlWeeks.length - 1], b = nlWeeks[nlWeeks.length - 2];
+    const s = nl.summary || {};
+    cards.push(card(nl.report_label || 'Newsletter', 'newsletter', nl.data_through, [
+      kpiCell('Subscribers', fmt(a.subscribers), b ? trendArrow(a.subscribers, b.subscribers) : ''),
+      kpiCell('New', fmt(a.new), b ? trendArrow(a.new, b.new) : ''),
+      s.delivered ? kpiCell('Open rate', pctAnalytics(s.open_rate)) : ''
+    ].join(''), '', periodChip(weekRangeLabel(a.week_start), Boolean(b), nl.data_through)));
+  }
+
+  // Registrations — artists registered in all, from Rishi's media dashboard
+  // (5 Nov 2026), and how many joined in the last 7 days.
+  const rg = grouped.registrations;
+  if (rg?.summary?.total != null) {
+    const rs = rg.summary;
+    const asOf = new Date(rs.as_of + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+    cards.push(card('Registrations', 'registrations', rg.data_through, [
+      kpiCell('In all', fmt(rs.total)),
+      rs.last_7_days != null ? kpiCell('Last 7 days', fmt(rs.last_7_days)) : ''
+    ].join(''), '', periodChip(`as of ${asOf}`, false, rs.as_of)));
+  }
+
+  panel.innerHTML = `<div class="snap-grid">${cards.join('')}</div>${registrationsRefreshHtml()}`;
 }
 
 function renderAnalyticsOverview(contentReport, followersReport, visitorsReport) {
@@ -13038,16 +14279,22 @@ function buildLinkedInCharts() {
   if (posts && posts.length) renderContentTypeChart(posts);
 }
 
+// Chart colours come from the theme tokens, so axes and grid read in day and
+// night mode alike. Until 3 Nov 2026 'muted' read --text-secondary, which
+// was never defined: every chart fell back to a pale night-mode grey and the
+// axes all but vanished in day mode (Maya), and the grid was hard-coded
+// white. Charts redraw on a theme switch (see toggleTheme).
 function getChartThemeColors() {
   const style = getComputedStyle(document.documentElement);
+  const rgb = style.getPropertyValue('--text-rgb').trim() || '64, 63, 58';
   return {
     primary: style.getPropertyValue('--primary').trim() || '#bca4b6',
     primarySoft: 'rgba(188, 164, 182, 0.25)',
     good: style.getPropertyValue('--good').trim() || '#3a9d6a',
-    text: style.getPropertyValue('--text').trim() || '#e8e6df',
-    muted: style.getPropertyValue('--text-secondary').trim() || 'rgba(232, 230, 223, 0.55)',
-    line: 'rgba(255, 255, 255, 0.08)',
-    surface: style.getPropertyValue('--surface-quiet').trim() || '#2a2a28',
+    text: style.getPropertyValue('--text').trim() || '#403f3a',
+    muted: `rgba(${rgb}, 0.72)`,
+    line: `rgba(${rgb}, 0.12)`,
+    surface: style.getPropertyValue('--surface-quiet').trim() || '#f5f5ec',
   };
 }
 
@@ -13107,7 +14354,7 @@ function renderOverviewCharts(weekly, followerDaily) {
       options: {
         ...chartDefaults,
         plugins: { ...chartDefaults.plugins, valueLabels: { fmt: 'compact' }, tooltip: { ...chartDefaults.plugins.tooltip, callbacks: { label: ctx => fmtAnalytics(ctx.parsed.y) + ' impressions' } } },
-        scales: { x: { ...chartDefaults.scales.x, title: axT('Week starting') }, y: { ...chartDefaults.scales.y, title: axT('Impressions'), beginAtZero: true, ticks: { ...chartDefaults.scales.y.ticks, callback: v => v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v } } }
+        scales: { x: { ...chartDefaults.scales.x, title: axT('Week starting') }, y: { ...chartDefaults.scales.y, title: axT('Impressions'), beginAtZero: true, ticks: { ...chartDefaults.scales.y.ticks, callback: v => (v >= 1000 ? `${Number.isInteger(v / 1000) ? v / 1000 : (v / 1000).toFixed(1)}k` : v) } } }
       }
     });
     _analyticsChartInstances.push(chart);
@@ -13301,7 +14548,7 @@ function renderAnalyticsAudience(followersReport, visitorsReport) {
     const form = document.getElementById('audiencePersonaForm');
     document.getElementById('audiencePersonaEditBtn')?.addEventListener('click', () => form?.classList.toggle('hidden'));
     document.getElementById('apCancelBtn')?.addEventListener('click', () => form?.classList.add('hidden'));
-    document.getElementById('apSaveBtn')?.addEventListener('click', () => saveClientAudiencePersona().catch(console.error));
+    document.getElementById('apSaveBtn')?.addEventListener('click', () => saveClientAudiencePersona().catch(actionFailed));
   }
 
   renderAudiencePanels(defaultView);
@@ -13663,7 +14910,9 @@ function renderAnalyticsInstagram(instagramReport, audienceReport) {
 // ── Uploaded files panel (Rhea's request, 29 Jul 2026) ──
 // Lists the client's storage folder — the FULL upload history, not just the
 // latest file per report type that survives on the client_analytics rows.
+// @circle-omit Colony-only wiring
 window._uploadedFilesShowAll = false;
+// @circle-omit-end
 
 async function renderUploadedFilesPanel(clientId) {
   const panel = document.getElementById('uploadedFilesPanel');
@@ -13689,7 +14938,7 @@ async function renderUploadedFilesPanel(clientId) {
   const TYPE_META = {
     content: ['LinkedIn', 'approved'], followers: ['LinkedIn', 'approved'], visitors: ['LinkedIn', 'approved'],
     instagram: ['Instagram', 'pending'], facebook: ['Facebook', 'info'],
-    community_pulse: ['Community', 'info']
+    community_pulse: ['Community', 'info'], newsletter: ['Newsletter', 'info']
   };
   const byFileName = new Map();
   Object.values(window._analyticsReports || {}).forEach((r) => {
@@ -13765,7 +15014,9 @@ document.getElementById('client-analytics')?.addEventListener('click', async (e)
 });
 
 // ── LinkedIn comparison selector (complete weeks only; js/analytics.js math) ──
+// @circle-omit Colony-only wiring
 window._liCmp = window._liCmp || { mode: 'wow', aKey: '', bKey: '' };
+// @circle-omit-end
 
 function cmpTilesHtml(win, metricDefs) {
   // Same boxed tiles as the Overview snapshot (.snap-kpi) — one visual
@@ -13835,7 +15086,9 @@ function renderLiCmp() {
 }
 
 // ── Community Pulse comparison (send-based: last vs previous send) ──
+// @circle-omit Colony-only wiring
 window._cpCmp = window._cpCmp || { mode: 'prev' };
+// @circle-omit-end
 
 function renderCpCmp() {
   const body = document.getElementById('cpCmpBody');
@@ -13891,6 +15144,356 @@ document.getElementById('client-analytics')?.addEventListener('change', (e) => {
 // No AI insights banner yet: the generator branches by report type and has no
 // Facebook branch, so the button would fire a request shaped for another
 // platform. Better an honest gap than a control that misbehaves.
+// ── Website tab (Google Analytics, 26 Oct 2026) ──
+// Colony fills this itself every Monday (website-analytics-sync). Same
+// comparison picker as LinkedIn (last week, 4-week average, month vs month,
+// custom weeks); the tiles, top pages and sources all follow the pick.
+// Everything is open on first view, like LinkedIn. Nothing to upload.
+// @circle-omit Colony-only wiring
+window._wsCmp = window._wsCmp || { mode: 'wow', aKey: '', bKey: '' };
+// @circle-omit-end
+
+function websiteSecondsLabel(sec) {
+  const s = Math.round(Number(sec) || 0);
+  return s >= 60 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+}
+
+function renderWebsiteTab(report) {
+  const panel = document.getElementById('analyticsTabWebsite');
+  if (!panel) return;
+  if (!report) { panel.innerHTML = ''; return; }
+  const weeks = Array.isArray(report.metrics_data) ? report.metrics_data : [];
+  const cmp = window._wsCmp || (window._wsCmp = { mode: 'wow', aKey: '', bKey: '' });
+  if (cmp.mode === 'custom' && weeks.length) {
+    const valid = (k) => weeks.some(w => w.week_start === k);
+    if (!valid(cmp.aKey)) cmp.aKey = weeks[weeks.length - 1].week_start;
+    if (!valid(cmp.bKey)) cmp.bKey = weeks.length > 1 ? weeks[weeks.length - 2].week_start : cmp.aKey;
+  }
+  const fmt = (n) => fmtAnalytics(Math.round(Number(n) || 0));
+  const MODES = [['wow', 'Last week vs previous'], ['wo4', 'vs 4-week average'], ['mom', 'Month vs month'], ['custom', 'Custom weeks']];
+  const chips = MODES.map(([m, l]) =>
+    `<button type="button" class="chip${cmp.mode === m ? ' approved' : ''}" data-ws-cmp-mode="${m}">${l}</button>`).join(' ');
+  const weekOpts = (sel) => weeks.slice().reverse().map(w =>
+    `<option value="${escapeHtml(w.week_start)}"${w.week_start === sel ? ' selected' : ''}>${escapeHtml(weekRangeLabel(w.week_start))}</option>`).join('');
+  const customSel = cmp.mode === 'custom' ? `
+    <span class="mini-meta">A <select data-ws-cmp-week="aKey" style="width:auto;display:inline-block">${weekOpts(cmp.aKey)}</select>
+    vs B <select data-ws-cmp-week="bKey" style="width:auto;display:inline-block">${weekOpts(cmp.bKey)}</select></span>` : '';
+
+  const win = websiteComparison(report, cmp.mode, cmp.aKey, cmp.bKey);
+  const tile = (label, a, b, show) => `<div class="snap-kpi">
+      <span class="snap-kpi-label">${escapeHtml(label)}</span>
+      <span class="snap-kpi-value">${show(a)}${trendArrow(a, b) || ''}</span>
+      <span class="mini-meta">was ${show(b)}</span>
+    </div>`;
+  // Open, side by side, like LinkedIn's cards (Alex: no folded sections here).
+  const card = (title, body) => `<div class="analytics-chart-card panel"><h4>${escapeHtml(title)}</h4>${body}</div>`;
+
+  let content;
+  if (!win) {
+    content = `<p class="mini-meta">${cmp.mode === 'mom' ? 'Month vs month needs two full months of data.' : 'Not enough complete weeks for this comparison yet.'}</p>`;
+  } else {
+    const A = win.a.totals, B = win.b.totals;
+    const wasViews = new Map(win.b.pages.map(p => [p.path, p.views]));
+    const wasUsers = new Map(win.b.sources.map(x => [x.channel, x.users]));
+    const share = win.a.sources.reduce((s, x) => s + (Number(x.users) || 0), 0) || 1;
+    content = `
+      <div class="analytics-kpi-period"><strong>${escapeHtml(win.a.label)}</strong> vs ${escapeHtml(win.b.label)}</div>
+      <div class="snap-kpis">
+        ${tile('Visitors', A.users, B.users, fmt)}
+        ${tile('New visitors', A.new_users, B.new_users, fmt)}
+        ${tile('Page views', A.views, B.views, fmt)}
+        ${tile('Time on site', A.avg_engagement_seconds, B.avg_engagement_seconds, websiteSecondsLabel)}
+      </div>
+      <div class="analytics-charts-row ws-row">
+      ${card('Top pages', win.a.pages.length ? `<table class="m-card-table ws-table">
+        <thead><tr><th>Page</th><th>Views</th><th>Was</th></tr></thead>
+        <tbody>${win.a.pages.map(p => `<tr><td><span class="ws-page">${escapeHtml(p.title || p.path)}</span><span class="mini-meta ws-path">${escapeHtml(p.path)}</span></td><td>${fmt(p.views)}${trendArrow(p.views, wasViews.get(p.path) || 0) || ''}</td><td class="mini-meta">${fmt(wasViews.get(p.path) || 0)}</td></tr>`).join('')}</tbody>
+      </table>` : '<p class="mini-meta">No page views in this period.</p>')}
+      ${card('Where they came from', win.a.sources.length ? `<table class="m-card-table ws-table">
+        <thead><tr><th>Source</th><th>Visitors</th><th>Was</th></tr></thead>
+        <tbody>${win.a.sources.map(x => `<tr><td>${escapeHtml(x.channel)} <span class="mini-meta">${Math.round((Number(x.users) || 0) * 100 / share)}%</span></td><td>${fmt(x.users)}${trendArrow(x.users, wasUsers.get(x.channel) || 0) || ''}</td><td class="mini-meta">${fmt(wasUsers.get(x.channel) || 0)}</td></tr>`).join('')}</tbody>
+      </table>` : '<p class="mini-meta">No visits in this period.</p>')}
+      </div>`;
+  }
+  const peak = Math.max(1, ...weeks.map(w => Number(w.users) || 0));
+  const picked = win ? [win.a.key, win.b.key] : [];
+  panel.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">${chips}${customSel}</div>
+    ${content}
+    ${card('Visitors, last 12 weeks', `<div class="ws-bars">${weeks.map(w => `
+      <div class="ws-bar${picked.includes(w.week_start) ? ' is-picked' : ''}" title="${escapeHtml(weekRangeLabel(w.week_start))}: ${fmt(w.users)} visitors">
+        <span class="ws-bar-n">${fmt(w.users)}</span>
+        <span class="ws-bar-track"><span class="ws-bar-fill" style="height:${Math.round((Number(w.users) || 0) * 100 / peak)}%"></span></span>
+        <span class="ws-bar-x">${escapeHtml(new Date(w.week_start + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }))}</span>
+      </div>`).join('')}</div>`)}`;
+}
+
+// Google Search tab (Search Console), 3 Nov 2026: its own tab next to Website
+// (Alex), the same four comparisons. Position: lower is better, so the arrow
+// points up when it falls.
+function renderSearchTab(report) {
+  const panel = document.getElementById('analyticsTabSearch');
+  if (!panel) return;
+  const s = report?.demographics_data?.search;
+  if (!s) { panel.innerHTML = ''; return; }
+  const cmp = window._scCmp || (window._scCmp = { mode: 'wow', aKey: '', bKey: '' });
+  const weeks = Array.isArray(s.weeks) ? s.weeks : [];
+  if (cmp.mode === 'custom' && weeks.length) {
+    const valid = (k) => weeks.some(w => w.week_start === k);
+    if (!valid(cmp.aKey)) cmp.aKey = weeks[weeks.length - 1].week_start;
+    if (!valid(cmp.bKey)) cmp.bKey = weeks.length > 1 ? weeks[weeks.length - 2].week_start : cmp.aKey;
+  }
+  const fmt = (n) => fmtAnalytics(Math.round(Number(n) || 0));
+  const card = (title, body) => `<div class="analytics-chart-card panel"><h4>${escapeHtml(title)}</h4>${body}</div>`;
+  const MODES = [['wow', 'Last week vs previous'], ['wo4', 'vs 4-week average'], ['mom', 'Month vs month'], ['custom', 'Custom weeks']];
+  const chips = MODES.map(([m, l]) =>
+    `<button type="button" class="chip${cmp.mode === m ? ' approved' : ''}" data-sc-cmp-mode="${m}">${l}</button>`).join(' ');
+  const weekOpts = (sel) => weeks.slice().reverse().map(w =>
+    `<option value="${escapeHtml(w.week_start)}"${w.week_start === sel ? ' selected' : ''}>${escapeHtml(weekRangeLabel(w.week_start))}</option>`).join('');
+  const customSel = cmp.mode === 'custom' ? `
+    <span class="mini-meta">A <select data-sc-cmp-week="aKey" style="width:auto;display:inline-block">${weekOpts(cmp.aKey)}</select>
+    vs B <select data-sc-cmp-week="bKey" style="width:auto;display:inline-block">${weekOpts(cmp.bKey)}</select></span>` : '';
+  const head = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">${chips}${customSel}</div>`;
+  panel.innerHTML = searchTabBody(s, report, cmp, card, fmt, head);
+}
+
+function searchTabBody(s, report, cmp, card, fmt, head) {
+  const failed = s.error ? `<p class="mini-meta ws-search-error">The last Search Console pull failed: ${escapeHtml(s.error)}${s.weeks ? ' Showing the previous one.' : ''}</p>` : '';
+  if (!Array.isArray(s.weeks)) return `${head}${failed}`;
+  const win = searchComparison(report, cmp.mode, cmp.aKey, cmp.bKey);
+  if (!win) return `${head}${failed}<p class="mini-meta">${cmp.mode === 'mom' ? 'Month vs month needs two full months of data.' : 'Not enough weeks for this comparison yet.'}</p>`;
+  const A = win.a.totals, B = win.b.totals;
+  const pos = (v) => (Number(v) ? (Math.round(v * 10) / 10).toFixed(1) : '–');
+  const posChip = (a, b) => {
+    if (!a || !b) return '';
+    const d = Math.round((b - a) * 10) / 10;
+    return d === 0 ? '' : d > 0 ? ` <span class="trend-up">↑ ${d} place${d === 1 ? '' : 's'}</span>` : ` <span class="trend-down">↓ ${-d} place${d === -1 ? '' : 's'}</span>`;
+  };
+  const tile = (label, value, chip, was) => `<div class="snap-kpi"><span class="snap-kpi-label">${escapeHtml(label)}</span>
+      <span class="snap-kpi-value">${value}${chip || ''}</span><span class="mini-meta">was ${was}</span></div>`;
+  const table = (rows, label, wasList, show) => {
+    const was = new Map(wasList.map(x => [x.key, x.clicks]));
+    return rows.length ? `<table class="m-card-table ws-table">
+      <thead><tr><th>${label}</th><th>Clicks</th><th>Shown</th><th>Was</th></tr></thead>
+      <tbody>${rows.map(x => `<tr><td>${show(x.key)}</td><td>${fmt(x.clicks)}${trendArrow(x.clicks, was.get(x.key) || 0) || ''}</td><td class="mini-meta">${fmt(x.impressions)}</td><td class="mini-meta">${fmt(was.get(x.key) || 0)}</td></tr>`).join('')}</tbody>
+    </table>` : '<p class="mini-meta">Nothing from Google search in this period.</p>';
+  };
+  const pagePath = (u) => { try { return new URL(u).pathname; } catch { return String(u || ''); } };
+  const through = s.data_through ? ` · data through ${escapeHtml(new Date(s.data_through + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }))}` : '';
+  const peak = Math.max(1, ...s.weeks.map(w => Number(w.clicks) || 0));
+  const picked = [win.a.key, win.b.key];
+  return `${head}${failed}
+    <div class="analytics-kpi-period"><strong>${escapeHtml(win.a.label)}</strong> vs ${escapeHtml(win.b.label)}<span class="mini-meta">${through}</span></div>
+    <div class="snap-kpis">
+      ${tile('Clicks from Google', fmt(A.clicks), trendArrow(A.clicks, B.clicks), fmt(B.clicks))}
+      ${tile('Times shown', fmt(A.impressions), trendArrow(A.impressions, B.impressions), fmt(B.impressions))}
+      ${tile('Click rate', pctAnalytics(A.ctr), trendArrowPoints(A.ctr, B.ctr), pctAnalytics(B.ctr))}
+      ${tile('Average position', pos(A.position), posChip(A.position, B.position), pos(B.position))}
+    </div>
+    <div class="analytics-charts-row ws-row">
+      ${card('What people searched', table(win.a.queries, 'Search', win.b.queries, (k) => escapeHtml(k)))}
+      ${card('Pages they landed on', table(win.a.pages, 'Page', win.b.pages, (k) => `<span class="ws-page">${escapeHtml(pagePath(k))}</span>`))}
+    </div>
+    <p class="mini-meta">Google leaves out searches made by very few people, so the searches listed add up to less than the total.</p>
+    ${card('Clicks from Google, last 12 weeks', `<div class="ws-bars">${s.weeks.map(w => `
+      <div class="ws-bar${picked.includes(w.week_start) ? ' is-picked' : ''}" title="${escapeHtml(weekRangeLabel(w.week_start))}: ${fmt(w.clicks)} clicks, shown ${fmt(w.impressions)} times">
+        <span class="ws-bar-n">${fmt(w.clicks)}</span>
+        <span class="ws-bar-track"><span class="ws-bar-fill" style="height:${Math.round((Number(w.clicks) || 0) * 100 / peak)}%"></span></span>
+        <span class="ws-bar-x">${escapeHtml(new Date(w.week_start + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }))}</span>
+      </div>`).join('')}</div>`)}`;
+}
+
+// Newsletter tab: Beehiiv subscriber export, uploaded weekly by the Chrome
+// task (3 Nov 2026). Counts and sources only; no emails are stored.
+function renderNewsletterTab(report) {
+  const panel = document.getElementById('analyticsTabNewsletter');
+  if (!panel) return;
+  if (!report) { panel.innerHTML = ''; return; }
+  const cmp = window._nlCmp || (window._nlCmp = { mode: 'wow', aKey: '', bKey: '' });
+  const weeks = Array.isArray(report.metrics_data) ? report.metrics_data : [];
+  if (cmp.mode === 'custom' && weeks.length) {
+    const valid = (k) => weeks.some(w => w.week_start === k);
+    if (!valid(cmp.aKey)) cmp.aKey = weeks[weeks.length - 1].week_start;
+    if (!valid(cmp.bKey)) cmp.bKey = weeks.length > 1 ? weeks[weeks.length - 2].week_start : cmp.aKey;
+  }
+  const fmt = (n) => fmtAnalytics(Math.round(Number(n) || 0));
+  const card = (title, body) => `<div class="analytics-chart-card panel"><h4>${escapeHtml(title)}</h4>${body}</div>`;
+  const MODES = [['wow', 'Last week vs previous'], ['wo4', 'vs 4-week average'], ['mom', 'Month vs month'], ['custom', 'Custom weeks']];
+  const chips = MODES.map(([m, l]) =>
+    `<button type="button" class="chip${cmp.mode === m ? ' approved' : ''}" data-nl-cmp-mode="${m}">${l}</button>`).join(' ');
+  const weekOpts = (sel) => weeks.slice().reverse().map(w =>
+    `<option value="${escapeHtml(w.week_start)}"${w.week_start === sel ? ' selected' : ''}>${escapeHtml(weekRangeLabel(w.week_start))}</option>`).join('');
+  const customSel = cmp.mode === 'custom' ? `
+    <span class="mini-meta">A <select data-nl-cmp-week="aKey" style="width:auto;display:inline-block">${weekOpts(cmp.aKey)}</select>
+    vs B <select data-nl-cmp-week="bKey" style="width:auto;display:inline-block">${weekOpts(cmp.bKey)}</select></span>` : '';
+  const head = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">${chips}${customSel}</div>`;
+  const s = report.summary || {};
+  const sources = report.demographics_data?.sources || {};
+  const links = (NEWSLETTER_LINKS[analyticsCurrentClientId] || [])
+    .map((l) => `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join(' · ');
+  const win = newsletterComparison(report, cmp.mode, cmp.aKey, cmp.bKey);
+  const tile = (label, value, chip, was) => `<div class="snap-kpi"><span class="snap-kpi-label">${escapeHtml(label)}</span>
+      <span class="snap-kpi-value">${value}${chip || ''}</span>${was != null ? `<span class="mini-meta">was ${was}</span>` : ''}</div>`;
+  const sourceTable = (now, was, empty) => {
+    const keys = [...new Set([...Object.keys(now || {}), ...Object.keys(was || {})])]
+      .sort((x, y) => ((now || {})[y] || 0) - ((now || {})[x] || 0) || ((was || {})[y] || 0) - ((was || {})[x] || 0));
+    return keys.length ? `<table class="m-card-table ws-table">
+      <thead><tr><th>Source</th><th>Sign-ups</th>${was ? '<th>Was</th>' : ''}</tr></thead>
+      <tbody>${keys.map(k => `<tr><td>${escapeHtml(k)}</td><td>${fmt((now || {})[k])}${was ? trendArrow((now || {})[k] || 0, was[k] || 0) || '' : ''}</td>${was ? `<td class="mini-meta">${fmt(was[k])}</td>` : ''}</tr>`).join('')}</tbody>
+    </table>` : `<p class="mini-meta">${empty}</p>`;
+  };
+  const peak = Math.max(1, ...weeks.map(w => Number(w.new) || 0));
+  const last12 = weeks.slice(-12);
+  const picked = win ? [win.a.key, win.b.key] : [];
+  const rates = s.delivered
+    ? `${tile('Open rate, all sends', pctAnalytics(s.open_rate), '', null)}${tile('Click rate, all sends', pctAnalytics(s.click_rate), '', null)}` : '';
+  const body = !win
+    ? `<p class="mini-meta">${cmp.mode === 'mom' ? 'Month vs month needs two finished months.' : 'Not enough finished weeks for this comparison yet.'} The list today:</p>
+    <div class="snap-kpis">
+      ${tile('Subscribers', fmt(s.subscribers), '', null)}
+      ${tile('Signed up in all', fmt(s.ever), '', null)}
+      ${tile('Unsubscribed', fmt(s.left), '', null)}
+      ${rates}
+    </div>`
+    : `<div class="analytics-kpi-period"><strong>${escapeHtml(win.a.label)}</strong> vs ${escapeHtml(win.b.label)}</div>
+    <div class="snap-kpis">
+      ${tile('Subscribers', fmt(win.a.totals.subscribers), trendArrow(win.a.totals.subscribers, win.b.totals.subscribers), fmt(win.b.totals.subscribers))}
+      ${tile('New sign-ups', fmt(win.a.totals.new), trendArrow(win.a.totals.new, win.b.totals.new), fmt(win.b.totals.new))}
+      ${tile('Unsubscribed', fmt(win.a.totals.left), '', fmt(win.b.totals.left))}
+      ${rates}
+    </div>`;
+  panel.innerHTML = `${head}${body}
+    <div class="analytics-charts-row ws-row">
+      ${win ? card('Where sign-ups came from', sourceTable(win.a.sources, win.b.sources, 'No sign-ups in this period.')) : ''}
+      ${card('All time', `${sourceTable(sources.all, null, 'No sign-ups yet.')}<p class="mini-meta">${fmt(s.ever)} signed up in all, ${fmt(s.left)} left.</p>`)}
+    </div>
+    ${last12.length ? card('New sign-ups, last 12 weeks', `<div class="ws-bars">${last12.map(w => `
+      <div class="ws-bar${picked.includes(w.week_start) ? ' is-picked' : ''}" title="${escapeHtml(weekRangeLabel(w.week_start))}: ${fmt(w.new)} new, ${fmt(w.left)} left, ${fmt(w.subscribers)} on the list">
+        <span class="ws-bar-n">${fmt(w.new)}</span>
+        <span class="ws-bar-track"><span class="ws-bar-fill" style="height:${Math.round((Number(w.new) || 0) * 100 / peak)}%"></span></span>
+        <span class="ws-bar-x">${escapeHtml(new Date(w.week_start + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }))}</span>
+      </div>`).join('')}</div>`) : ''}
+    ${links ? `<p class="nl-links">${links}</p>` : ''}
+    <p class="mini-meta">From the Beehiiv subscriber export, finished weeks and months only. Colony keeps counts and sources, no email addresses.</p>`;
+}
+
+// ── Registrations (5 Nov 2026) ──
+// Artists registering for Example Collective Month, as the health of the
+// movement. Read every morning, read-only, from Rishi's media dashboard sheet
+// (registrations-sync): a running total every three days. In test: only the
+// superadmin sees it until app_config.registrations_team is set to true.
+function registrationsVisible() {
+  return isSuperadminUser() || (state.appConfig || {}).registrations_team === true;
+}
+
+function renderRegistrationsTab(report) {
+  const panel = document.getElementById('analyticsTabRegistrations');
+  if (!panel) return;
+  if (!report) { panel.innerHTML = ''; return; }
+  const fmt = (n) => fmtAnalytics(Math.round(Number(n) || 0));
+  const card = (title, body) => `<div class="analytics-chart-card panel"><h4>${escapeHtml(title)}</h4>${body}</div>`;
+  const tile = (label, value, note) => `<div class="snap-kpi"><span class="snap-kpi-label">${escapeHtml(label)}</span>
+      <span class="snap-kpi-value">${value}</span>${note ? `<span class="mini-meta">${escapeHtml(note)}</span>` : ''}</div>`;
+  const snaps = Array.isArray(report.metrics_data) ? report.metrics_data : [];
+  const s = report.summary || {};
+  const day = (iso) => (iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '');
+  const shown = snaps.slice(-12);
+  const peak = Math.max(1, ...shown.map((x) => Number(x.total) || 0));
+  panel.innerHTML = `
+    <div class="analytics-kpi-period"><strong>As of ${escapeHtml(day(s.as_of))}</strong></div>
+    <div class="snap-kpis">
+      ${tile('Registered in all', fmt(s.total))}
+      ${s.since_previous != null ? tile(`New since ${day(s.previous_date)}`, fmt(s.since_previous)) : ''}
+      ${s.last_7_days != null ? tile('New in the last 7 days', fmt(s.last_7_days), `since ${day(s.week_ago_date)}`) : ''}
+    </div>
+    ${shown.length ? card('Registered in all, by update', `<div class="ws-bars">${shown.map((x) => `
+      <div class="ws-bar" title="${escapeHtml(day(x.date))}: ${fmt(x.total)} in all${x.new != null ? `, ${fmt(x.new)} new` : ''}">
+        <span class="ws-bar-n">${fmt(x.total)}</span>
+        <span class="ws-bar-track"><span class="ws-bar-fill" style="height:${Math.round((Number(x.total) || 0) * 100 / peak)}%"></span></span>
+        <span class="ws-bar-x">${escapeHtml(day(x.date))}</span>
+      </div>`).join('')}</div>`) : ''}
+    <p class="mini-meta">From Rishi's media dashboard${s.source ? ` ("${escapeHtml(s.source)}")` : ''}: every registration on the form, from any source, updated about every three days. Colony reads it each morning and never changes it.${isSuperadminUser() && (state.appConfig || {}).registrations_team !== true ? ' Only you can see this tab for now.' : ''}</p>`;
+}
+
+// Under the Overview, for the superadmin: read Rishi's sheet now instead of
+// waiting for the morning, and see what went wrong if it can't.
+function registrationsRefreshHtml() {
+  if (!isSuperadminUser() || !getConfigMap('registrations', {})[analyticsCurrentClientId]) return '';
+  return `<p class="mini-meta reg-connect"><button type="button" class="link-btn" data-reg-refresh>Refresh registrations now</button></p>`;
+}
+
+async function refreshRegistrations(btn) {
+  const clientId = analyticsCurrentClientId;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Reading Rishi’s sheet…';
+  try {
+    const res = await fetch('/api/registrations-refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session?.access_token}` }
+    });
+    const body = await res.json().catch(() => ({}));
+    const mine = (body.errors || []).filter((e) => String(e).startsWith(clientId)).map((e) => String(e).slice(clientId.length + 2));
+    if (!res.ok && res.status !== 207) { await notSaved('Registrations not refreshed', { message: body.error || `HTTP ${res.status}` }); return; }
+    if (mine.length) { await notSaved('Registrations not refreshed', { message: mine.join(' ') }); return; }
+    const got = (body.synced || []).find((x) => x.clientId === clientId);
+    await appAlert(got ? `${Number(got.total).toLocaleString('en-IN')} registered as of ${new Date(got.asOf + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}.` : 'Done.', { title: 'Registrations refreshed' });
+    await renderClientAnalyticsTab(clientId);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+// @circle-omit Colony-only wiring
+// Redraw the open analytics on a theme switch, so axes and labels follow it.
+document.getElementById('client-analytics')?.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-reg-refresh]');
+  if (b) refreshRegistrations(b).catch(actionFailed);
+});
+document.addEventListener('app:theme', () => {
+  if (analyticsCurrentClientId && document.getElementById('client-analytics')?.offsetParent) {
+    renderClientAnalyticsTab(analyticsCurrentClientId);
+  }
+});
+document.getElementById('client-analytics')?.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-nl-cmp-mode]');
+  if (!b) return;
+  window._nlCmp.mode = b.dataset.nlCmpMode;
+  renderNewsletterTab((window._analyticsReports || {}).newsletter);
+});
+document.getElementById('client-analytics')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-nl-cmp-week]');
+  if (!sel) return;
+  window._nlCmp[sel.dataset.nlCmpWeek] = sel.value;
+  renderNewsletterTab((window._analyticsReports || {}).newsletter);
+});
+document.getElementById('client-analytics')?.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-ws-cmp-mode]');
+  if (!b) return;
+  window._wsCmp.mode = b.dataset.wsCmpMode;
+  renderWebsiteTab((window._analyticsReports || {}).website);
+});
+document.getElementById('client-analytics')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-ws-cmp-week]');
+  if (!sel) return;
+  window._wsCmp[sel.dataset.wsCmpWeek] = sel.value;
+  renderWebsiteTab((window._analyticsReports || {}).website);
+});
+document.getElementById('client-analytics')?.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-sc-cmp-mode]');
+  if (!b) return;
+  window._scCmp.mode = b.dataset.scCmpMode;
+  renderSearchTab((window._analyticsReports || {}).website);
+});
+document.getElementById('client-analytics')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-sc-cmp-week]');
+  if (!sel) return;
+  window._scCmp[sel.dataset.scCmpWeek] = sel.value;
+  renderSearchTab((window._analyticsReports || {}).website);
+});
+// @circle-omit-end
+
 function renderFacebookTab(facebookReport) {
   const panel = document.getElementById('analyticsTabFacebook');
   if (!panel) return;
@@ -13943,7 +15546,9 @@ function renderFacebookTab(facebookReport) {
 
 // Modes: wow (last full week vs previous), wo4 (vs 4-week average),
 // mom (last full month vs previous), custom (pick two weeks), all (history).
+// @circle-omit Colony-only wiring
 window._igCmp = window._igCmp || { mode: 'wow', customA: '', customB: '' };
+// @circle-omit-end
 
 // Instagram and Facebook produce the same daily-metric shape from the same
 // Meta screen, so they get the same Account Trends surface rather than two
@@ -13955,11 +15560,13 @@ const METRIC_SURFACES = {
   instagram: { key: 'instagram', label: 'Instagram', panelId: 'analyticsTabInstagram', bodyId: 'igTrendsBody', chartPrefix: 'chartIgMetric_', cmpChartPrefix: 'chartIgCmp_' },
   facebook: { key: 'facebook', label: 'Facebook', panelId: 'analyticsTabFacebook', bodyId: 'fbTrendsBody', chartPrefix: 'chartFbMetric_', cmpChartPrefix: 'chartFbCmp_' }
 };
+// @circle-omit Colony-only wiring
 window._metricsDailyBySurface = window._metricsDailyBySurface || {};
 window._metricsCmpBySurface = window._metricsCmpBySurface || {};
 window._metricsCmpBySurface.instagram = window._igCmp;
 window._metricsCmpBySurface.facebook = window._metricsCmpBySurface.facebook
   || { mode: 'wow', customA: '', customB: '' };
+// @circle-omit-end
 
 function metricSurface(key) { return METRIC_SURFACES[key] || METRIC_SURFACES.instagram; }
 function metricSurfaceDaily(key) { return window._metricsDailyBySurface[metricSurface(key).key] || []; }
@@ -14070,8 +15677,10 @@ document.getElementById('client-analytics')?.addEventListener('change', (e) => {
 // charts (A solid, B ghost) for comparisons, full-history lines for All time.
 // Mode switches re-render in place, so IG charts are tracked separately and
 // destroyed before each rebuild (the global list only clears on screen load).
+// @circle-omit Colony-only wiring
 window._igChartInstances = window._igChartInstances || [];
 window._metricChartsBySurface = window._metricChartsBySurface || {};
+// @circle-omit-end
 function buildIgMetricCharts(surfaceKey = 'instagram') {
   const surface = metricSurface(surfaceKey);
   const panel = document.getElementById(surface.panelId);
@@ -14334,15 +15943,15 @@ function renderContentTypeChart(posts) {
     // documents all arrive BLANK — the export cannot tell them apart, so the
     // bucket must not pretend otherwise.
     const ct = p['Content Type'] || 'Other (image/text/carousel)';
-    if (!typeMap.has(ct)) typeMap.set(ct, { sum: 0, count: 0 });
+    if (!typeMap.has(ct)) typeMap.set(ct, { posts: [], count: 0 });
     const entry = typeMap.get(ct);
-    entry.sum += Number(p['Engagement rate']) || 0;
+    entry.posts.push(p);
     entry.count++;
   });
 
   const types = [...typeMap.entries()].map(([name, data]) => ({
     name,
-    avg: data.count > 0 ? (data.sum / data.count) * 100 : 0
+    avg: liPostsEngagementRate(data.posts) * 100
   })).sort((a, b) => b.avg - a.avg);
 
   const colors = getChartThemeColors();
@@ -14389,13 +15998,13 @@ function renderPatternCards(posts) {
   const typeMap = new Map();
   posts.forEach(p => {
     const ct = p['Content Type'] || 'Post';
-    if (!typeMap.has(ct)) typeMap.set(ct, { engSum: 0, count: 0 });
+    if (!typeMap.has(ct)) typeMap.set(ct, { posts: [], count: 0 });
     const e = typeMap.get(ct);
-    e.engSum += Number(p['Engagement rate']) || 0;
+    e.posts.push(p);
     e.count++;
   });
   const bestType = [...typeMap.entries()]
-    .map(([name, d]) => ({ name, avg: d.count ? d.engSum / d.count : 0, count: d.count }))
+    .map(([name, d]) => ({ name, avg: liPostsEngagementRate(d.posts), count: d.count }))
     .sort((a, b) => b.avg - a.avg)[0];
 
   // Pattern 2: Best posting day
@@ -14411,13 +16020,13 @@ function renderPatternCards(posts) {
     }
     if (!(cd instanceof Date) || isNaN(cd.getTime())) return;
     const dayName = cd.toLocaleDateString('en-US', { weekday: 'long' });
-    if (!dayMap.has(dayName)) dayMap.set(dayName, { engSum: 0, count: 0 });
+    if (!dayMap.has(dayName)) dayMap.set(dayName, { posts: [], count: 0 });
     const e = dayMap.get(dayName);
-    e.engSum += Number(p['Engagement rate']) || 0;
+    e.posts.push(p);
     e.count++;
   });
   const bestDay = [...dayMap.entries()]
-    .map(([name, d]) => ({ name, avg: d.count ? d.engSum / d.count : 0, count: d.count }))
+    .map(([name, d]) => ({ name, avg: liPostsEngagementRate(d.posts), count: d.count }))
     .filter(d => d.count >= 2)
     .sort((a, b) => b.avg - a.avg)[0];
 
@@ -14426,7 +16035,7 @@ function renderPatternCards(posts) {
   const highPct = ((highPerformers / posts.length) * 100).toFixed(0);
 
   // Pattern 4: Consistency
-  const avgEng = posts.reduce((s, p) => s + (Number(p['Engagement rate']) || 0), 0) / posts.length;
+  const avgEng = liPostsEngagementRate(posts);
 
   const patterns = [
     { emoji: '🎬', label: `${bestType?.name || 'Posts'} perform best`, note: `${pctAnalytics(bestType?.avg || 0)} avg engagement across ${bestType?.count || 0} posts` },
@@ -14446,6 +16055,7 @@ function renderPatternCards(posts) {
 
 // --- Insights banner (collapsible) ---
 function buildInsightsBanner(type, previewText, label) {
+  if (state.runtimeConfig && state.runtimeConfig.ai === false) return '';
   const id = `insights-banner-${type}`;
   return `<div class="insights-banner" id="${id}">
     <button class="insights-banner-trigger" type="button" data-insights-type="${type}">
@@ -14548,14 +16158,27 @@ function buildInstagramInsightsData() {
 }
 
 // --- Insights API calls + click handling ---
-// Cache is stored in DB: client_analytics.insights_cache (JSONB)
-// Key format: `${type}-${viewMode}` or `post-${postIndex}-${viewMode}`
-// New upload = new DB row = empty cache automatically
+// Cache is stored in DB: client_analytics.insights_cache (JSONB), each entry
+// { text, stamp, at }. Key format: `${type}-${viewMode}` or
+// `post-${postIndex}-${viewMode}`. An entry is shown only while its stamp
+// matches the client's data (insightDataStamp); otherwise it is rewritten,
+// and if that fails the error shows, never the old text (27 Oct 2026).
 
 function getDbInsightCache(key, reportOverride) {
   const report = reportOverride || window._analyticsCurrentReport;
   if (!report || !report.insights_cache) return null;
-  return report.insights_cache[key] || null;
+  return usableInsight(report.insights_cache[key], insightDataStamp(window._analyticsReports));
+}
+
+// The summary, then when it was written, so its age is never hidden.
+function insightWithDateHtml(text, atIso) {
+  const d = atIso ? new Date(atIso) : new Date();
+  const when = isNaN(d) ? '' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return formatInsightsText(text) + (when ? `<div class="insights-when">Written ${escapeHtml(when)}</div>` : '');
+}
+
+function insightErrorHtml(err) {
+  return `<div class="insights-error">Couldn't write the summary right now. ${escapeHtml(err.message)}</div>`;
 }
 
 async function setDbInsightCache(key, insights, reportOverride) {
@@ -14563,7 +16186,7 @@ async function setDbInsightCache(key, insights, reportOverride) {
   if (!report) return;
   // Update local object immediately
   if (!report.insights_cache) report.insights_cache = {};
-  report.insights_cache[key] = insights;
+  report.insights_cache[key] = { text: insights, stamp: insightDataStamp(window._analyticsReports), at: new Date().toISOString() };
   // Persist to DB (fire-and-forget — don't block UI)
   state.supabase
     .from('client_analytics')
@@ -14576,7 +16199,8 @@ async function fetchInsights(analysisType, data, clientName, extras) {
   const token = state.session?.access_token;
   if (!token) throw new Error('Not authenticated');
 
-  const payload = { analysisType, data, clientName };
+  // LinkedIn weeks carry daily_counts for month splits; the model never needs them
+  const payload = JSON.parse(JSON.stringify({ analysisType, data, clientName }, (k, v) => k === 'daily_counts' ? undefined : v));
   // Pass view mode and benchmarks when available
   if (extras) {
     if (extras.viewMode) payload.viewMode = extras.viewMode;
@@ -14621,11 +16245,11 @@ if (analyticsScreenEl) {
       const stableKey = linkKey || `${normalizeDateStr(post['Created date'] || '')}-${String(post['Post title'] || '').slice(0, 24)}`;
       const postCacheKey = `post-${stableKey}-organic-v1`;
       const contentEl = cell.querySelector('.post-insight-content');
-      const showResult = (text) => {
-        contentEl.innerHTML = formatInsightsText(text);
+      const showResult = (text, at) => {
+        contentEl.innerHTML = insightWithDateHtml(text, at);
       };
       const postCached = getDbInsightCache(postCacheKey);
-      if (postCached) { showResult(postCached); return; }
+      if (postCached) { showResult(postCached.text, postCached.at); return; }
 
       contentEl.innerHTML = '<div class="insights-loading"><span class="insights-spinner"></span> Analyzing vs benchmarks...</div>';
       try {
@@ -14636,7 +16260,7 @@ if (analyticsScreenEl) {
         const totalImpr = imprs.reduce((s, v) => s + v, 0);
         const benchmarks = all.length ? {
           avgImpressions: totalImpr / all.length,
-          avgEngRate: all.reduce((s, p) => s + (p['Engagement rate'] || 0), 0) / all.length,
+          avgEngRate: liPostsEngagementRate(all),
           avgCTR: totalImpr > 0 ? ((all.reduce((s, p) => s + (p['Clicks'] || 0), 0) / totalImpr) * 100).toFixed(2) : '0.00',
           totalPosts: all.length,
           maxImpressions: Math.max(...imprs),
@@ -14647,7 +16271,7 @@ if (analyticsScreenEl) {
         showResult(result.insights);
       } catch (err) {
         console.error('Post insight error:', err);
-        contentEl.innerHTML = `<div class="insights-error">Could not generate insights. ${escapeHtml(err.message)}</div>`;
+        contentEl.innerHTML = insightErrorHtml(err);
       }
       return;
     }
@@ -14680,7 +16304,7 @@ if (analyticsScreenEl) {
       // context (all posts, followers, visitors); instagram v1 = new analysis.
       const vm = 'organic';
       // Bumped 23 Jul 2026: cached insights predate the skimmable-format contract
-      const CACHE_VER = { weekly: 'v7', monthly: 'v7', 'brand-signal': 'v8', instagram: 'v6', community_pulse: 'v3', 'comparison-li': 'v2', 'comparison-cp': 'v1' };
+      const CACHE_VER = { weekly: 'v8', monthly: 'v8', 'brand-signal': 'v8', instagram: 'v6', community_pulse: 'v3', 'comparison-li': 'v3', 'comparison-cp': 'v1' };
       // Instagram insights are PER COMPARISON (the summary of what's on
       // screen, not a fixed whole-file retrospective) — so the active
       // comparison window is part of the cache key. Presets therefore cache
@@ -14701,7 +16325,7 @@ if (analyticsScreenEl) {
         : undefined;
       const cached = getDbInsightCache(cacheKey, cacheReport);
       if (cached) {
-        content.innerHTML = formatInsightsText(cached);
+        content.innerHTML = insightWithDateHtml(cached.text, cached.at);
         return;
       }
 
@@ -14745,7 +16369,7 @@ if (analyticsScreenEl) {
             period: 'last 2 weeks',
             contentSummary: cr ? {
               totalImpressions: last2Weeks.reduce((s, w) => s + (w['Impressions (total)'] || 0), 0),
-              avgEngagement: (() => { const rows = last2Weeks.filter(w => w['Engagement rate (total)'] > 0); return rows.length ? rows.reduce((s, w) => s + w['Engagement rate (total)'], 0) / rows.length : 0; })(),
+              avgEngagement: liEngagementRate(last2Weeks),
               totalPosts: recentPosts.length,
               topPostImpressions: recentPosts.length ? Math.max(0, ...recentPosts.map(p => p['Impressions'] || 0)) : 0,
               // Percentages PRECOMPUTED — the model quotes, never derives.
@@ -14856,7 +16480,7 @@ if (analyticsScreenEl) {
         const apiType = type.startsWith('comparison-') ? 'comparison' : type;
         const result = await fetchInsights(apiType, analysisData, clientName, { viewMode: vm });
         await setDbInsightCache(cacheKey, result.insights, cacheReport);
-        content.innerHTML = formatInsightsText(result.insights);
+        content.innerHTML = insightWithDateHtml(result.insights);
 
         // Update preview text
         const preview = banner.querySelector('.insights-banner-preview');
@@ -14866,7 +16490,7 @@ if (analyticsScreenEl) {
         }
       } catch (err) {
         console.error('Insights error:', err);
-        content.innerHTML = `<div class="insights-error">Could not generate insights. ${escapeHtml(err.message)}</div>`;
+        content.innerHTML = insightErrorHtml(err);
       }
       return;
     }
@@ -14896,7 +16520,9 @@ function formatInsightsText(text) {
 }
 
 // Store current report reference for insights
+// @circle-omit Colony-only wiring
 window._analyticsCurrentReport = null;
+// @circle-omit-end
 
 // =============================================
 // END CLIENT ANALYTICS
@@ -14930,12 +16556,14 @@ function filterPlannerBySearch(query) {
 }
 
 // Person click → navigate to profile
+// @circle-omit Colony-only wiring
 document.addEventListener('click', (e) => {
   const nameEl = e.target.closest('.rp-person-name');
   if (nameEl?.dataset.empId) {
     navigateToScreen('employee-profile', { replace: false, empId: nameEl.dataset.empId });
   }
 });
+// @circle-omit-end
 
 // View toggle
 document.getElementById('plannerViewToggle')?.addEventListener('click', (e) => {
@@ -14977,7 +16605,9 @@ function navigateWeek(delta) {
 if (weekPrevBtn) weekPrevBtn.addEventListener('click', () => navigateWeek(-1));
 if (weekNextBtn) weekNextBtn.addEventListener('click', () => navigateWeek(1));
 
+// @circle-omit Colony-only wiring
 populatePlannerMonthOptions();
+// @circle-omit-end
 
 if (addClientBtn) {
   addClientBtn.addEventListener('click', () => {
@@ -15193,7 +16823,7 @@ function aggregateProjectAllocations(lines = [], denominator = 1) {
   const projectTotals = new Map();
   lines.forEach((line) => {
     const project = String(line.project || '').trim();
-    if (!project || normalizeClientNameKey(project) === 'internal') return;
+    if (!project) return;
     const allocation = Number.isFinite(Number(line.allocationPercent)) ? Number(line.allocationPercent) : 0;
     projectTotals.set(project, (projectTotals.get(project) || 0) + allocation);
   });
@@ -15411,7 +17041,9 @@ async function loadProfileAllocationHistoryFromSupabase(targetEmployeeId = getSe
 // The dropdown used to be six literal <option>s in index.html, which silently
 // dropped Finance (a real team with a real person in it): on load the picker
 // fell back to AM, and one Save then moved that person's team for good.
+// @circle-omit Colony-only wiring
 state.departmentOptions = [];
+// @circle-omit-end
 
 async function loadDepartmentOptions() {
   if (!state.supabase || !state.isAuthenticated) return;
@@ -15567,19 +17199,22 @@ async function saveCurrentProfile() {
   const emergPhoneValue = profileEmergencyPhone?.value?.trim() || null;
   const updatePayload = {
     full_name: updatedName,
-    date_of_birth: birthdayValue,
     current_city: cityValue,
     // Derived at write time, stored as its own column — never computed on read.
     // A legacy off-list city resolves to the default rather than blocking the save.
     timezone: timezoneForCity(cityValue),
   };
   if (profilePrivateDetailsFor === targetEmployeeId) {
+    // Date of birth is private too (S6): written only once it has loaded for
+    // the person on screen, so a save can never blank it.
+    updatePayload.date_of_birth = birthdayValue;
     updatePayload.emergency_contact_name = emergNameValue;
     updatePayload.emergency_contact_phone = emergPhoneValue;
     updatePayload.personal_address = document.getElementById('profileAddress')?.value?.trim() || null;
   }
   if (canEditGuarded) {
     updatePayload.job_title = document.getElementById('profileJobTitle')?.value?.trim() || null;
+    updatePayload.joined_on = document.getElementById('profileJoinedOn')?.value || null;
     updatePayload.department_id = departmentId;
     updatePayload.employment_type = selectedEmploymentType;
     updatePayload.capacity_percent = parsedCapacity;
@@ -15593,6 +17228,16 @@ async function saveCurrentProfile() {
     updatePayload.direct_manager_email = profileManagerSelect.value || null;
   }
 
+  // A fractional person with no clients is not "limited to nothing": with no
+  // scope rows Colony treats them as unscoped and they see every client.
+  const scopeBox = document.getElementById('profileClientScope');
+  if (canEditGuarded && employmentIsScoped(selectedEmploymentType) && scopeBox
+      && scopeBox.dataset.employee === String(targetEmployeeId)
+      && !scopeBox.querySelector('[data-profile-client]:checked')) {
+    setProfileSaveNotice('Pick at least one client — with none, a fractional person would see every client.', 'status error');
+    return;
+  }
+
   setProfileSaveNotice('Saving profile...', 'mini-meta');
 
   {
@@ -15600,6 +17245,13 @@ async function saveCurrentProfile() {
     const updateResult = await state.supabase.from('employees').update(updatePayload).eq('id', targetEmployeeId);
     if (updateResult.error) {
       setProfileSaveNotice(`Unable to save profile: ${updateResult.error.message}`, 'status error');
+      return;
+    }
+  }
+  if (canEditGuarded && employmentIsScoped(selectedEmploymentType)) {
+    const scopeResult = await saveProfileClientScope(targetEmployeeId);
+    if (!scopeResult.ok) {
+      setProfileSaveNotice(`Profile saved, but clients could not be updated: ${scopeResult.error}`, 'status error');
       return;
     }
   }
@@ -15626,6 +17278,15 @@ async function saveCurrentProfile() {
         ...(state.employeeProfile || {}),
         ...ownRow
       };
+      // The directory row never carries the private fields, so keep what was
+      // just written — otherwise the "add an emergency contact" reminder would
+      // outlive the save until a reload.
+      if ('emergency_contact_phone' in updatePayload) {
+        state.employeeProfile.emergency_contact_name = updatePayload.emergency_contact_name;
+        state.employeeProfile.emergency_contact_phone = updatePayload.emergency_contact_phone;
+        state.employeeProfile.personal_address = updatePayload.personal_address;
+        loadNotifySignals().catch(console.error);
+      }
       state.role = normalizeAccessLevel(ownRow.access_level || state.role);
     }
   }
@@ -15763,7 +17424,8 @@ async function fillProfilePrivateDetails(employeeId, isSelf) {
   const fields = [
     [profileEmergencyName, 'emergency_contact_name'],
     [profileEmergencyPhone, 'emergency_contact_phone'],
-    [document.getElementById('profileAddress'), 'personal_address']
+    [document.getElementById('profileAddress'), 'personal_address'],
+    [profileBirthday, 'date_of_birth']
   ];
   fields.forEach(([el]) => { if (el) el.value = ''; });
   if (!employeeId || !(isSelf || isLeadershipRole())) return;
@@ -15773,6 +17435,52 @@ async function fillProfilePrivateDetails(employeeId, isSelf) {
   if (!details || onScreenId !== employeeId) return;
   fields.forEach(([el, key]) => { if (el) el.value = details[key] || ''; });
   profilePrivateDetailsFor = employeeId;
+}
+
+// The clients a fractional person is scoped to, as ticks. Shown to leadership
+// only (the wrapper is .leadership-only) and only while the type reads
+// Fractional. Everyone else sees every client, so there is nothing to pick.
+function profileScopeClients() {
+  return (state.clients || [])
+    .filter((c) => c.is_active !== false && !NON_CLIENT_BUCKETS.includes(String(c.name || '').trim().toLowerCase()))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
+function renderProfileClientScope(employeeId, employmentType) {
+  const wrap = document.getElementById('profileClientScopeWrap');
+  const box = document.getElementById('profileClientScope');
+  if (!wrap || !box) return;
+  const show = isLeadershipRole() && employmentIsScoped(employmentType);
+  wrap.classList.toggle('hidden', !show);
+  if (!show) { box.innerHTML = ''; box.dataset.employee = ''; return; }
+  const current = state.clientScopeByEmployee?.get(employeeId) || new Set();
+  box.dataset.employee = employeeId || '';
+  box.innerHTML = profileScopeClients().map((c) =>
+    `<label><input type="checkbox" value="${escapeHtml(c.id)}" data-profile-client${current.has(c.id) ? ' checked' : ''}> ${escapeHtml(c.name)}</label>`
+  ).join('');
+}
+
+// Writes only the difference, so an unchanged list touches nothing.
+async function saveProfileClientScope(employeeId) {
+  const box = document.getElementById('profileClientScope');
+  if (!box || box.dataset.employee !== String(employeeId)) return { ok: true, changed: false };
+  const picked = new Set([...box.querySelectorAll('[data-profile-client]:checked')].map((cb) => cb.value));
+  const current = state.clientScopeByEmployee?.get(employeeId) || new Set();
+  const add = [...picked].filter((id) => !current.has(id));
+  const remove = [...current].filter((id) => !picked.has(id));
+  if (!add.length && !remove.length) return { ok: true, changed: false };
+  if (add.length) {
+    const { error } = await state.supabase.from('employee_client_scope')
+      .insert(add.map((client_id) => ({ employee_id: employeeId, client_id })));
+    if (error) return { ok: false, error: error.message };
+  }
+  if (remove.length) {
+    const { error } = await state.supabase.from('employee_client_scope')
+      .delete().eq('employee_id', employeeId).in('client_id', remove);
+    if (error) return { ok: false, error: error.message };
+  }
+  await loadClientScope();
+  return { ok: true, changed: true };
 }
 
 function setSelectedEmployee(name) {
@@ -15809,13 +17517,27 @@ function setSelectedEmployee(name) {
   const profileMainHeading = document.getElementById('profileMainHeading');
   if (profileEyebrow) profileEyebrow.textContent = isSelf ? 'Self View' : 'Employee Profile';
   if (profileMainHeading) profileMainHeading.textContent = isSelf ? 'My Profile' : displayPersonName(state.currentEmployee, 'Employee');
+  // Your own profile is your details and your pay; utilization, leave and
+  // tasks live in My week and Leave (28 Oct 2026). Leadership looking
+  // at someone else still sees them.
+  document.getElementById('profileWorkSections')?.toggleAttribute('hidden', isSelf);
+  const profileIntro = document.getElementById('profileIntro');
+  if (profileIntro) profileIntro.hidden = isSelf;
+  // Pay follows the profile being drawn: on a direct load the invoices can
+  // arrive before Colony knows who you are (28 Oct 2026).
+  renderProfileInvoicePanel();
+  renderReimbApprovals();
   if (profileMetaLine) {
-    const typeLabel = employmentTypeLabel(profile.employmentType);
+    // "Consultant" is a hiring-only contract type (8 Oct 2026): everyone
+    // else sees full-time or fractional. The edit dropdown keeps it, so saving
+    // a profile never changes the contract.
+    const typeLabel = employmentTypeLabel(profile.employmentType === 'consultant' ? 'full-time' : profile.employmentType);
     const leaveLabel = profile.leaveTrackingEnabled === false ? 'Leave Excluded' : 'Leave Enabled';
     const cityValue = selectedDirectoryEmployee?.current_city || '';
     const cityPill = cityValue ? `<span class="dot">&middot;</span><span class="profile-location-pill">📍 ${escapeHtml(cityValue)}</span>` : '';
     const titleLead = selectedDirectoryEmployee?.job_title ? `<span>${escapeHtml(selectedDirectoryEmployee.job_title)}</span><span class="dot">&middot;</span>` : '';
     profileMetaLine.innerHTML = `${titleLead}<span>${escapeHtml(profile.team)}</span><span class="dot">&middot;</span><span>${escapeHtml(typeLabel)}</span><span class="dot">&middot;</span><span>${escapeHtml(leaveLabel)}</span>${cityPill}`;
+    renderProfileHireLink(selectedDirectoryEmployee?.full_name || targetName).catch(console.error);
   }
   refreshProfileUtilizationSummary();
 
@@ -15828,6 +17550,7 @@ function setSelectedEmployee(name) {
     if (storedTeam) profileTeamSelect.value = storedTeam;
   }
   if (profileEmploymentType) profileEmploymentType.value = profile.employmentType;
+  renderProfileClientScope(selectedDirectoryEmployee?.id || selectedEmployeeId, profileEmploymentType?.value || profile.employmentType);
   if (profileAccessLevel) {
     const selectedAccessLevel = normalizeAccessLevel(
       selectedDirectoryEmployee?.access_level || profile.accessLevel || state.employeeProfile?.access_level || 'employee'
@@ -15861,9 +17584,7 @@ function setSelectedEmployee(name) {
       : Number(profile.capacityPercent);
     profileCapacityInput.value = Number.isFinite(capacity) ? String(capacity) : '100';
   }
-  if (profileBirthday) {
-    profileBirthday.value = selectedDirectoryEmployee?.date_of_birth || '';
-  }
+  // Date of birth is filled by fillProfilePrivateDetails below (S6).
   if (profileCity) {
     const cityOpts = cityOptionsHtml(selectedDirectoryEmployee?.current_city);
     profileCity.innerHTML = cityOpts.html;
@@ -15883,10 +17604,17 @@ function setSelectedEmployee(name) {
     profileJobTitleEl.value = selectedDirectoryEmployee?.job_title || '';
     profileJobTitleEl.readOnly = !isLeadershipRole();
   }
+  const profileJoinedOnEl = document.getElementById('profileJoinedOn');
+  if (profileJoinedOnEl) {
+    profileJoinedOnEl.value = selectedDirectoryEmployee?.joined_on ? String(selectedDirectoryEmployee.joined_on).slice(0, 10) : '';
+    profileJoinedOnEl.disabled = !isLeadershipRole(); // a date picker ignores readOnly
+    profileJoinedOnEl.max = istToday();
+  }
   if (saveProfileBtn) {
     const canSave = state.isAuthenticated && canEditEmployee(selectedDirectoryEmployee || { id: selectedEmployeeId, email: state.session?.user?.email });
     saveProfileBtn.disabled = !canSave;
   }
+  syncProfileOffboardButton();
   // Address/personal data: visible to own profile or leadership
   const personalDataBlock = document.getElementById('personalDataBlock');
   if (personalDataBlock) {
@@ -15970,24 +17698,26 @@ function applyFractionalVisibility() {
   const leaveCenterContent = document.getElementById('leaveCenterContent');
   const fractionalLeaveNotice = document.getElementById('fractionalLeaveNotice');
 
-  if (employeeOnlyMode && (isFractional || leaveTrackingDisabled)) {
-    leaveNavButton?.classList.add('hidden');
-    leaveCenterContent?.classList.add('hidden');
-    fractionalLeaveNotice?.classList.remove('hidden');
-
-    const noticeTitle = fractionalLeaveNotice?.querySelector('h3');
-    const noticeBody = fractionalLeaveNotice?.querySelector('p');
-    if (leaveTrackingDisabled) {
-      if (noticeTitle) noticeTitle.textContent = 'Leave Workflow Disabled';
-      if (noticeBody) noticeBody.textContent = 'Finance leaves are excluded from Agency Colony v1. Leave and holiday modules stay hidden in employee view.';
-    } else {
-      if (noticeTitle) noticeTitle.textContent = 'Leave/Holiday Access Hidden';
-      if (noticeBody) noticeBody.textContent = 'This employee is marked as fractional, so leave policy and leave workflow are not available.';
-    }
-
-    if (getActiveScreenId() === 'leave-center') {
-      activateScreen('daily-tasklist');
-    }
+  // A leave viewer (Blake) whose own leave isn't tracked still gets the
+  // screen for Team balances, without his own balances or the request form.
+  const viewerOnly = employeeOnlyMode && (isFractional || leaveTrackingDisabled) && state.isLeaveViewer === true;
+  // Out of office (4 Nov 2026): the people the leave form is closed to get
+  // the Leave screen with just the out-of-office form, so they can say
+  // they're away and show in Who's out. No balances, no leave form.
+  const oooOnly = employeeOnlyMode && (isFractional || leaveTrackingDisabled);
+  leaveCenterContent?.classList.toggle('leave-viewer-only', viewerOnly);
+  leaveCenterContent?.classList.toggle('leave-ooo-only', oooOnly);
+  document.getElementById('oooForm')?.classList.toggle('hidden', !oooOnly);
+  if (oooOnly) loadMyOutOfOffice().catch(actionFailed);
+  if (viewerOnly) {
+    leaveNavButton?.classList.remove('hidden');
+    leaveCenterContent?.classList.remove('hidden');
+    fractionalLeaveNotice?.classList.add('hidden');
+    document.getElementById('reporteeLeaveSnapshotPanel')?.setAttribute('open', '');
+  } else if (oooOnly) {
+    leaveNavButton?.classList.remove('hidden');
+    leaveCenterContent?.classList.remove('hidden');
+    fractionalLeaveNotice?.classList.add('hidden');
   } else {
     leaveNavButton?.classList.remove('hidden');
     leaveCenterContent?.classList.remove('hidden');
@@ -16014,6 +17744,10 @@ if (profileEmploymentType) {
     setProfileSaveNotice('Unsaved changes. Click Save Profile.', 'status warn');
   });
 }
+
+document.getElementById('profileClientScope')?.addEventListener('change', () => {
+  setProfileSaveNotice('Unsaved changes. Click Save Profile.', 'status warn');
+});
 
 if (profileAccessLevel) {
   profileAccessLevel.addEventListener('change', () => {
@@ -16068,6 +17802,7 @@ if (saveProfileBtn) {
   });
 }
 
+// @circle-omit Colony-only wiring
 document.addEventListener('click', (event) => {
   const link = event.target.closest('.employee-link');
   if (!link) return;
@@ -16077,27 +17812,19 @@ document.addEventListener('click', (event) => {
   setSelectedEmployee(target);
   navigateToScreen('employee-profile');
 });
+// @circle-omit-end
 
 /* ── Invoice System ─────────────────────────────────────────────── */
+// @circle-omit Colony-only wiring
 state.invoices = [];
-state.invoicePendingFiles = [];
+state.payslips = [];
+// @circle-omit-end
 
-// Invoice Center (viewer-only checklist)
+// Invoices (Finance) and Pay (Profile), 28 Oct 2026
 const invoiceTeamChecklist = document.getElementById('invoiceTeamChecklist');
-const invoiceFilterMonth = document.getElementById('invoiceFilterMonth');
 const invoiceNavButton = document.getElementById('invoiceNavButton');
-
-// Profile invoice upload
 const profileInvoicePanel = document.getElementById('profileInvoicePanel');
-const profileInvoiceDropzone = document.getElementById('profileInvoiceDropzone');
-const profileInvoiceFileInput = document.getElementById('profileInvoiceFileInput');
-const profileInvoiceFileLabel = document.getElementById('profileInvoiceFileLabel');
-const profileInvoiceType = document.getElementById('profileInvoiceType');
-const profileInvoiceMonth = document.getElementById('profileInvoiceMonth');
-const profileInvoiceUploadBtn = document.getElementById('profileInvoiceUploadBtn');
 const profileInvoiceNotice = document.getElementById('profileInvoiceNotice');
-const profileInvoiceStatus = document.getElementById('profileInvoiceStatus');
-const profileInvoiceHistory = document.getElementById('profileInvoiceHistory');
 
 function setProfileInvoiceNotice(msg, className) {
   if (!profileInvoiceNotice) return;
@@ -16108,6 +17835,26 @@ function setProfileInvoiceNotice(msg, className) {
 function currentInvoiceMonth() {
   const now = new Date();
   return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+}
+
+// The month Finance's Invoices page opens on. People are paid on the 1st and
+// 5th for the month just gone, so for the first week it opens on that month:
+// on 2 Nov it opened on November, Ruby's October invoice sat one click back,
+// and Finance read her as "Not in" (3 Nov 2026).
+function financeOpeningMonth(now = new Date()) {
+  const d = now.getDate() <= 7 ? new Date(now.getFullYear(), now.getMonth() - 1, 1) : now;
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+// The month an upload files under. An invoice in the first 7 days (IST) is
+// for the month just gone, which is what gets paid on the 1st and 5th
+// (4 Nov 2026). Reimbursements keep the current month. The database
+// allows the same (invoices_insert_own).
+function invoiceFilingMonth(type = 'invoice', now = new Date()) {
+  const ist = new Date(now.getTime() + 5.5 * 3600000);
+  if (type === 'reimbursement' || ist.getUTCDate() > 7) return currentInvoiceMonth();
+  const d = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth() - 1, 1));
+  return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0');
 }
 
 function formatInvoiceMonth(ym) {
@@ -16155,6 +17902,7 @@ function applyBriefsVisibility() {
     if (briefsNav) briefsNav.classList.toggle('hidden', !visible);
     if (briefsScreen) briefsScreen.classList.toggle('hidden', !visible);
   };
+  document.getElementById('staffNewBriefBtn')?.classList.toggle('hidden', !isBriefReviewer());
   if (isBriefReviewer()) { show(true); return; }
   show(false);
   if (!state.supabase || !state.currentEmployeeId) return;
@@ -16163,359 +17911,609 @@ function applyBriefsVisibility() {
     .catch(() => {});
 }
 
-// Invoice Center password gate — one unlock per session
-const INVOICE_PIN_HASH = 'aa645668ba1018e0a7fe1d84993cb3be3f9d01e0ee4ed959b6bc97845e340439';
-let invoiceUnlocked = false;
-
-async function hashPin(pin) {
-  const encoded = new TextEncoder().encode(pin);
-  const buffer = await crypto.subtle.digest('SHA-256', encoded);
-  return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+// ── Finance's second lock (28 Oct 2026) ──
+// Replaces the PIN (its check sat in this page). A 6-digit code goes to the
+// person's own inbox; finance-gate records this browser session as unlocked
+// for 24 hours, and app.finance_unlocked() — what every finance read in the
+// database checks — looks for exactly that. This screen only follows it.
+async function financeUnlocked() {
+  const { data, error } = await state.supabase.rpc('finance_unlocked');
+  return !error && data === true;
 }
 
-async function checkInvoiceAccess() {
-  if (invoiceUnlocked) return true;
-  const pin = await appPrompt('Enter the Invoice Center PIN to continue.', {
-    title: 'Invoice Center',
-    type: 'password',
-    placeholder: 'PIN',
-    okLabel: 'Unlock'
+async function financeGateCall(payload) {
+  const token = state.session?.access_token;
+  const res = await fetch('/.netlify/functions/finance-gate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload)
   });
-  if (!pin) return false;
-  const hash = await hashPin(pin.trim());
-  if (hash === INVOICE_PIN_HASH) {
-    invoiceUnlocked = true;
-    return true;
-  }
-  await appAlert('Incorrect PIN.', { title: 'Invoice Center' });
-  return false;
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
 }
 
+async function sendFinanceCode() {
+  const note = document.getElementById('invoiceGateNote');
+  if (note) note.textContent = 'Sending a code…';
+  try {
+    await financeGateCall({ action: 'send' });
+    if (note) note.textContent = `We've emailed a 6-digit code to ${state.session?.user?.email || 'you'}.`;
+  } catch (err) {
+    if (note) note.textContent = err.message;
+  }
+}
+
+async function openInvoiceCenter() {
+  if (!isInvoiceViewer()) { navigateToScreen('home-feed', { replace: true }); return; }
+  const gate = document.getElementById('invoiceGate');
+  const body = document.getElementById('invoiceBody');
+  if (await financeUnlocked()) {
+    if (gate) gate.hidden = true;
+    if (body) body.hidden = false;
+    await loadInvoices();
+    return;
+  }
+  if (body) body.hidden = true;
+  if (gate) gate.hidden = false;
+  const input = document.getElementById('invoiceGateCode');
+  if (input) { input.value = ''; input.focus(); }
+  sendFinanceCode();
+}
+
+async function verifyFinanceCode() {
+  const input = document.getElementById('invoiceGateCode');
+  const note = document.getElementById('invoiceGateNote');
+  const code = String(input?.value || '').replace(/\D/g, '');
+  if (code.length !== 6) { if (note) note.textContent = 'Enter the 6 digits from the email.'; return; }
+  try {
+    await financeGateCall({ action: 'verify', code });
+    await openInvoiceCenter();
+  } catch (err) {
+    if (note) note.textContent = err.message;
+  }
+}
+
+document.getElementById('invoiceGateOpen')?.addEventListener('click', () => verifyFinanceCode().catch(actionFailed));
+document.getElementById('invoiceGateCode')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') verifyFinanceCode().catch(actionFailed); });
+document.getElementById('invoiceGateResend')?.addEventListener('click', () => sendFinanceCode());
+
+// ── Loading: invoices + salary slips. RLS decides what comes back: your own,
+// or everyone's for Finance behind the second lock. ──
 async function loadInvoices() {
   if (!state.supabase || !state.isAuthenticated) {
     state.invoices = [];
+    state.payslips = [];
     renderInvoiceChecklist();
     renderProfileInvoicePanel();
     return;
   }
-
   applyInvoiceVisibility();
-
-  const response = await state.supabase
-    .from('invoices')
-    .select('id, employee_id, invoice_month, invoice_type, file_name, file_path, file_size_bytes, uploaded_at, notes, employee:employees!invoices_employee_id_fkey(full_name)')
-    .order('uploaded_at', { ascending: false });
-
-  if (response.error) {
-    console.error('Invoice load error:', response.error);
-    return;
-  }
-
-  state.invoices = (response.data || []).map(inv => ({
-    ...inv,
-    employee_name: inv.employee?.full_name || 'Unknown'
-  }));
-
-  if (invoiceFilterMonth && !invoiceFilterMonth.value) {
-    invoiceFilterMonth.value = currentInvoiceMonth();
-  }
-
+  const [invRes, slipRes] = await Promise.all([
+    state.supabase.from('invoices')
+      .select('id, employee_id, invoice_month, invoice_type, file_name, file_path, file_size_bytes, uploaded_at, notes, approval_status, approver_id, decided_at, decision_note, employee:employees!invoices_employee_id_fkey(full_name)')
+      .order('uploaded_at', { ascending: false }),
+    state.supabase.from('payslips').select('id, employee_id, pay_month, file_path, file_name, uploaded_at')
+  ]);
+  if (invRes.error) { console.error('Invoice load error:', invRes.error); return; }
+  state.invoices = (invRes.data || []).map((inv) => ({ ...inv, employee_name: inv.employee?.full_name || 'Unknown' }));
+  state.payslips = slipRes.error ? [] : (slipRes.data || []);
+  if (!state.invoiceMonth) state.invoiceMonth = financeOpeningMonth();
   renderInvoiceChecklist();
   renderProfileInvoicePanel();
+  renderReimbApprovals();
 }
 
-// ── Invoice Center: viewer-only team checklist ──
+const shiftInvoiceMonth = (ym, by) => {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + by, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+const fullMonthName = (ym) => {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+};
+const shortDay = (iso) => new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+// An own upload can be deleted only in the calendar month it was made in
+// (28 Oct 2026); the database enforces the same rule (IST).
+const uploadedThisMonth = (iso) => {
+  const ist = (d) => new Date(new Date(d).getTime() + 5.5 * 3600000).toISOString().slice(0, 7);
+  return ist(iso) === ist(Date.now());
+};
+const fileLink = (bucket, path, label, title) =>
+  `<a href="#" class="pay-file" data-bucket="${bucket}" data-path="${escapeHtml(path)}" title="${escapeHtml(title || label)}">${escapeHtml(label)}</a>`;
+const isFullTime = (emp) => (emp?.employment_type || 'full-time') === 'full-time';
+
+// ── Invoices (Finance) ──
+function invoicePeople() {
+  return (state.employeeDirectory || [])
+    .filter((e) => e.department?.leave_tracking_enabled !== false && e.is_active !== false)
+    .filter((e) => !getInvoiceExcludedEmails().includes(normalizeEmail(e.email || '')))
+    .sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+}
 
 function renderInvoiceChecklist() {
   if (!invoiceTeamChecklist || !isInvoiceViewer()) return;
-
-  const filterMonth = invoiceFilterMonth?.value || currentInvoiceMonth();
-  const employees = state.employeeDirectory
-    .filter(e => e.department?.leave_tracking_enabled !== false)
-    .filter(e => !getInvoiceExcludedEmails().includes(normalizeEmail(e.email || '')))
-    .sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
-
-  const monthInvoices = state.invoices.filter(inv => inv.invoice_month === filterMonth);
-  const uploadsByEmp = {};
-  monthInvoices.forEach(inv => {
-    if (!uploadsByEmp[inv.employee_id]) uploadsByEmp[inv.employee_id] = { invoices: [], reimbursements: [] };
-    if (inv.invoice_type === 'reimbursement') {
-      uploadsByEmp[inv.employee_id].reimbursements.push(inv);
-    } else {
-      uploadsByEmp[inv.employee_id].invoices.push(inv);
-    }
-  });
-
-  const submitted = employees.filter(e => uploadsByEmp[e.id]?.invoices.length).length;
-  const reimbursementCount = employees.filter(e => uploadsByEmp[e.id]?.reimbursements.length).length;
-
-  function renderFileButtons(files, emptyLabel) {
-    if (!files.length) return `<span class="mini-meta">${emptyLabel}</span>`;
-    return files.map(inv => `<button class="ghost invoice-download-btn" data-path="${escapeHtml(inv.file_path)}" type="button" title="${escapeHtml(inv.file_name)}">${escapeHtml(inv.file_name.length > 18 ? inv.file_name.slice(0, 15) + '...' : inv.file_name)}</button>`).join('');
-  }
-
-  invoiceTeamChecklist.innerHTML =
-    `<p class="mini-meta" style="margin-bottom:var(--space-3)">${submitted} of ${employees.length} invoices submitted${reimbursementCount ? `, ${reimbursementCount} reimbursement${reimbursementCount > 1 ? 's' : ''}` : ''} for ${formatInvoiceMonth(filterMonth)}</p>` +
-    `<div class="invoice-checklist-header">
-      <span class="invoice-checklist-name">Name</span>
-      <span class="invoice-checklist-col">Invoice</span>
-      <span class="invoice-checklist-col">Reimbursement</span>
-    </div>` +
-    employees.map(emp => {
-      const empData = uploadsByEmp[emp.id] || { invoices: [], reimbursements: [] };
-      const hasInvoice = empData.invoices.length > 0;
-      return `<div class="invoice-checklist-row">
-        <span class="invoice-checklist-name ${hasInvoice ? 'submitted' : ''}">${escapeHtml(emp.full_name || 'Unknown')}</span>
-        <div class="invoice-checklist-col">${renderFileButtons(empData.invoices, '—')}</div>
-        <div class="invoice-checklist-col">${renderFileButtons(empData.reimbursements, '—')}</div>
-      </div>`;
-    }).join('');
+  const month = state.invoiceMonth || currentInvoiceMonth();
+  const label = document.getElementById('invoiceMonthLabel');
+  if (label) label.textContent = fullMonthName(month);
+  const people = invoicePeople();
+  const monthInv = state.invoices.filter((i) => i.invoice_month === month);
+  // People who don't invoice show only in a month they claimed a reimbursement.
+  const claimers = (state.employeeDirectory || [])
+    .filter((e) => getInvoiceExcludedEmails().includes(normalizeEmail(e.email || '')) && monthInv.some((i) => i.employee_id === e.id));
+  const slips = new Map((state.payslips || []).filter((s) => s.pay_month === month).map((s) => [s.employee_id, s]));
+  const del = (inv) => `<button class="pay-del" type="button" data-id="${inv.id}" data-path="${escapeHtml(inv.file_path)}" title="Delete">×</button>`;
+  const invoicesIn = people.filter((p) => monthInv.some((i) => i.employee_id === p.id && i.invoice_type !== 'reimbursement')).length;
+  const reimbCount = monthInv.filter((i) => i.invoice_type === 'reimbursement').length;
+  const fullTime = people.filter(isFullTime);
+  const counts = document.getElementById('invoiceCounts');
+  if (counts) counts.textContent = `${invoicesIn} of ${people.length} invoices in · ${reimbCount} reimbursement${reimbCount === 1 ? '' : 's'} · slips ${fullTime.filter((p) => slips.has(p.id)).length} of ${fullTime.length}`;
+  invoiceTeamChecklist.innerHTML = [...people, ...claimers].sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '')).map((p) => {
+    const noInvoice = claimers.includes(p);
+    const mine = monthInv.filter((i) => i.employee_id === p.id);
+    const inv = mine.filter((i) => i.invoice_type !== 'reimbursement');
+    const reimb = mine.filter((i) => i.invoice_type === 'reimbursement');
+    const slip = slips.get(p.id);
+    const tag = isFullTime(p) ? '' : `<span class="tag">${escapeHtml(employmentTypeLabel(p.employment_type))}</span>`;
+    return `<tr>
+      <td>${escapeHtml(p.full_name || '')}${tag}</td>
+      <td>${inv.length ? inv.map((i) => `${fileLink('invoices', i.file_path, 'Invoice', i.file_name)}<span class="when">${shortDay(i.uploaded_at)}</span>${del(i)}`).join(' ') : `<span class="dim">${noInvoice ? '—' : 'Not in'}</span>`}</td>
+      <td>${reimb.length ? reimb.map((i) => `${fileLink('invoices', i.file_path, i.notes || 'Reimbursement', i.file_name)}${reimbStatusHtml(i)}${del(i)}`).join(' ') : '<span class="dim">—</span>'}</td>
+      <td>${!isFullTime(p) ? '<span class="dim">Invoices only</span>' : slip ? fileLink('payslips', slip.file_path, 'Salary slip', slip.file_name) : '<span class="dim">—</span>'}</td>
+    </tr>`;
+  }).join('');
 }
 
-// ── Profile: invoice upload panel ──
+document.getElementById('invoicePrevMonth')?.addEventListener('click', () => { state.invoiceMonth = shiftInvoiceMonth(state.invoiceMonth || currentInvoiceMonth(), -1); renderInvoiceChecklist(); });
+document.getElementById('invoiceNextMonth')?.addEventListener('click', () => { state.invoiceMonth = shiftInvoiceMonth(state.invoiceMonth || currentInvoiceMonth(), 1); renderInvoiceChecklist(); });
 
+// ── Salary slips: match each file to a full-time person by the name in its
+// filename, let Finance fix the rest, save, email each person. ──
+function matchPayslipFiles(files, people) {
+  const words = (s) => String(s || '').toLowerCase().replace(/\.[a-z0-9]+$/, '').split(/[^a-z]+/).filter((w) => w.length > 1);
+  return files.map((file) => {
+    const fw = new Set(words(file.name));
+    const full = people.filter((p) => { const n = words(p.full_name); return n.length && n.every((w) => fw.has(w)); });
+    if (full.length === 1) return { file, employeeId: full[0].id };
+    const first = people.filter((p) => fw.has(words(p.full_name)[0]));
+    return { file, employeeId: first.length === 1 ? first[0].id : '' };
+  });
+}
+
+function showPayslipModal(rows, people, month) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'pay-modal-back';
+    const options = (sel) => `<option value="">Choose</option>${people.map((p) => `<option value="${p.id}"${p.id === sel ? ' selected' : ''}>${escapeHtml(p.full_name)}</option>`).join('')}`;
+    overlay.innerHTML = `<div class="pay-modal">
+      <h3>Salary slips · ${escapeHtml(fullMonthName(month))}</h3>
+      <p class="mini-meta">${rows.length} file${rows.length === 1 ? '' : 's'}. Matched by the name in each file. Check, then save.</p>
+      <table class="m-card-table"><thead><tr><th>File</th><th>Person</th></tr></thead><tbody>
+        ${rows.map((r, i) => `<tr><td>${escapeHtml(r.file.name)}</td><td><select data-slip="${i}">${options(r.employeeId)}</select></td></tr>`).join('')}
+      </tbody></table>
+      <div class="pay-modal-actions">
+        <button class="ghost pay-btn" type="button" data-slip-cancel>Cancel</button>
+        <button class="primary pay-btn" type="button" data-slip-save></button>
+      </div>
+      <p class="mini-meta pay-modal-foot">Each person gets an email when you save.</p>
+    </div>`;
+    const save = overlay.querySelector('[data-slip-save]');
+    const picked = () => rows.map((r, i) => ({ ...r, employeeId: overlay.querySelector(`[data-slip="${i}"]`).value }));
+    const refresh = () => {
+      const list = picked();
+      const missing = list.filter((r) => !r.employeeId).length;
+      const ids = list.map((r) => r.employeeId).filter(Boolean);
+      const twice = ids.length !== new Set(ids).size;
+      overlay.querySelectorAll('[data-slip]').forEach((sel) => sel.closest('tr').classList.toggle('row-warn', !sel.value));
+      save.disabled = missing > 0 || twice;
+      save.textContent = missing ? `${missing} to match` : twice ? 'Someone has two slips' : `Save ${list.length}`;
+    };
+    overlay.addEventListener('change', refresh);
+    overlay.addEventListener('click', (e) => {
+      if (e.target.closest('[data-slip-save]') && !save.disabled) { const out = picked(); overlay.remove(); resolve(out); }
+      else if (e.target.closest('[data-slip-cancel]') || isBackdropClick(e, overlay)) { overlay.remove(); resolve(null); }
+    });
+    document.body.appendChild(overlay);
+    refresh();
+  });
+}
+
+async function uploadPayslips(fileList) {
+  const month = state.invoiceMonth || currentInvoiceMonth();
+  const files = [...fileList].filter((f) => /\.pdf$/i.test(f.name));
+  if (!files.length) { appAlert('Choose PDF salary slips.'); return; }
+  const people = invoicePeople().filter(isFullTime);
+  const rows = await showPayslipModal(matchPayslipFiles(files, people), people, month);
+  if (!rows) return;
+  const counts = document.getElementById('invoiceCounts');
+  const savedIds = [];
+  const failed = [];
+  for (const r of rows) {
+    const path = `${r.employeeId}/${month}_${Date.now()}.pdf`;
+    const { error: upErr } = await state.supabase.storage.from('payslips').upload(path, r.file, { upsert: false, contentType: 'application/pdf' });
+    if (upErr) { failed.push(r.file.name); continue; }
+    const old = (state.payslips || []).find((s) => s.employee_id === r.employeeId && s.pay_month === month);
+    const row = { file_path: path, file_name: r.file.name, file_size_bytes: r.file.size, uploaded_by: state.currentEmployeeId };
+    const res = old
+      ? await state.supabase.from('payslips').update({ ...row, uploaded_at: new Date().toISOString() }).eq('id', old.id).select('id').single()
+      : await state.supabase.from('payslips').insert({ ...row, employee_id: r.employeeId, pay_month: month }).select('id').single();
+    if (res.error) { failed.push(r.file.name); await state.supabase.storage.from('payslips').remove([path]); continue; }
+    if (old) await state.supabase.storage.from('payslips').remove([old.file_path]);
+    savedIds.push(res.data.id);
+    if (counts) counts.textContent = `Saving ${savedIds.length} of ${rows.length}…`;
+  }
+  if (savedIds.length) {
+    const token = state.session?.access_token;
+    await fetch('/.netlify/functions/payslip-notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ ids: savedIds })
+    }).catch((e) => console.error('Slip emails failed:', e));
+  }
+  await loadInvoices();
+  if (failed.length) appAlert(`Couldn't save: ${failed.join(', ')}`);
+}
+
+document.getElementById('payslipFilesInput')?.addEventListener('change', (e) => {
+  const files = e.target.files;
+  if (files?.length) uploadPayslips(files).catch((err) => appAlert(err.message));
+  e.target.value = '';
+});
+
+// ── Download all: the month's invoices, reimbursements and slips as one zip.
+// Stored (uncompressed) zip — PDFs and images barely compress anyway. ──
+function crc32(bytes) {
+  let c, crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    c = (crc ^ bytes[i]) & 0xFF;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xEDB88320 : c >>> 1;
+    crc = (crc >>> 8) ^ c;
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function buildZip(entries) {
+  const enc = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  entries.forEach(({ name, data }) => {
+    const nameBytes = enc.encode(name);
+    const crc = crc32(data);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0x0800, true);
+    local.setUint32(14, crc, true); local.setUint32(18, data.length, true); local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    parts.push(new Uint8Array(local.buffer), nameBytes, data);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0x0800, true);
+    cd.setUint32(16, crc, true); cd.setUint32(20, data.length, true); cd.setUint32(24, data.length, true);
+    cd.setUint16(28, nameBytes.length, true); cd.setUint32(42, offset, true);
+    central.push(new Uint8Array(cd.buffer), nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  });
+  const cdSize = central.reduce((n, p) => n + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+
+async function downloadMonthZip() {
+  const month = state.invoiceMonth || currentInvoiceMonth();
+  const btn = document.getElementById('invoiceDownloadAll');
+  const names = new Map((state.employeeDirectory || []).map((e) => [e.id, e.full_name || 'Unknown']));
+  const items = [
+    ...state.invoices.filter((i) => i.invoice_month === month).map((i) => ({ bucket: 'invoices', path: i.file_path, folder: i.invoice_type === 'reimbursement' ? 'Reimbursements' : 'Invoices', who: names.get(i.employee_id) || i.employee_name, file: i.file_name })),
+    ...(state.payslips || []).filter((s) => s.pay_month === month).map((s) => ({ bucket: 'payslips', path: s.file_path, folder: 'Salary slips', who: names.get(s.employee_id), file: s.file_name }))
+  ];
+  if (!items.length) { appAlert(`Nothing for ${fullMonthName(month)} yet.`); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Preparing…'; }
+  try {
+    const used = new Set();
+    const entries = [];
+    for (const it of items) {
+      const { data, error } = await state.supabase.storage.from(it.bucket).download(it.path);
+      if (error || !data) continue;
+      let name = `${it.folder}/${String(it.who || 'Unknown').replace(/[\\/:*?"<>|]/g, '')} - ${String(it.file).replace(/[\\/]/g, '_')}`;
+      while (used.has(name)) name = name.replace(/(\.[^.]+)?$/, ' (2)$1');
+      used.add(name);
+      entries.push({ name, data: new Uint8Array(await data.arrayBuffer()) });
+    }
+    const url = URL.createObjectURL(buildZip(entries));
+    const a = document.createElement('a');
+    a.href = url; a.download = `Your Agency ${fullMonthName(month)}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Download all'; }
+  }
+}
+
+document.getElementById('invoiceDownloadAll')?.addEventListener('click', () => downloadMonthZip().catch((e) => appAlert(e.message)));
+
+// ── Profile: Pay (your own invoices, reimbursements and salary slips) ──
 function renderProfileInvoicePanel() {
   if (!profileInvoicePanel) return;
-
-  // Only show on own profile for non-finance, non-excluded employees
-  const isOwnProfile = state.selectedEmployeeId === state.currentEmployeeId || !state.selectedEmployeeId;
-  const finance = isFinanceUser();
-  const excludedFromInvoice = getInvoiceExcludedEmails().includes(normalizeEmail(state.session?.user?.email || ''));
-  if (!isOwnProfile || finance || excludedFromInvoice || !state.isAuthenticated) {
+  const isOwnProfile = viewingOwnProfile();
+  const excluded = getInvoiceExcludedEmails().includes(normalizeEmail(state.session?.user?.email || ''));
+  const empId = state.currentEmployeeId;
+  const mySlips = (state.payslips || []).filter((s) => s.employee_id === empId);
+  // Finance never uploads here. People who don't invoice (the
+  // invoice_excluded_emails list) still claim reimbursements (29 Oct).
+  if (!isOwnProfile || !state.isAuthenticated || (isFinanceUser() && !mySlips.length)) {
     profileInvoicePanel.style.display = 'none';
     return;
   }
   profileInvoicePanel.style.display = '';
+  const me = (state.employeeDirectory || []).find((e) => e.id === empId) || {};
+  const fullTime = isFullTime(me);
+  const uploads = !isFinanceUser();
+  const invoices = uploads && !excluded;
+  profileInvoicePanel.querySelector('.pay-actions')?.toggleAttribute('hidden', !uploads);
+  profileInvoicePanel.querySelector('.pay-hint')?.toggleAttribute('hidden', !uploads);
+  profileInvoicePanel.querySelector('.pay-foot')?.toggleAttribute('hidden', !uploads);
+  document.getElementById('payInvoiceBtn')?.toggleAttribute('hidden', !invoices);
+  profileInvoicePanel.querySelectorAll('.pay-slip-col').forEach((n) => n.toggleAttribute('hidden', !fullTime));
 
-  if (profileInvoiceMonth && !profileInvoiceMonth.value) {
-    profileInvoiceMonth.value = currentInvoiceMonth();
+  // In the first week this is last month: the invoice being paid now.
+  const cur = invoices ? invoiceFilingMonth('invoice') : currentInvoiceMonth();
+  const late = cur !== currentInvoiceMonth();
+  const mine = state.invoices.filter((i) => i.employee_id === empId);
+  const curInvoice = mine.some((i) => i.invoice_month === cur && i.invoice_type !== 'reimbursement');
+  const [y, m] = cur.split('-').map(Number);
+  const lastDay = new Date(y, m, 0).getDate();
+  const title = document.getElementById('payMonthTitle');
+  const status = document.getElementById('payMonthStatus');
+  if (title) title.textContent = new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'long' });
+  if (status) {
+    status.textContent = !uploads ? 'Your salary slips' : !invoices ? 'Reimbursements' : curInvoice
+      ? 'Invoice in for this month'
+      : late
+        ? `Invoice not in yet · upload it by the 7th and it files under ${new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'long' })}`
+        : `Invoice due by ${lastDay} ${new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'short' })} · not in yet`;
   }
 
-  const empId = state.currentEmployeeId;
-  const myInvoices = state.invoices.filter(inv => inv.employee_id === empId);
-
-  // Current month status
-  const curMonth = currentInvoiceMonth();
-  const thisMonthUploads = myInvoices.filter(inv => inv.invoice_month === curMonth);
-  if (profileInvoiceStatus) {
-    if (thisMonthUploads.length) {
-      profileInvoiceStatus.textContent = `${thisMonthUploads.length} file${thisMonthUploads.length > 1 ? 's' : ''} uploaded for ${formatInvoiceMonth(curMonth)}`;
-      profileInvoiceStatus.classList.remove('warn');
-      profileInvoiceStatus.classList.add('status');
-    } else {
-      profileInvoiceStatus.textContent = `No invoice uploaded for ${formatInvoiceMonth(curMonth)} yet`;
-      profileInvoiceStatus.classList.remove('status');
-      profileInvoiceStatus.classList.add('warn');
-    }
-  }
-
-  // Upload history
-  if (profileInvoiceHistory) {
-    if (!myInvoices.length) {
-      profileInvoiceHistory.innerHTML = '';
-    } else {
-      const sorted = [...myInvoices].sort((a, b) => b.invoice_month.localeCompare(a.invoice_month) || new Date(b.uploaded_at) - new Date(a.uploaded_at));
-      profileInvoiceHistory.innerHTML = sorted.map(inv => renderInvoiceRow(inv)).join('');
-    }
-  }
+  const months = [...new Set([cur, ...mine.map((i) => i.invoice_month), ...mySlips.map((s) => s.pay_month)])]
+    .filter((ym) => uploads || mySlips.some((s) => s.pay_month === ym))
+    .sort((a, b) => b.localeCompare(a)).slice(0, 12);
+  const delBtn = (i) => uploadedThisMonth(i.uploaded_at)
+    ? `<button class="pay-del" type="button" data-id="${i.id}" data-path="${escapeHtml(i.file_path)}" title="Delete">Delete</button>` : '';
+  profileInvoicePanel.querySelectorAll('.pay-inv-col').forEach((n) => n.toggleAttribute('hidden', !invoices));
+  const body = document.getElementById('payHistoryBody');
+  if (!body) return;
+  body.innerHTML = months.map((ym) => {
+    const inv = mine.filter((i) => i.invoice_month === ym && i.invoice_type !== 'reimbursement');
+    const reimb = mine.filter((i) => i.invoice_month === ym && i.invoice_type === 'reimbursement');
+    const slip = mySlips.find((s) => s.pay_month === ym);
+    const slipCell = !fullTime ? '' : `<td class="pay-slip-col">${slip ? fileLink('payslips', slip.file_path, 'Download', slip.file_name)
+      : ym === cur ? '<span class="dim">Arrives after the 1st</span>' : '<span class="dim">—</span>'}</td>`;
+    return `<tr>
+      <td>${escapeHtml(new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: ym.slice(0, 4) === String(y) ? undefined : 'numeric' }))}</td>
+      ${invoices ? `<td>${inv.length ? inv.map((i) => `${fileLink('invoices', i.file_path, 'Invoice', i.file_name)}<span class="when">${shortDay(i.uploaded_at)}</span>${delBtn(i)}`).join(' ') : '<span class="dim">—</span>'}</td>` : ''}
+      <td>${reimb.length ? reimb.map((i) => `${fileLink('invoices', i.file_path, i.notes || 'Reimbursement', i.file_name)}${reimbStatusHtml(i, { own: true })}${delBtn(i)}`).join(' ') : '<span class="dim">—</span>'}</td>
+      ${slipCell}
+    </tr>`;
+  }).join('');
 }
 
-function renderInvoiceRow(inv) {
-  const dateStr = new Date(inv.uploaded_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-  const sizeStr = formatFileSize(inv.file_size_bytes);
-  const typeLabel = inv.invoice_type === 'reimbursement' ? 'Reimbursement' : 'Invoice';
-  return `<div class="invoice-row">
-    <span class="invoice-row-name">${escapeHtml(inv.file_name)}</span>
-    <span class="invoice-row-meta">${typeLabel}</span>
-    <span class="invoice-row-meta">${formatInvoiceMonth(inv.invoice_month)}</span>
-    <span class="invoice-row-meta">${dateStr}</span>
-    <span class="invoice-row-meta">${sizeStr}</span>
-    <span class="invoice-row-actions">
-      <button class="ghost invoice-download-btn" data-path="${escapeHtml(inv.file_path)}" type="button">Download</button>
-      <button class="ghost invoice-delete-btn" data-id="${inv.id}" data-path="${escapeHtml(inv.file_path)}" type="button" style="color:var(--bad)">Delete</button>
-    </span>
-  </div>`;
+// ── Reimbursement approvals (5 Nov 2026) ──
+// A reimbursement waits for the person's manager (the database picks the
+// approver on upload and is the only thing that can change its status);
+// invoices don't. The person, the manager and Finance all see where it is.
+// The profile screen shows whoever is selected (leadership can open anyone's).
+// It used to compare state.selectedEmployeeId, which nothing sets, so Pay
+// showed on every profile a leader opened (5 Nov 2026).
+function viewingOwnProfile() {
+  const shown = getEmployeeIdByName(state.currentEmployee);
+  return !shown || shown === state.currentEmployeeId;
 }
 
-function renderInvoiceCard(inv, showDelete) {
-  const uploaded = new Date(inv.uploaded_at);
-  const dateStr = uploaded.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-  const sizeStr = formatFileSize(inv.file_size_bytes);
-  const nameLabel = showDelete ? '' : `<strong>${escapeHtml(inv.employee_name)}</strong> &middot; `;
-  const typeLabel = inv.invoice_type === 'reimbursement' ? 'Reimbursement &middot; ' : '';
-  const notesHtml = inv.notes ? ` &middot; ${escapeHtml(inv.notes)}` : '';
-
-  return `<div class="invoice-card">
-    <div class="invoice-info">
-      <div class="invoice-file-name">${escapeHtml(inv.file_name)}</div>
-      <div class="invoice-meta">${nameLabel}${typeLabel}${dateStr}${sizeStr ? ' &middot; ' + sizeStr : ''}${notesHtml}</div>
-    </div>
-    <div class="invoice-actions">
-      <button class="ghost invoice-download-btn" data-path="${escapeHtml(inv.file_path)}" type="button">Download</button>
-      ${showDelete ? `<button class="ghost invoice-delete-btn" data-id="${inv.id}" data-path="${escapeHtml(inv.file_path)}" type="button" style="color:var(--bad)">Delete</button>` : ''}
-    </div>
-  </div>`;
+function reimbApproverName(i) {
+  const e = (state.employeeDirectory || []).find((x) => x.id === i?.approver_id);
+  return displayPersonName(e?.full_name, 'their manager').split(' ')[0];
 }
 
-function handleInvoiceFileSelect(files) {
-  const MAX_SIZE = 10 * 1024 * 1024;
-  const allowed = ['.pdf','.png','.jpg','.jpeg','.doc','.docx','.xls','.xlsx'];
-
-  for (const file of files) {
-    if (file.size > MAX_SIZE) {
-      setProfileInvoiceNotice(`${file.name} exceeds 10 MB limit.`, 'mini-meta status error');
-      continue;
-    }
-    const ext = '.' + file.name.split('.').pop().toLowerCase();
-    if (!allowed.includes(ext)) {
-      setProfileInvoiceNotice(`${file.name}: unsupported file type.`, 'mini-meta status error');
-      continue;
-    }
-    state.invoicePendingFiles.push(file);
+function reimbStatusHtml(i, { own = false } = {}) {
+  if (i.invoice_type !== 'reimbursement' || !i.approval_status) return '';
+  if (i.approval_status === 'pending') {
+    return `<span class="reimb-status is-waiting">${own ? `Waiting for ${escapeHtml(reimbApproverName(i))}` : 'Waiting for approval'}</span>`;
   }
-  renderPendingInvoiceFiles();
+  if (i.approval_status === 'sent_back') {
+    return `<span class="reimb-status is-back" title="${escapeHtml(i.decision_note || '')}">Sent back${i.decision_note ? `: ${escapeHtml(i.decision_note)}` : ''}</span>`;
+  }
+  // Approved before approvals existed has no decision date: no badge for those.
+  return i.decided_at && i.approver_id !== i.employee_id ? `<span class="reimb-status is-ok">Approved by ${escapeHtml(reimbApproverName(i))}</span>` : '';
 }
 
-function renderPendingInvoiceFiles() {
-  if (!state.invoicePendingFiles.length) {
-    if (profileInvoiceFileLabel) profileInvoiceFileLabel.textContent = 'Choose file';
-    if (profileInvoiceUploadBtn) profileInvoiceUploadBtn.disabled = true;
-    return;
-  }
-  if (profileInvoiceUploadBtn) profileInvoiceUploadBtn.disabled = false;
-  const names = state.invoicePendingFiles.map(f => f.name);
-  if (profileInvoiceFileLabel) {
-    profileInvoiceFileLabel.textContent = names.length === 1 ? names[0] : `${names.length} files`;
-  }
+function reimbWaitingForMe() {
+  const me = state.currentEmployeeId;
+  return (state.invoices || []).filter((i) => i.invoice_type === 'reimbursement' && i.approval_status === 'pending'
+    && i.approver_id === me && i.employee_id !== me)
+    .sort((a, b) => String(a.uploaded_at).localeCompare(String(b.uploaded_at)));
 }
 
-async function uploadProfileInvoices() {
-  if (!state.invoicePendingFiles.length) return;
-  const month = profileInvoiceMonth?.value;
-  if (!month) {
-    setProfileInvoiceNotice('Please select a month.', 'mini-meta status error');
-    return;
-  }
-  const invoiceType = profileInvoiceType?.value || 'invoice';
-
-  const empId = state.currentEmployeeId;
-  if (!empId) {
-    setProfileInvoiceNotice('Employee profile not loaded.', 'mini-meta status error');
-    return;
-  }
-
-  if (profileInvoiceUploadBtn) profileInvoiceUploadBtn.disabled = true;
-  setProfileInvoiceNotice('Uploading...', 'mini-meta');
-
-  let uploaded = 0;
-
-  for (const file of state.invoicePendingFiles) {
-    const filePath = `${empId}/${month}/${Date.now()}_${file.name}`;
-
-    const { error: storageError } = await state.supabase.storage
-      .from('invoices')
-      .upload(filePath, file, { upsert: false });
-
-    if (storageError) {
-      console.error('Storage upload error:', storageError);
-      setProfileInvoiceNotice(`Upload failed for ${file.name}: ${storageError.message}`, 'mini-meta status error');
-      continue;
-    }
-
-    const { error: dbError } = await state.supabase
-      .from('invoices')
-      .insert({
-        employee_id: empId,
-        invoice_month: month,
-        invoice_type: invoiceType,
-        file_name: file.name,
-        file_path: filePath,
-        file_size_bytes: file.size
-      });
-
-    if (dbError) {
-      console.error('Invoice DB insert error:', dbError);
-      setProfileInvoiceNotice(`Saved file but failed to record ${file.name}: ${dbError.message}`, 'mini-meta status error');
-      continue;
-    }
-    uploaded++;
-  }
-
-  state.invoicePendingFiles = [];
-  renderPendingInvoiceFiles();
-  if (uploaded > 0) {
-    setProfileInvoiceNotice(`${uploaded} file${uploaded > 1 ? 's' : ''} uploaded successfully.`, 'mini-meta status');
-  }
-  loadInvoices().catch(console.error);
+function renderReimbApprovals() {
+  const panel = document.getElementById('reimbApprovalsPanel');
+  const body = document.getElementById('reimbApprovalsBody');
+  if (!panel || !body) return;
+  const isOwnProfile = viewingOwnProfile();
+  const waiting = isOwnProfile ? reimbWaitingForMe() : [];
+  panel.style.display = waiting.length ? '' : 'none';
+  const count = document.getElementById('reimbApprovalsCount');
+  if (count) count.textContent = waiting.length === 1 ? '1 waiting' : `${waiting.length} waiting`;
+  body.innerHTML = waiting.map((i) => `<tr data-reimb-id="${i.id}">
+      <td data-label="Who"><strong>${escapeHtml(i.employee_name || '')}</strong></td>
+      <td data-label="What">${fileLink('invoices', i.file_path, i.notes || 'Reimbursement', i.file_name)}</td>
+      <td data-label="When">${escapeHtml(fullMonthName(i.invoice_month))} · added ${escapeHtml(shortDay(i.uploaded_at))}</td>
+      <td data-label="" class="leave-row-actions">
+        <button class="primary small" type="button" data-reimb-action="approve">Approve</button>
+        <button class="ghost small" type="button" data-reimb-action="back">Send back</button>
+      </td>
+    </tr>`).join('');
 }
 
-async function downloadInvoice(filePath) {
-  const { data, error } = await state.supabase.storage
-    .from('invoices')
-    .createSignedUrl(filePath, 300);
-
+async function decideReimbursement(btn) {
+  const row = btn.closest('[data-reimb-id]');
+  if (!row) return;
+  const approve = btn.dataset.reimbAction === 'approve';
+  let note = null;
+  if (!approve) {
+    note = await appPrompt('What should they fix? They will see this note.', { title: 'Send back', placeholder: 'e.g. Receipt is missing the amount', okLabel: 'Send back' });
+    if (note === null) return;
+    note = String(note).trim();
+    if (!note) { await appAlert('Add a short note so they know what to fix.', { title: 'Note needed' }); return; }
+  }
+  row.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  const { error } = await state.supabase.rpc('decide_reimbursement', { p_id: row.dataset.reimbId, p_approve: approve, p_note: note });
   if (error) {
-    console.error('Download URL error:', error);
+    row.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    await notSaved(approve ? 'Not approved' : 'Not sent back', error);
     return;
   }
-  window.open(data.signedUrl, '_blank');
+  await loadInvoices();
+  loadNotifySignals().catch(console.error);
 }
 
-async function deleteInvoice(invoiceId, filePath) {
-  if (!await appConfirm('Delete this invoice? This cannot be undone.', { title: 'Delete invoice', confirmLabel: 'Delete', danger: true })) return;
+// Receipts are often phone photos or scans, so 20 MB and HEIC/WebP (29 Oct).
+const PAY_MAX_BYTES = 20 * 1024 * 1024;
+const PAY_TYPES = ['.pdf', '.png', '.jpg', '.jpeg', '.heic', '.heif', '.webp', '.doc', '.docx', '.xls', '.xlsx'];
 
-  const { error: storageErr } = await state.supabase.storage
-    .from('invoices')
-    .remove([filePath]);
-
-  if (storageErr) console.error('Storage delete error:', storageErr);
-
-  const { error: dbErr } = await state.supabase
-    .from('invoices')
-    .delete()
-    .eq('id', invoiceId);
-
-  if (dbErr) {
-    console.error('Invoice delete error:', dbErr);
-    return;
-  }
-
-  loadInvoices().catch(console.error);
+// Problems stay on screen, one line per file, until the next try.
+function showPayErrors(lines) {
+  const box = document.getElementById('payErrors');
+  if (!box) return;
+  box.innerHTML = lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('');
+  box.hidden = !lines.length;
 }
 
-// Profile invoice upload events
-if (profileInvoiceFileInput) {
-  profileInvoiceFileInput.addEventListener('change', () => {
-    if (profileInvoiceFileInput.files.length) {
-      handleInvoiceFileSelect(profileInvoiceFileInput.files);
-      profileInvoiceFileInput.value = '';
-    }
-  });
+// While files go up: the clicked button says "Uploading 1 of 2…" with a
+// spinner, both buttons are off, and leaving the page asks first (29 Oct).
+let payUploading = false;
+function setPayBusy(input, text) {
+  const actions = profileInvoicePanel?.querySelector('.pay-actions');
+  const label = input?.closest('label');
+  payUploading = Boolean(text);
+  actions?.classList.toggle('is-busy', payUploading);
+  actions?.querySelectorAll('input[type=file]').forEach((i) => { i.disabled = payUploading; });
+  if (!label) return;
+  const textNode = [...label.childNodes].find((n) => n.nodeType === 3 && n.nodeValue.trim());
+  if (!textNode) return;
+  if (!label.dataset.label) label.dataset.label = textNode.nodeValue;
+  textNode.nodeValue = text || label.dataset.label;
+  label.classList.toggle('is-uploading', payUploading);
 }
-
-if (profileInvoiceUploadBtn) {
-  profileInvoiceUploadBtn.addEventListener('click', () => {
-    uploadProfileInvoices().catch(console.error);
-  });
-}
-
-// Download & delete delegation (global)
-document.addEventListener('click', (e) => {
-  const dlBtn = e.target.closest('.invoice-download-btn');
-  if (dlBtn) {
-    downloadInvoice(dlBtn.dataset.path).catch(console.error);
-    return;
-  }
-  const delBtn = e.target.closest('.invoice-delete-btn');
-  if (delBtn) {
-    deleteInvoice(delBtn.dataset.id, delBtn.dataset.path).catch(console.error);
-  }
+window.addEventListener('beforeunload', (e) => {
+  if (!payUploading) return;
+  e.preventDefault();
+  e.returnValue = '';
 });
 
-// Invoice Center filter
-if (invoiceFilterMonth) {
-  invoiceFilterMonth.addEventListener('change', () => renderInvoiceChecklist());
+async function uploadPayFiles(fileList, invoiceType, input) {
+  // Copy the files first: the input is cleared as soon as this returns to the
+  // change handler, and a live FileList read after the "What is it for?"
+  // prompt is empty. That silently dropped every reimbursement (29 Oct).
+  const files = [...fileList];
+  if (!files.length) { showPayErrors(['No file was picked. Try again.']); return; }
+  showPayErrors([]);
+  const empId = state.currentEmployeeId;
+  if (!empId) { showPayErrors(['Your profile hasn’t finished loading. Refresh the page and try again.']); return; }
+  const month = invoiceFilingMonth(invoiceType);
+  let notes = null;
+  if (invoiceType === 'reimbursement') {
+    notes = await appPrompt('What is it for?', { title: 'Reimbursement', placeholder: 'e.g. Cab to client visit', okLabel: 'Upload' });
+    if (notes === null) return;
+    notes = String(notes).replace(/\s+/g, ' ').trim().slice(0, 80) || null;
+  }
+  const done = [];
+  const problems = [];
+  try {
+  for (const [n, file] of files.entries()) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    const mb = (file.size / 1048576).toFixed(1);
+    if (file.size > PAY_MAX_BYTES) { problems.push(`${file.name} is ${mb} MB. The limit is 20 MB: compress it or save it smaller.`); continue; }
+    if (!PAY_TYPES.includes(ext)) { problems.push(`${file.name} wasn’t uploaded: Colony takes PDF, PNG, JPG, HEIC, WebP, Word or Excel.`); continue; }
+    setPayBusy(input, files.length > 1 ? `Uploading ${n + 1} of ${files.length}…` : 'Uploading…');
+    setProfileInvoiceNotice('', 'mini-meta');
+    // Storage keys refuse some characters (macOS screenshots carry a hidden
+    // narrow space before "AM"), so the stored name is made safe; the real
+    // name is kept in file_name.
+    const safeName = file.name.normalize('NFKD').replace(/[^\w.\-() ]+/g, '_');
+    const filePath = `${empId}/${month}/${Date.now()}_${safeName}`;
+    let storageError;
+    try { ({ error: storageError } = await state.supabase.storage.from('invoices').upload(filePath, file, { upsert: false })); }
+    catch (e) { storageError = e; }
+    if (storageError) { problems.push(`${file.name} couldn’t be uploaded (${storageError.message || 'network error'}). Check your connection and try again.`); continue; }
+    const { error: dbError } = await state.supabase.from('invoices').insert({
+      employee_id: empId, invoice_month: month, invoice_type: invoiceType,
+      file_name: file.name, file_path: filePath, file_size_bytes: file.size, notes
+    });
+    if (dbError) {
+      await state.supabase.storage.from('invoices').remove([filePath]);
+      problems.push(`${file.name} couldn’t be saved (${dbError.message}). Try again, or send it to Finance.`);
+      continue;
+    }
+    done.push({ path: filePath, label: notes || file.name });
+  }
+  } finally {
+    setPayBusy(input, '');
+  }
+  setProfileInvoiceNotice(done.length ? `Uploaded: ${done.map((d) => d.label).join(', ')}` : '', 'mini-meta pay-ok');
+  showPayErrors(problems);
+  await loadInvoices();
+  // A reimbursement goes to the manager first: say who.
+  const waitingOn = [...new Set(done.map((d) => state.invoices.find((i) => i.file_path === d.path))
+    .filter((i) => i?.approval_status === 'pending').map((i) => reimbApproverName(i)))];
+  if (waitingOn.length) setProfileInvoiceNotice(`Uploaded: ${done.map((d) => d.label).join(', ')} · sent to ${waitingOn.join(' and ')} to approve`, 'mini-meta pay-ok');
+  // Point at where each new file landed.
+  for (const d of done) {
+    const link = [...(profileInvoicePanel?.querySelectorAll('.pay-file') || [])].find((a) => a.dataset.path === d.path);
+    link?.closest('td')?.classList.add('pay-just');
+  }
 }
+
+function payUploadCrashed(e) {
+  console.error(e);
+  setProfileInvoiceNotice('', 'mini-meta');
+  showPayErrors([`Something went wrong (${e?.message || 'unknown error'}). Refresh the page and try again; if it keeps happening, tell Alex.`]);
+}
+
+document.getElementById('payInvoiceInput')?.addEventListener('change', (e) => {
+  if (e.target.files?.length) uploadPayFiles([...e.target.files], 'invoice', e.target).catch(payUploadCrashed);
+  e.target.value = '';
+});
+document.getElementById('payReimbursementInput')?.addEventListener('change', (e) => {
+  if (e.target.files?.length) uploadPayFiles([...e.target.files], 'reimbursement', e.target).catch(payUploadCrashed);
+  e.target.value = '';
+});
+
+// Short-lived links: a copied link stops working after a minute.
+async function openPayFile(bucket, path) {
+  const { data, error } = await state.supabase.storage.from(bucket).createSignedUrl(path, 60);
+  if (error) { appAlert('That file can’t be opened.'); return; }
+  window.open(data.signedUrl, '_blank', 'noopener');
+}
+
+// Delete the row first: if the database refuses (a past month), the file stays.
+async function deletePayUpload(invoiceId, filePath) {
+  if (!await appConfirm('Delete this upload?', { title: 'Delete', confirmLabel: 'Delete', danger: true })) return;
+  const { data, error } = await state.supabase.from('invoices').delete().eq('id', invoiceId).select('id');
+  if (error || !data?.length) { appAlert('This can’t be deleted any more. Ask Finance.'); return; }
+  await state.supabase.storage.from('invoices').remove([filePath]);
+  await loadInvoices();
+}
+
+// @circle-omit Colony-only wiring
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('.pay-file');
+  if (link) { e.preventDefault(); openPayFile(link.dataset.bucket, link.dataset.path).catch(actionFailed); return; }
+  const del = e.target.closest('.pay-del');
+  if (del) deletePayUpload(del.dataset.id, del.dataset.path).catch(actionFailed);
+  const decide = e.target.closest('[data-reimb-action]');
+  if (decide) decideReimbursement(decide).catch(actionFailed);
+});
+// @circle-omit-end
 
 // ══════════════════════════════════════════════════════════════════════
 // ── Deal Flow / BD Pipeline ─────────────────────────────────────────
@@ -16866,7 +18864,6 @@ function initDealDragAndDrop() {
 async function updateDealStage(dealId, newStage) {
   const deal = state.deals.find(d => d.id === dealId);
   if (!deal || deal.stage === newStage) return;
-  const oldStage = deal.stage;
 
   // If moving to a closing stage, confirm
   if (newStage === 'contracted' || newStage === 'closedlost' || newStage === 'stalled') {
@@ -16879,32 +18876,12 @@ async function updateDealStage(dealId, newStage) {
     .update({ stage: newStage })
     .eq('id', dealId);
   if (error) {
-    console.error('Stage update failed:', error.message);
+    notSaved('Deal stage not changed', error);
     return;
   }
 
-  // Log stage change
-  const histInsert = await state.supabase.from('deal_stage_history').insert({
-    deal_id: dealId,
-    stage: newStage,
-    changed_by: state.currentEmployeeId
-  });
-  if (histInsert.error) console.error('Stage history insert failed:', histInsert.error.message);
-
-  // Close previous stage history entry
-  const { data: prevEntries } = await state.supabase
-    .from('deal_stage_history')
-    .select('id')
-    .eq('deal_id', dealId)
-    .eq('stage', oldStage)
-    .is('exited_at', null);
-  if (prevEntries?.length) {
-    const exitRes = await state.supabase
-      .from('deal_stage_history')
-      .update({ exited_at: new Date().toISOString() })
-      .in('id', prevEntries.map(e => e.id));
-    if (exitRes.error) console.error('Stage history exit failed:', exitRes.error.message);
-  }
+  // Stage history is written by the database (trg_deals_stage_history,
+  // 202609300002), so a change made anywhere is recorded. Do not insert here.
 
   await loadDealsFromSupabase();
 
@@ -16948,14 +18925,30 @@ async function createClientFromDeal(deal) {
 }
 
 async function linkDealToExistingClient(deal) {
-  const activeClients = state.clients.filter(c => c.is_active);
+  // Archived clients listed after active ones (30 Sep 2026): a won deal for a
+  // returning client belongs to that client, not a new duplicate row.
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const candidates = [
+    ...state.clients.filter(c => c.is_active).sort(byName),
+    ...state.clients.filter(c => !c.is_active).sort(byName)
+  ];
   const chosenId = await appChoice('Choose the client to link this deal to:', {
     title: 'Link deal to client',
-    choices: activeClients.map(c => ({ label: c.name, value: c.id }))
+    choices: candidates.map(c => ({ label: c.is_active ? c.name : `${c.name} (archived)`, value: c.id }))
   });
   if (!chosenId) return;
-  const match = activeClients.find(c => c.id === chosenId);
+  const match = candidates.find(c => c.id === chosenId);
   if (!match) return;
+  // A won deal is live work: offer to bring an archived client back.
+  if (!match.is_active && canArchiveClient(match)) {
+    const revive = await appConfirm(`${match.name} is archived. Unarchive it now that this deal is won?`, {
+      title: 'Link deal to client', confirmLabel: 'Unarchive', cancelLabel: 'Keep archived'
+    });
+    if (revive) {
+      try { await unarchiveClientById(match.id); }
+      catch (err) { await appAlert('Linked, but could not unarchive: ' + err.message, { title: 'Deal Flow' }); }
+    }
+  }
   const linkRes2 = await state.supabase.from('deals').update({ client_id: match.id }).eq('id', deal.id);
   if (linkRes2.error) { await appAlert('Failed to link deal: ' + linkRes2.error.message, { title: 'Deal Flow' }); }
   else { await appAlert(`Deal linked to "${match.name}"!`, { title: 'Deal Flow' }); }
@@ -17016,7 +19009,7 @@ function renderDealListView(deals) {
 // (no active-client link) + archived clients that have no deal row. Shared by
 // the Active/Archived stat cards and views so counts always match what's shown.
 function partitionContractedDeals(deals) {
-  const EXCLUDED_CLIENTS_LC = ['internal', 'misc', 'pitches/bd'];
+  const EXCLUDED_CLIENTS_LC = ['misc', 'misc/bizdev', 'pitches/bd'];
   const allClients = (state.clients || []).filter(c => !EXCLUDED_CLIENTS_LC.includes(c.name.toLowerCase()));
   const activeClientIds = new Set(allClients.filter(c => c.is_active).map(c => c.id));
   const contracted = (deals || []).filter(d => d.stage === 'contracted');
@@ -17053,7 +19046,7 @@ function renderContractedListView(deals, which) {
   const emptyMsg = which === 'archived' ? 'No archived clients' : 'No active clients';
   dealListBody.innerHTML = list.length
     ? rowsHtml(list)
-    : `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-2)">${emptyMsg}</td></tr>`;
+    : `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--muted)">${emptyMsg}</td></tr>`;
 }
 
 // ── Section tables (Active / Cold / Completed) ──
@@ -17070,7 +19063,15 @@ function openDealDetail(dealId) {
   const client = deal.client_id ? state.clients.find(c => c.id === deal.client_id) : null;
   const stageOptions = DEAL_STAGES.map(s => `<option value="${s.key}"${deal.stage === s.key ? ' selected' : ''}>${s.label}</option>`).join('');
   const pocOptions = '<option value="">—</option>' + getDealPocEmployees().map(e => `<option value="${e.id}"${deal.poc_employee_id === e.id ? ' selected' : ''}>${escapeHtml(e.full_name)}</option>`).join('');
-  const clientOptions = '<option value="">— None —</option>' + state.clients.filter(c => c.is_active).map(c => `<option value="${c.id}"${deal.client_id === c.id ? ' selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+  // Archived clients are offered too, in their own group (30 Sep 2026): a repeat
+  // client's old or new deal must point at the SAME client (EXAMPLE RESEARCH, archived in
+  // June, could not be linked and invited a duplicate).
+  const clientOpt = (c) => `<option value="${c.id}"${deal.client_id === c.id ? ' selected' : ''}>${escapeHtml(c.name)}</option>`;
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const archivedOpts = state.clients.filter(c => !c.is_active).sort(byName).map(clientOpt).join('');
+  const clientOptions = '<option value="">— None —</option>'
+    + state.clients.filter(c => c.is_active).sort(byName).map(clientOpt).join('')
+    + (archivedOpts ? `<optgroup label="Archived">${archivedOpts}</optgroup>` : '');
 
   const readonlyAttr = canEdit ? '' : ' disabled';
 
@@ -17239,12 +19240,27 @@ async function saveDealFromPanel() {
     updates[key] = val;
   });
 
-  // Check if stage changed for history logging
+  // Did the stage change? (for the contracted email; history is the DB's job)
   const deal = state.deals.find(d => d.id === dealId);
   const stageChanged = deal && updates.stage && updates.stage !== deal.stage;
-  const oldStage = deal?.stage;
 
   // Contracted deals MUST have a linked client — offer to create one
+  // First look for a client this deal is obviously for — same name, or a deal
+  // named "EXAMPLE RESEARCH — New Project" for client "EXAMPLE RESEARCH", archived ones included — so
+  // a returning client is linked, not duplicated (30 Sep 2026).
+  if (updates.stage === 'contracted' && !updates.client_id) {
+    const dealKey = String(deal.deal_name || '').trim().toLowerCase();
+    const existing = state.clients
+      .filter((c) => { const n = String(c.name || '').trim().toLowerCase(); return n && (dealKey === n || dealKey.startsWith(`${n} `) || dealKey.startsWith(`${n},`)); })
+      .sort((a, b) => b.name.length - a.name.length)[0];
+    if (existing && await appConfirm(`Link this deal to the existing client "${existing.name}"${existing.is_active ? '' : ' (archived)'}?`, { confirmLabel: 'Link', cancelLabel: 'No, choose another way' })) {
+      updates.client_id = existing.id;
+      if (!existing.is_active && canArchiveClient(existing)
+          && await appConfirm(`${existing.name} is archived. Unarchive it now that this deal is won?`, { confirmLabel: 'Unarchive', cancelLabel: 'Keep archived' })) {
+        try { await unarchiveClientById(existing.id); } catch (err) { console.warn('Unarchive failed:', err.message); }
+      }
+    }
+  }
   if (updates.stage === 'contracted' && !updates.client_id) {
     const create = await appConfirm(`No linked client. Create "${deal.deal_name}" as a new client?`);
     if (!create) return;
@@ -17281,25 +19297,7 @@ async function saveDealFromPanel() {
     if (updates.stage === 'contracted') {
       notifyClientStatusChange('deal_contracted', { dealId });
     }
-    await state.supabase.from('deal_stage_history').insert({
-      deal_id: dealId,
-      stage: updates.stage,
-      changed_by: state.currentEmployeeId
-    });
-    if (oldStage) {
-      const { data: prev } = await state.supabase
-        .from('deal_stage_history')
-        .select('id')
-        .eq('deal_id', dealId)
-        .eq('stage', oldStage)
-        .is('exited_at', null);
-      if (prev?.length) {
-        await state.supabase
-          .from('deal_stage_history')
-          .update({ exited_at: new Date().toISOString() })
-          .in('id', prev.map(e => e.id));
-      }
-    }
+    // History row: written by trg_deals_stage_history (202609300002).
   }
 
   closeDealDetail();
@@ -17420,7 +19418,6 @@ async function createNewDeal() {
         business_model: bizModel,
         amount: amount,
         currency: currency,
-        section: 'hot',
         company: state.dealCompany
       })
       .select()
@@ -17432,13 +19429,7 @@ async function createNewDeal() {
       return;
     }
 
-    // Log initial stage
-    const histRes = await state.supabase.from('deal_stage_history').insert({
-      deal_id: data.id,
-      stage: stage,
-      changed_by: state.currentEmployeeId
-    });
-    if (histRes.error) console.warn('Stage history insert failed:', histRes.error.message);
+    // Initial stage history: trg_deals_stage_history (202609300002).
 
     closeDealDetail();
     await loadDealsFromSupabase();
@@ -17467,17 +19458,12 @@ async function reviveDeal(dealId) {
     choices: DEAL_OPEN_STAGES.map(s => ({ label: DEAL_STAGE_LABEL[s] || s, value: s }))
   });
   if (!stage || !DEAL_OPEN_STAGES.includes(stage)) return;
-  const { error } = await state.supabase.from('deals').update({ stage, section: 'hot' }).eq('id', dealId);
+  const { error } = await state.supabase.from('deals').update({ stage }).eq('id', dealId);
   if (error) {
-    console.error('Revive failed:', error.message);
+    notSaved('Deal not revived', error);
     return;
   }
-  const reviveHist = await state.supabase.from('deal_stage_history').insert({
-    deal_id: dealId,
-    stage,
-    changed_by: state.currentEmployeeId
-  });
-  if (reviveHist.error) console.error('Revive stage history failed:', reviveHist.error.message);
+  // History row: written by trg_deals_stage_history (202609300002).
   await loadDealsFromSupabase();
 }
 
@@ -17542,9 +19528,10 @@ if (dealAddBtn) {
 }
 
 // Close panel when clicking the backdrop (outside the inner panel)
+// @circle-omit Colony-only wiring
 document.addEventListener('click', (e) => {
   if (!document.body.classList.contains('deal-panel-open')) return;
-  if (dealDetailInner && !dealDetailInner.contains(e.target) && !e.target.closest('.deal-card, .deal-list-row, .deal-revive-btn, #dealAddBtn')) {
+  if (dealDetailInner && isOutsideClick(e, dealDetailInner) && !e.target.closest('.deal-card, .deal-list-row, .deal-revive-btn, #dealAddBtn')) {
     closeDealDetail();
   }
 });
@@ -17574,21 +19561,21 @@ document.addEventListener('click', (e) => {
 
   // Save deal
   if (e.target.closest('.deal-save-btn')) {
-    saveDealFromPanel().catch(console.error);
+    saveDealFromPanel().catch(actionFailed);
     return;
   }
 
   // Delete deal
   const delBtn = e.target.closest('.deal-delete-btn');
   if (delBtn) {
-    deleteDeal(delBtn.dataset.dealId).catch(console.error);
+    deleteDeal(delBtn.dataset.dealId).catch(actionFailed);
     return;
   }
 
   // Revive cold deal
   const reviveBtn = e.target.closest('.deal-revive-btn');
   if (reviveBtn) {
-    reviveDeal(reviveBtn.dataset.dealId).catch(console.error);
+    reviveDeal(reviveBtn.dataset.dealId).catch(actionFailed);
     return;
   }
 
@@ -17605,6 +19592,7 @@ document.addEventListener('click', (e) => {
     renderDealFlow();
   }
 });
+// @circle-omit-end
 
 // ── End Deal Flow ──────────────────────────────────────────────────────
 
@@ -17691,7 +19679,7 @@ async function loadExecutiveDashboard() {
     const entry = allocByEmployee.get(a.employee_id) || { total: 0, clients: [] };
     entry.total += (a.allocation_percent || 0);
     const clientName = a.project?.client?.name;
-    if (clientName && normalizeClientNameKey(clientName) !== 'internal' && !entry.clients.includes(clientName)) entry.clients.push(clientName);
+    if (clientName && !entry.clients.includes(clientName)) entry.clients.push(clientName);
     allocByEmployee.set(a.employee_id, entry);
   });
 
@@ -17701,7 +19689,8 @@ async function loadExecutiveDashboard() {
   renderExecWhosOut(leaveRows, todayIso);
   renderExecActivity(activeEmployees, todayTasks, leaveRows, todayIso);
   renderExecClients(state.clients, allocations);
-  renderExecOnboarding(activeOnboarding);
+  renderExecOnboarding().catch(console.error);
+  renderExecPlanVsDone().catch(console.error);
 }
 
 // ── KPI Cards ──
@@ -17865,7 +19854,7 @@ function renderExecWhosOut(leaveRows, todayIso) {
   const upcoming = leaveRows.filter(l => l.start_date > todayIso);
 
   function leaveTypeClass(t) {
-    if (t === 'PL') return 'good';
+    if (t === 'PL' || t === 'SR') return 'good';
     if (t === 'SL') return 'warn';
     return 'info';
   }
@@ -17982,58 +19971,55 @@ function renderExecClients(clients, allocations) {
 
 // ── Onboarding Card ──
 
-function renderExecOnboarding(activeOnboarding) {
+// New joiners, from Hiring (8 Oct 2026): the old onboarding checklist it used
+// to read is retired. One line per hire still in progress, with the step it
+// is on — the same words as the Hiring list.
+async function renderExecOnboarding() {
   const card = document.getElementById('execOnboardingCard');
   if (!card) return;
-
-  const badge = activeOnboarding.length
-    ? `<span class="chip info" style="margin-left:8px">${activeOnboarding.length} active</span>`
-    : '';
-
-  if (!activeOnboarding.length) {
-    card.innerHTML = `
-      <div class="exec-card-header"><h3>Onboarding${badge}</h3><small style="color:rgba(var(--text-rgb),0.4)">From Team Directory</small></div>
-      <p style="color:rgba(var(--text-rgb),0.4);font-size:0.8rem">No active onboarding</p>
-    `;
+  if (!hiresCache.length) await loadHiringPanel().catch(() => {});
+  const open = hiresCache.filter((h) => h.stage !== 'cancelled'
+    && !renderHireChecklistHtml.rowsFor(h).every((r) => r.state === 'done' || r.nonBlocking));
+  const head = `<div class="exec-card-header"><h3>New joiners${open.length ? `<span class="chip info" style="margin-left:8px">${open.length}</span>` : ''}</h3><small style="color:rgba(var(--text-rgb),0.4)">From Hiring</small></div>`;
+  if (!open.length) {
+    card.innerHTML = `${head}<p style="color:rgba(var(--text-rgb),0.4);font-size:0.8rem">Nobody joining right now</p>`;
     return;
   }
-
-  const phases = ['pre_joining', 'day_one', 'week_one', 'month_one'];
-  const phaseLabels = { pre_joining: 'Pre-Joining', day_one: 'Day 1', week_one: 'Week 1', month_one: 'Month 1' };
-
-  const entries = activeOnboarding.map(ob => {
-    const items = ob.items || [];
-    const total = items.length;
-    const done = items.filter(i => i.is_completed).length;
-    const pct = total ? Math.round((done / total) * 100) : 0;
-    const name = displayPersonName(ob.employee?.full_name || '', '—');
-    const dept = ob.employee?.department?.name || '';
-
-    const phaseBreak = phases.map(p => {
-      const phaseItems = items.filter(i => i.phase === p);
-      const pDone = phaseItems.filter(i => i.is_completed).length;
-      return phaseItems.length ? `${phaseLabels[p]}: ${pDone}/${phaseItems.length}` : '';
-    }).filter(Boolean).join(' · ');
-
-    return `<div style="padding:6px 0;border-top:1px solid rgba(var(--text-rgb),0.06)">
-      <div style="display:flex;align-items:center;justify-content:space-between">
-        <span style="font-weight:500">${escapeHtml(name)}</span>
-        <span style="font-size:0.75rem;color:rgba(var(--text-rgb),0.5)">${escapeHtml(dept)}</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-        <div class="audience-bar" style="flex:1;height:8px">
-          <div class="audience-bar-fill" style="width:${pct}%;background:var(--primary)"></div>
-        </div>
-        <span style="font-size:0.75rem;font-weight:600">${done}/${total}</span>
-      </div>
-      <div style="font-size:0.68rem;color:rgba(var(--text-rgb),0.4);margin-top:2px">${phaseBreak}</div>
+  card.innerHTML = head + open.map((h) => {
+    const status = hireStepStatus(renderHireChecklistHtml.rowsFor(h), h.stage);
+    return `<div class="exec-joiner" data-open-hire="${escapeHtml(h.id)}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid rgba(var(--text-rgb),0.06);cursor:pointer">
+      <span style="font-weight:500">${escapeHtml(displayPersonName(h.full_name, '—'))}</span>
+      <span style="font-size:0.75rem;color:rgba(var(--text-rgb),0.55)">${escapeHtml(status)}</span>
     </div>`;
   }).join('');
+}
+document.getElementById('execOnboardingCard')?.addEventListener('click', (e) => {
+  const row = e.target.closest('[data-open-hire]');
+  if (!row) return;
+  pendingHireFocus = row.dataset.openHire;
+  navigateToScreen('hiring');
+});
 
-  card.innerHTML = `
-    <div class="exec-card-header"><h3>Onboarding${badge}</h3><small style="color:rgba(var(--text-rgb),0.4)">From Team Directory</small></div>
-    ${entries}
-  `;
+// Plan vs reality (T3, 8 Oct 2026): each client's share of planned time
+// (weekly allocation) next to its share of finished tasks, last 4 weeks.
+// Where the two drift apart is where plans and the work disagree.
+async function renderExecPlanVsDone() {
+  const card = document.getElementById('execPlanVsDoneCard');
+  if (!card || !state.supabase) return;
+  const { data, error } = await state.supabase.rpc('overview_plan_vs_done', { p_since: shiftIsoDays(toISODateLocal(), -28) });
+  const head = `<div class="exec-card-header"><h3>Plan vs reality</h3><small style="color:rgba(var(--text-rgb),0.4)">last 4 weeks · share of planned time vs share of finished tasks</small></div>`;
+  const rows = (error ? [] : (data || [])).filter((r) => !NON_CLIENT_BUCKETS.includes(String(r.client).trim().toLowerCase()));
+  const planTotal = rows.reduce((n, r) => n + Number(r.planned_pct || 0), 0);
+  const doneTotal = rows.reduce((n, r) => n + Number(r.tasks_done || 0), 0);
+  if (!planTotal && !doneTotal) { card.innerHTML = `${head}<p style="color:rgba(var(--text-rgb),0.4);font-size:0.8rem">Not enough data yet</p>`; return; }
+  const pct = (v, t) => (t ? Math.round((Number(v) / t) * 100) : 0);
+  card.innerHTML = head + `<div class="pvd-grid"><span class="pvd-h">Client</span><span class="pvd-h">Planned</span><span class="pvd-h">Done</span>${rows.slice(0, 8).map((r) => {
+    const p = pct(r.planned_pct, planTotal); const d = pct(r.tasks_done, doneTotal);
+    const gap = Math.abs(p - d) >= 15 ? ' is-gap' : '';
+    return `<span class="pvd-client${gap}">${escapeHtml(r.client)}</span>
+      <span class="pvd-cell"><span class="pvd-bar"><i style="width:${p}%"></i></span>${p}%</span>
+      <span class="pvd-cell"><span class="pvd-bar is-done"><i style="width:${d}%"></i></span>${d}%</span>`;
+  }).join('')}</div>`;
 }
 
 // ── End Executive Dashboard ─────────────────────────────────────────────
@@ -18044,8 +20030,10 @@ setAuthenticatedNavigation(false);
    ========================================================================= */
 
 // ---- State ----
+// @circle-omit Colony-only wiring
 state.onboardingChecklists = [];   // active checklists (leadership view)
 state.policyDocuments = [];        // policy docs from DB
+// @circle-omit-end
 let _policyQuillEditor = null;     // Quill instance for admin editor
 let _editingPolicyId = null;       // currently editing policy doc ID
 
@@ -18546,8 +20534,29 @@ function populateOnboardingProfileForm() {
   // Pre-fill from existing profile data
   const profile = state.employeeProfile;
   if (profile?.full_name) document.getElementById('onbProfileFullName').value = profile.full_name;
-  if (profile?.direct_manager_email && managerSelect) managerSelect.value = profile.direct_manager_email;
-  if (profile?.department?.name && deptSelect) deptSelect.value = profile.department.name;
+  // A joiner who came through a hire already has their team and manager set
+  // at account creation (22 Sep 2026): show them, do not ask. The server keeps
+  // the hire's values whatever is sent. Joiners without a hire still choose,
+  // and nothing is pre-filled from the placeholder department — that is how
+  // Maya was handed AM.
+  const hireTeam = !profile?.onboarding_completed ? profile?.requested_department?.name : null;
+  const setByHire = Boolean(hireTeam && profile?.direct_manager_email);
+  if (profile?.direct_manager_email && managerSelect) {
+    if (![...managerSelect.options].some((o) => o.value === profile.direct_manager_email)) {
+      managerSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(profile.direct_manager_email)}">${escapeHtml(profile.direct_manager_email)}</option>`);
+    }
+    managerSelect.value = profile.direct_manager_email;
+  }
+  if (setByHire && deptSelect) {
+    // Strategy (and any team) is valid here: leadership chose it, the joiner did not.
+    if (![...deptSelect.options].some((o) => o.value === hireTeam)) {
+      deptSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(hireTeam)}">${escapeHtml(hireTeam)}</option>`);
+    }
+    deptSelect.value = hireTeam;
+  }
+  [managerSelect, deptSelect].forEach((el) => { if (el) el.disabled = setByHire; });
+  document.querySelectorAll('[data-onb-set-by-hire]').forEach((el) => el.classList.toggle('hidden', !setByHire));
+  document.querySelectorAll('[data-onb-ask-hint]').forEach((el) => el.classList.toggle('hidden', setByHire));
   if (profile?.date_of_birth) document.getElementById('onbProfileBirthday').value = profile.date_of_birth;
   if (profile?.emergency_contact_name) document.getElementById('onbProfileEmergencyName').value = profile.emergency_contact_name;
   if (profile?.emergency_contact_phone) {
@@ -18565,7 +20574,9 @@ function populateOnboardingProfileForm() {
 }
 
 // Step navigation: Welcome -> Profile
+// @circle-omit Colony-only wiring
 document.querySelector('[data-goto="profile"]')?.addEventListener('click', () => showOnboardingStep('profile'));
+// @circle-omit-end
 
 // Step: Save Profile
 document.getElementById('onbProfileSaveBtn')?.addEventListener('click', async () => {
@@ -18710,7 +20721,7 @@ document.getElementById('onbDoneBtn')?.addEventListener('click', async () => {
   const [{ data: freshProfile }, privateDetails] = await Promise.all([
     state.supabase
       .from('employees')
-      .select('full_name, date_of_birth, current_city')
+      .select('full_name, current_city')
       .eq('id', state.currentEmployeeId)
       .single(),
     loadEmployeePrivateDetails(state.currentEmployeeId)
@@ -18813,18 +20824,20 @@ async function maybeCompleteChecklist() {
 
 async function loadOnboardingBadge() {
   if (!state.supabase || !isLeadershipRole()) return;
-  const { data, error } = await state.supabase
-    .from('onboarding_checklists')
-    .select('id, employee_id')
-    .eq('status', 'active');
+  // Since 8 Oct 2026 the dot means "their hire still has a step open" — the
+  // old onboarding checklist it used to read was never ticked, so people kept
+  // a dot for weeks. Same rows as the Hiring screen, so the two always agree.
+  if (!hiresCache.length) await loadHiringPanel().catch(() => {});
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const ids = new Set();
+  hiresCache.forEach((h) => {
+    if (h.stage === 'cancelled' || !h.work_email) return;
+    if (renderHireChecklistHtml.rowsFor(h).every((r) => r.state === 'done' || r.nonBlocking)) return;
+    const emp = (state.employeeDirectory || []).find((e) => norm(e.email) === norm(h.work_email));
+    if (emp) ids.add(emp.id);
+  });
+  const count = ids.size;
 
-  if (error) { console.error('Onboarding badge load error:', error); return; }
-  const count = data?.length || 0;
-
-  // Same signal, per person: the sidebar dot says "someone is mid-onboarding",
-  // the directory dot says who (24 Aug 2026). Without it the sidebar dot
-  // was unattributable — it looked wrong when nobody in the list was marked.
-  const ids = new Set((data || []).map((r) => r.employee_id).filter(Boolean));
   const changed = ids.size !== (state.onboardingEmployeeIds?.size || 0)
     || [...ids].some((id) => !state.onboardingEmployeeIds?.has(id));
   state.onboardingEmployeeIds = ids;
@@ -18837,191 +20850,11 @@ async function loadOnboardingBadge() {
   if (count > 0 && !existingBadge) {
     const badge = document.createElement('span');
     badge.className = 'sidebar-onboarding-badge';
-    badge.title = `${count} active onboarding${count > 1 ? 's' : ''}`;
+    badge.title = `${count} new joiner${count > 1 ? 's' : ''} with steps still open`;
     navBtn.appendChild(badge);
   } else if (count === 0 && existingBadge) {
     existingBadge.remove();
   }
-}
-
-// ---- Onboarding Checklist in Employee Profile ----
-
-async function loadOnboardingChecklist(employeeId) {
-  if (!state.supabase || !isLeadershipRole()) return null;
-  const { data: checklists } = await state.supabase
-    .from('onboarding_checklists')
-    .select('id, status, created_at')
-    .eq('employee_id', employeeId)
-    .order('created_at', { ascending: false })
-    .limit(1);
-
-  if (!checklists?.length) return null;
-  const checklist = checklists[0];
-
-  const { data: items } = await state.supabase
-    .from('onboarding_checklist_items')
-    .select('*')
-    .eq('checklist_id', checklist.id)
-    .order('phase')
-    .order('sort_order');
-
-  return { ...checklist, items: items || [] };
-}
-
-function renderOnboardingChecklist(checklist, container) {
-  if (!checklist || !container) return;
-  container.innerHTML = '';
-
-  const panel = document.createElement('div');
-  panel.className = 'panel onboarding-checklist-panel';
-
-  const statusLabel = checklist.status === 'completed' ? ' (Completed)' : '';
-  panel.innerHTML = `<h3>Onboarding Checklist${statusLabel}</h3>`;
-
-  const phases = [
-    { key: 'pre_joining', label: 'Pre-Joining' },
-    { key: 'day_one', label: 'Day 1' },
-    { key: 'week_one', label: 'Week 1' },
-    { key: 'month_one', label: 'Month 1' }
-  ];
-
-  phases.forEach(phase => {
-    const phaseItems = checklist.items.filter(i => i.phase === phase.key);
-    if (!phaseItems.length) return;
-
-    const group = document.createElement('div');
-    group.className = 'onboarding-phase-group';
-    group.innerHTML = `<div class="onboarding-phase-label">${phase.label}</div>`;
-
-    phaseItems.forEach(item => {
-      const completedBy = item.completed_by_employee_id
-        ? (lookupEmployee(item.completed_by_employee_id)?.full_name || '').split(' ')[0]
-        : '';
-      const completedDate = item.completed_at ? new Date(item.completed_at).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }) : '';
-      const metaText = item.is_completed ? `${completedBy} — ${completedDate}` : (item.is_auto ? 'Auto' : '');
-
-      const row = document.createElement('div');
-      row.className = 'onboarding-item';
-      row.innerHTML = `
-        <input type="checkbox" ${item.is_completed ? 'checked' : ''} ${item.is_auto && !item.is_completed ? 'disabled' : ''} data-item-id="${item.id}" data-checklist-id="${checklist.id}" />
-        <span class="onboarding-item-title ${item.is_completed ? 'completed' : ''}">${escapeHtml(item.title)}${item.is_auto && !item.is_completed ? ' <span class="onboarding-item-auto">(auto-completed by new hire)</span>' : ''}</span>
-        <span class="onboarding-item-meta">${escapeHtml(metaText)}</span>
-      `;
-      group.appendChild(row);
-    });
-    panel.appendChild(group);
-  });
-
-  container.appendChild(panel);
-
-  // Delegate checkbox clicks
-  panel.addEventListener('change', async (e) => {
-    const checkbox = e.target.closest('input[type="checkbox"][data-item-id]');
-    if (!checkbox) return;
-    const itemId = checkbox.dataset.itemId;
-    const checklistId = checkbox.dataset.checklistId;
-    const isChecked = checkbox.checked;
-
-    try {
-      await state.supabase.from('onboarding_checklist_items').update({
-        is_completed: isChecked,
-        completed_at: isChecked ? new Date().toISOString() : null,
-        completed_by_employee_id: isChecked ? state.currentEmployeeId : null
-      }).eq('id', itemId);
-
-      // Check if all items done → mark checklist completed
-      const { data: remaining } = await state.supabase
-        .from('onboarding_checklist_items')
-        .select('id')
-        .eq('checklist_id', checklistId)
-        .eq('is_completed', false)
-        .limit(1);
-
-      if (!remaining?.length) {
-        await state.supabase.from('onboarding_checklists').update({
-          status: 'completed',
-          updated_at: new Date().toISOString()
-        }).eq('id', checklistId);
-        // Clear onboarding flag on employee
-        const empId = checklist.employee_id || state.employeeDirectory.find(e => {
-          // find from checklist items context
-          return true;
-        })?.id;
-      }
-
-      // Refresh the employee directory to update tags/badges
-      await loadEmployeeDirectoryFromSupabase();
-      loadOnboardingBadge().catch(console.error);
-    } catch (err) {
-      console.error('Failed to update onboarding checklist item:', err);
-      checkbox.checked = !isChecked; // revert on failure
-    }
-  });
-}
-
-// ---- Auto-spawn checklist on employee creation ----
-
-async function spawnOnboardingForEmployee(employeeId) {
-  if (!state.supabase) return;
-  // Check if active checklist already exists
-  const { data: existing } = await state.supabase
-    .from('onboarding_checklists')
-    .select('id')
-    .eq('employee_id', employeeId)
-    .eq('status', 'active')
-    .limit(1);
-  if (existing?.length) return; // already has one
-
-  const { data, error } = await state.supabase.rpc('spawn_onboarding_checklist', { p_employee_id: employeeId });
-  if (error) console.error('Failed to spawn onboarding checklist:', error);
-  return data;
-}
-
-// ---- Hook: Auto-spawn on employee creation ----
-// We need to patch the existing "add employee" flow to also spawn a checklist.
-// Find and wrap the employee creation handler.
-
-const _origLoadEmployeeDirectory = loadEmployeeDirectoryFromSupabase;
-
-// ---- Employee Profile: inject checklist if onboarding ----
-
-// We hook into the profile screen rendering by watching for when it becomes active.
-const _profileScreen = document.getElementById('employee-profile');
-if (_profileScreen) {
-  const observer = new MutationObserver(async () => {
-    if (!_profileScreen.classList.contains('active') || !isLeadershipRole()) return;
-    // Find the profile employee
-    const profileHeading = document.getElementById('profileMainHeading');
-    const profileName = profileHeading?.textContent?.replace('My Profile', '').trim() || state.currentEmployee;
-    const employee = (state.employeeDirectory || []).find(e =>
-      displayPersonName(e.full_name, 'Employee') === profileName || e.full_name === profileName
-    ) || (profileName === 'My Profile' ? state.employeeProfile : null);
-
-    if (!employee) return;
-
-    // Check if there's an onboarding checklist for this employee
-    let checklistContainer = document.getElementById('onboardingChecklistContainer');
-    if (!checklistContainer) {
-      checklistContainer = document.createElement('div');
-      checklistContainer.id = 'onboardingChecklistContainer';
-      // Insert before the first panel in the profile screen
-      const firstPanel = _profileScreen.querySelector('.panel');
-      if (firstPanel) _profileScreen.querySelector('.screen-head')?.after(checklistContainer);
-    }
-
-    if (employee.onboarding_completed === false) {
-      const checklist = await loadOnboardingChecklist(employee.id);
-      if (checklist) {
-        checklist.employee_id = employee.id;
-        renderOnboardingChecklist(checklist, checklistContainer);
-      } else {
-        checklistContainer.innerHTML = '';
-      }
-    } else {
-      checklistContainer.innerHTML = '';
-    }
-  });
-  observer.observe(_profileScreen, { attributes: true, attributeFilter: ['class'] });
 }
 
 // =========================================================================
@@ -19029,23 +20862,92 @@ if (_profileScreen) {
 // =========================================================================
 
 updateSidebarIdentityLabels();
+// @circle-omit Colony-only wiring
 updateAllLastEditLabels();
 setSelectedEmployee(DEFAULT_EMPLOYEE);
+// @circle-omit-end
 applyRoleAccess();
+// @circle-omit Colony-only wiring
 applyFractionalVisibility();
 renderClientOwnerOptions();
 resetClientEditor();
 setClientFormNotice('');
+// @circle-omit-end
 initializeScreenHistory();
 
-// Set footer version from git tag (version.js sets APP_VERSION at build time)
+// Footer: "Colony · 28 Sep 2026 · build 3ce68d7", from the YYYYMMDD-g<sha>
+// that every Netlify build stamps into version.js. Nothing typed by hand, so
+// it cannot go stale (28 Sep 2026).
+function formatAppVersion(v) {
+  const m = String(v || '').match(/(\d{4})(\d{2})(\d{2})-g([0-9a-f]+)/);
+  if (!m) return v || 'dev';
+  const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+m[2] - 1];
+  return `${+m[3]} ${month} ${m[1]} · build ${m[4]}`;
+}
 (function setFooterVersion() {
   const el = document.getElementById('footerVersion');
-  if (el) el.textContent = productName(location.hostname) + ' ' + (window.APP_VERSION || 'dev') + ' \u00A9 2026';
+  if (el) el.textContent = `${productName(location.hostname)} · ${formatAppVersion(window.APP_VERSION)}`;
 })();
+// No "© 2026": Colony is published as open source under MIT (agency-colony,
+// 21 Sep 2026), so the footer says that instead (28 Sep 2026). Colony
+// only: Circle's source must never mention Colony, so it shows date + build.
+// @circle-omit Colony's open-source licence line
+(function addFooterLicence() {
+  const el = document.getElementById('footerVersion');
+  if (!el || isCircleHost(location.hostname)) return;
+  el.insertAdjacentHTML('beforeend', ' · <a href="https://github.com/your-org/agency-colony" target="_blank" rel="noopener">Open source · MIT</a>');
+})();
+// @circle-omit-end
+
+// "What's new" shows only what matters to the reader (7 Oct 2026:
+// small hiring and leadership changes were reaching everyone). Each
+// changelog.json entry may carry an audience; none means everyone.
+const UPDATE_AUDIENCES = {
+  everyone: () => true,
+  leadership: () => isLeadershipRole(),
+  hiring: () => isHiringCrew(),
+  briefs: () => isBriefReviewer(),
+  admin: () => isSuperadminUser()
+};
+function updateIsForMe(u) {
+  const list = Array.isArray(u?.audience) ? u.audience : [u?.audience || 'everyone'];
+  return list.some((a) => (UPDATE_AUDIENCES[a] || (() => false))());
+}
+
+// Big updates get their own line; small ones are grouped by area for the last
+// 30 days, folded (8 Oct 2026: "otherwise you lose the gravitas of
+// that section"). An entry is small unless it says "size": "big".
+function whatsNewFor(todayIso) {
+  const mine = (APP_UPDATES || []).filter((u) => u.date <= todayIso && updateIsForMe(u))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const big = mine.filter((u) => u.size === 'big').slice(0, 5);
+  const since = shiftIsoDays(todayIso, -30);
+  const byArea = new Map();
+  mine.filter((u) => u.size !== 'big' && u.date >= since).forEach((u) => {
+    const area = u.area || 'Colony';
+    // The area is the group's name, so drop it from the front of each line.
+    const text = String(u.text).replace(new RegExp(`^${area.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*`, 'i'), '');
+    if (!byArea.has(area)) byArea.set(area, []);
+    byArea.get(area).push({ ...u, text: text.charAt(0).toUpperCase() + text.slice(1) });
+  });
+  // Areas with only one or two small changes share one "Elsewhere" line, so
+  // the section is a few lines, not a list of every corner of Colony.
+  const groups = [];
+  const elsewhere = [];
+  [...byArea.entries()].forEach(([area, items]) => {
+    if (items.length >= 3) groups.push({ area, items });
+    else elsewhere.push(...items.map((u) => ({ ...u, text: `${area}: ${u.text}` })));
+  });
+  groups.sort((a, b) => b.items.length - a.items.length || a.area.localeCompare(b.area));
+  if (elsewhere.length) groups.push({ area: 'Elsewhere', items: elsewhere.sort((a, b) => b.date.localeCompare(a.date)) });
+  return { big, groups };
+}
 
 // Load changelog for home feed
-fetch('changelog.json').then(r => r.json()).then(data => { APP_UPDATES = data; }).catch(() => {});
+// @circle-omit Colony's what's-new list; 404 on Circle (netlify.toml)
+// Re-render when it lands: the feed may have drawn before the changelog arrived.
+fetch('changelog.json').then(r => r.json()).then(data => { APP_UPDATES = data; if (state.isAuthenticated) renderHomeFeed(); }).catch(() => {});
+// @circle-omit-end
 
 // ── Deploy watcher ──
 // Colony is an SPA with hash routing: a tab can live for DAYS without a real
@@ -19089,6 +20991,8 @@ initializeSupabaseAuth().catch((error) => {
 // ══════════════════════════════════════════════════════════════════
 
 let briefsCache = [];
+// Deleted briefs (archived_at set), kept for the Archive tab and Restore.
+let briefsArchivedCache = [];
 let briefDeliverablesCache = [];
 let briefPartnersById = {};
 // One SLA, not two (24 Aug 2026): the internal and client turnaround are
@@ -19097,11 +21001,20 @@ let briefPartnersById = {};
 // per-discipline rows are gone, and everything reads app.client_sla.
 let activeBriefId = null;
 let briefEditingId = null;
+// Set when the form was opened from "Request something related"; kept through
+// an edit so the link survives resubmission.
+let briefParentId = null;
 
-function briefById(id) { return briefsCache.find(b => b.id === id) || null; }
+function briefById(id) { return briefsCache.find(b => b.id === id) || briefsArchivedCache.find(b => b.id === id) || null; }
 
 // Fire-and-forget email per the Section 7 notification matrix. Server decides
 // recipients; failures only warn — the state change already happened.
+// The date the client asked for, struck through under a new date.
+function briefWasHtml(brief, todayIso) {
+  const was = briefWasDate(brief);
+  return was ? `<s class="bt-was">${escapeHtml(briefDueInfo(was, todayIso, true).text)}</s>` : '';
+}
+
 function notifyBriefEvent(briefEvent, briefId, extra = {}) {
   const token = state.session?.access_token;
   if (!token || !briefId) return;
@@ -19121,8 +21034,29 @@ function briefStatusChip(input) {
   if (brief && isBriefPaused(brief)) {
     return `<span class="brief-status-chip st-on_pause" title="${escapeHtml(briefPauseDetail(brief))}">On pause</span>`;
   }
-  const label = BRIEF_STATUS_LABEL[status] || status;
+  // A quick request is not a brief: "New brief" on one read as if a brief were
+  // missing from the board (27 Sep 2026). Say what it is waiting for.
+  const label = (brief?.request_type === 'notify_only' && status === 'submitted')
+    ? 'Not acknowledged'
+    : (BRIEF_STATUS_LABEL[status] || status);
   return `<span class="brief-status-chip st-${escapeHtml(status)}">${escapeHtml(label)}</span>`;
+}
+
+// The dot track on the brief lists (option B, 13 Oct 2026): five named steps,
+// done ones filled, the current one hollow and bold with "with <who>" under it.
+function briefTrackHtml(brief, audience, withWho) {
+  const { labels, step } = briefTrack(brief, audience);
+  const done = brief?.status === 'completed';
+  const dots = labels.map((label, i) => {
+    const state = done ? `is-done${i === 4 ? ' is-final' : ''}` : (i < step ? 'is-done' : (i === step ? 'is-now' : 'is-next'));
+    return `<div class="bt-step ${state}"><span class="bt-dot"></span><span class="bt-label">${escapeHtml(label)}${i === step && withWho && !done ? `<span class="bt-who">with ${escapeHtml(withWho)}</span>` : ''}</span></div>`;
+  }).join('');
+  return `<div class="bt-track" aria-label="${escapeHtml(labels[step])}, step ${step + 1} of 5">${dots}</div>`;
+}
+
+function briefTabsHtml(tabs, current, attr) {
+  return `<div class="bt-tabs" role="tablist">${tabs.map(([key, label, n]) =>
+    `<button type="button" role="tab" class="bt-tab${key === current ? ' is-on' : ''}" aria-selected="${key === current}" ${attr}="${key}">${escapeHtml(label)} · ${n}</button>`).join('')}</div>`;
 }
 
 function briefDateLabel(iso) {
@@ -19140,15 +21074,36 @@ function briefSubmitterName(brief) {
   return '';
 }
 
+// brief id -> ISO time it last entered delivered (loadBriefsData).
+let briefDeliveredAt = new Map();
+// the client's "approve it, or ask for changes" line stays this long after delivery;
+// the brief itself auto-completes after 7 (lib/brief-auto-complete.js).
+const BRIEF_DELIVERED_NUDGE_DAYS = 4;
+
 async function loadBriefsData() {
   if (!state.supabase) return;
-  const [briefsRes, delivRes, partnersRes] = await Promise.all([
+  const [briefsRes, delivRes, partnersRes, deliveredRes] = await Promise.all([
     state.supabase.from('briefs').select('*').order('created_at', { ascending: false }),
-    state.supabase.from('brief_deliverables').select('*').order('created_at', { ascending: true }),
-    state.supabase.from('partners').select('id, full_name, email, org, partner_role')
+    // A client reads deliverables through the RPC: same row shape, but no
+    // Drive link until delivered and no assignee (S17, 6 Oct 2026). The
+    // table itself is staff-only.
+    state.partnerProfile
+      ? state.supabase.rpc('partner_brief_deliverables')
+      : state.supabase.from('brief_deliverables').select('*').order('created_at', { ascending: true }),
+    state.supabase.from('partners').select('id, full_name, email, org, partner_role'),
+    // When each brief last ENTERED delivered: the Circle nudge shows for
+    // BRIEF_DELIVERED_NUDGE_DAYS after that (30 Sep 2026).
+    state.supabase.from('brief_status_history').select('brief_id, entered_at').eq('status', 'delivered').is('exited_at', null)
   ]);
   if (briefsRes.error) throw briefsRes.error;
-  briefsCache = briefsRes.data || [];
+  briefDeliveredAt = new Map();
+  (deliveredRes.error ? [] : (deliveredRes.data || [])).forEach((h) => {
+    const prev = briefDeliveredAt.get(h.brief_id);
+    if (!prev || h.entered_at > prev) briefDeliveredAt.set(h.brief_id, h.entered_at);
+  });
+  // Deleted briefs live apart, so no list, count or reminder picks them up.
+  briefsCache = (briefsRes.data || []).filter((b) => !b.archived_at);
+  briefsArchivedCache = (briefsRes.data || []).filter((b) => b.archived_at);
   briefDeliverablesCache = delivRes.data || [];
   briefPartnersById = {};
   (partnersRes.data || []).forEach(p => { briefPartnersById[p.id] = p; });
@@ -19173,7 +21128,7 @@ async function loadSlaAndHolidays() {
   if (!state.supabase) return;
   const [slaRes, holRes] = await Promise.all([
     state.supabase.from('client_sla').select('*'),
-    state.supabase.from('public_holidays').select('holiday_date, name').order('holiday_date')
+    fetchPublicHolidayRows()
   ]);
   clientSlaByOrg = {};
   (slaRes.data || []).forEach((r) => {
@@ -19252,36 +21207,54 @@ function renderPartnerHome() {
   const isCoordinator = state.partnerProfile?.partner_role === 'coordinator';
   const canActOn = (b) => isMine(b) || isCoordinator;
   const needsInfo = rows.filter(b => b.status === 'pending_info' && canActOn(b));
-  const delivered = rows.filter(b => b.status === 'delivered');
+  // Delivered briefs nudge for BRIEF_DELIVERED_NUDGE_DAYS, then drop off the
+  // strip (they stay in the list below). No delivery record: show it.
+  const nudgeUntil = Date.now() - BRIEF_DELIVERED_NUDGE_DAYS * 86400000;
+  const delivered = rows.filter(b => b.status === 'delivered'
+    && !(briefDeliveredAt.get(b.id) && new Date(briefDeliveredAt.get(b.id)).getTime() < nudgeUntil));
   const awaitingApproval = isCoordinator
     ? rows.filter(b => b.status === 'submitted' && b.request_type === 'brief')
     : [];
+  // Things waiting on this person, pinned above the tabs (no emoji).
   const attention = [
-    ...awaitingApproval.map(b => `<div class="brief-quick-card" data-open-brief="${b.id}">
-      <span style="flex:1;">📨 “${escapeHtml(b.title)}” is waiting for your approval to go to Your Agency</span>
-    </div>`),
-    ...needsInfo.map(b => `<div class="brief-quick-card" data-open-brief="${b.id}">
-      <span style="flex:1;">⚠️ The Your Agency team needs more info on “${escapeHtml(b.title)}” — open it to edit &amp; resubmit</span>
-    </div>`),
-    ...delivered.map(b => `<div class="brief-quick-card" data-open-brief="${b.id}" style="background:rgba(80,170,110,0.12);">
-      <span style="flex:1;">✅ “${escapeHtml(b.title)}” has been delivered — open to download</span>
-    </div>`)
+    ...awaitingApproval.map(b => `<div class="bt-attn" data-open-brief="${b.id}"><strong>${escapeHtml(b.title)}</strong><span>Waiting for your approval to go to Your Agency</span></div>`),
+    ...needsInfo.map(b => `<div class="bt-attn" data-open-brief="${b.id}"><strong>${escapeHtml(b.title)}</strong><span>Your Agency needs more information. Open it to edit and resend</span></div>`),
+    ...delivered.map(b => `<div class="bt-attn is-good" data-open-brief="${b.id}"><strong>${escapeHtml(b.title)}</strong><span>${canActOn(b) ? 'Delivered. Approve it, or ask for changes' : 'Delivered. Open to download'}</span></div>`)
   ].join('');
-  list.innerHTML = (attention ? `<div class="brief-quick-lane">${attention}</div>` : '') + rows.map(b => {
-    const typeBadge = b.request_type === 'notify_only'
-      ? '<span class="brief-status-chip">Quick note</span>' : '';
-    const deliv = briefDeliverablesFor(b.id);
-    const done = deliv.filter(d => d.status === 'delivered').length;
-    const progress = deliv.length ? ` · ${done}/${deliv.length} deliverables done` : '';
-    return `<div class="feed-card" data-open-brief="${b.id}" style="cursor:pointer;">
-      <div style="flex:1;min-width:0;">
-        <div style="font-weight:640;">${escapeHtml(b.title)}</div>
-        <div class="mini-meta">${escapeHtml(briefDateLabel(b.created_at))} · ${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))}${progress}</div>
-      </div>
-      <div>${typeBadge} ${briefStatusChip(b)}</div>
+
+  // One list in tabs with the same dot track as Colony, in the client's words
+  // (13 Oct 2026, option B).
+  const todayIso = toISODateLocal();
+  const groups = { active: [], completed: [], quick: [] };
+  rows.forEach((b) => {
+    const t = briefListTab(b);
+    groups[t === 'paused' ? 'active' : t].push(b);
+  });
+  groups.active.sort((a, b) => (briefDueDate(a) || '9999').localeCompare(briefDueDate(b) || '9999'));
+  if (!groups[partnerListTabSel]) partnerListTabSel = 'active';
+  const tabs = [['active', 'In progress', groups.active.length], ['completed', 'Completed', groups.completed.length], ['quick', 'Quick notes', groups.quick.length]];
+  const withWho = (b) => {
+    if (b.status === 'submitted') return isCoordinator ? 'you' : (b.approver_name || 'your approver');
+    if (['pending_info', 'delivered'].includes(b.status)) return canActOn(b) ? 'you' : displayPersonName(briefSubmitterName(b), 'your team').split(' ')[0];
+    return 'Your Agency';
+  };
+  const who = (b) => isMine(b) ? `You${b.on_behalf_of_name ? `, for ${b.on_behalf_of_name}` : ''}` : briefRequesterLine(b, briefSubmitterName(b));
+  const body = groups[partnerListTabSel].map((b) => {
+    if (partnerListTabSel === 'quick') {
+      return `<div class="bt-row bt-row-quick" data-open-brief="${b.id}"><div class="bt-title"><strong>${escapeHtml(b.title)}</strong><span class="mini-meta">${escapeHtml(who(b))} · ${escapeHtml(briefDateLabel(b.created_at))}</span></div><div>${briefStatusChip(b)}</div></div>`;
+    }
+    const due = briefDueInfo(briefDueDate(b), todayIso, true);
+    return `<div class="bt-row" data-open-brief="${b.id}">
+      <div class="bt-title"><strong>${escapeHtml(b.title)}</strong><span class="mini-meta">${escapeHtml(who(b))}</span></div>
+      ${briefTrackHtml(b, 'client', withWho(b))}
+      <div class="bt-due">${due.text ? `due ${escapeHtml(due.text)}` : ''}${briefWasHtml(b, todayIso)}</div>
     </div>`;
   }).join('');
+  list.innerHTML = (attention ? `<div class="bt-attn-list">${attention}</div>` : '')
+    + briefTabsHtml(tabs, partnerListTabSel, 'data-partner-tab')
+    + `<div class="bt-list">${body || '<p class="mini-meta bt-empty">Nothing here.</p>'}</div>`;
 }
+let partnerListTabSel = 'active';
 
 // Turnaround guidance on the request form, straight from the signed SLA —
 // Rhea asked for it because the client was picking deadlines blind (24 Aug 2026).
@@ -19296,7 +21269,7 @@ function renderSlaHint() {
   const today = toISODateLocal();
   const hols = holidayDates();
   // The request form is partner-only (inserts stamp partnerProfile.org).
-  const slaByType = slaForOrg(state.partnerProfile?.org);
+  const slaByType = slaForOrg(state.partnerProfile?.org || staffBriefOrg);
   const lines = types.map((t) => {
     const sla = slaByType[t];
     const label = BRIEF_DELIVERABLE_OPTIONS.find((o) => o.type === t)?.label || t;
@@ -19471,13 +21444,39 @@ function renderBriefFormOptions() {
     delivWrap.innerHTML = BRIEF_DELIVERABLE_OPTIONS.map(o =>
       `<label><input type="checkbox" value="${escapeHtml(o.type)}" data-bf-deliv> ${escapeHtml(o.label)}</label>`).join('');
     delivWrap.dataset.built = '1';
-    delivWrap.addEventListener('change', renderSlaHint);
+    delivWrap.addEventListener('change', () => { renderSlaHint(); renderNeededFirst(); });
   }
   if (platWrap && !platWrap.dataset.built) {
     platWrap.innerHTML = BRIEF_PLATFORM_OPTIONS.map(p =>
       `<label><input type="checkbox" value="${escapeHtml(p)}" data-bf-plat> ${escapeHtml(p)}</label>`).join('');
     platWrap.dataset.built = '1';
   }
+}
+
+// The "Needed first" ticks mirror the formats picked above, and show only
+// when there are two or more to choose between.
+function renderNeededFirst(ticked = null) {
+  const wrap = document.getElementById('bfNeededFirstWrap');
+  const box = document.getElementById('bfNeededFirst');
+  if (!wrap || !box) return;
+  const requested = [...document.querySelectorAll('[data-bf-deliv]:checked')].map(cb => cb.value);
+  const keep = neededFirstFor(requested, ticked ?? [...box.querySelectorAll('[data-bf-first]:checked')].map(cb => cb.value));
+  wrap.classList.toggle('hidden', requested.length < 2);
+  box.innerHTML = requested.length < 2 ? '' : requested.map(t => {
+    const label = BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === t)?.label || t;
+    return `<label><input type="checkbox" value="${escapeHtml(t)}" data-bf-first${keep.includes(t) ? ' checked' : ''}> ${escapeHtml(label)}</label>`;
+  }).join('');
+}
+
+function renderBriefRelatedBanner() {
+  const el = document.getElementById('bfRelatedBanner');
+  if (!el) return;
+  const parent = briefParentId ? briefById(briefParentId) : null;
+  el.classList.toggle('hidden', !briefParentId);
+  el.innerHTML = briefParentId
+    ? `<span>Related to <strong>${escapeHtml(parent?.title || 'an earlier brief')}</strong></span>
+       <button type="button" class="ghost small" id="bfRelatedUnlink">Not related</button>`
+    : '';
 }
 
 function setBriefFormNotice(message = '', className = 'mini-meta') {
@@ -19488,6 +21487,7 @@ function setBriefFormNotice(message = '', className = 'mini-meta') {
 function applyBriefFormTypeVisibility() {
   const type = document.getElementById('bfRequestType')?.value || 'brief';
   document.getElementById('bfFullFields')?.classList.toggle('hidden', type !== 'brief');
+  document.getElementById('bfFullDetailFields')?.classList.toggle('hidden', type !== 'brief');
   document.getElementById('bfNotifyFieldWrap')?.classList.toggle('hidden', type === 'brief');
 }
 
@@ -19499,6 +21499,7 @@ function applyBriefFormPriorityVisibility() {
 function resetBriefForm(prefill = null) {
   renderBriefFormOptions();
   briefEditingId = prefill?.id || null;
+  briefParentId = prefill?.parent_brief_id || null;
   const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
   setVal('bfRequestType', prefill?.request_type || 'brief');
   setVal('bfTitle', prefill?.title);
@@ -19509,8 +21510,6 @@ function resetBriefForm(prefill = null) {
   setVal('bfNotifyMessage', prefill?.request_type === 'notify_only' ? prefill?.content_text : '');
   setVal('bfKeyDates', prefill?.key_dates);
   setVal('bfLinks', prefill?.links);
-  setVal('bfPartnersTag', prefill?.partners_to_tag);
-  setVal('bfCredits', prefill?.media_credits);
   setVal('bfPublishDate', prefill?.preferred_publish_date);
   setVal('bfDeadline', prefill?.deadline);
   setBriefApproverValue(prefill?.approver_name || '');
@@ -19522,6 +21521,20 @@ function resetBriefForm(prefill = null) {
   if (filesEl) filesEl.value = '';
   document.querySelectorAll('[data-bf-deliv]').forEach(cb => { cb.checked = (prefill?.requested_deliverables || []).includes(cb.value); });
   document.querySelectorAll('[data-bf-plat]').forEach(cb => { cb.checked = (prefill?.platforms || []).includes(cb.value); });
+  renderNeededFirst(prefill?.priority_deliverables || []);
+  // The turnaround hint is driven by the format ticks; without this it kept
+  // showing the previous request's formats.
+  renderSlaHint();
+  renderBriefRelatedBanner();
+  // "Add more detail" starts closed on a new request, and open when the brief
+  // being edited (or followed up) already has something in it — hiding a
+  // filled field would look like it had been lost.
+  const more = document.getElementById('bfMoreDetail');
+  if (more) {
+    more.open = Boolean(prefill && (prefill.key_message || prefill.content_text || prefill.key_dates || prefill.links
+      || prefill.preferred_publish_date || prefill.approver_name || prefill.on_behalf_of_name || prefill.notes
+      || (prefill.platforms || []).length || (prefill.priority && prefill.priority !== 'P2')));
+  }
   document.querySelectorAll('#briefFormGrid .field-missing').forEach(n => n.classList.remove('field-missing'));
   setBriefFormNotice('');
   applyBriefFormTypeVisibility();
@@ -19539,11 +21552,14 @@ function collectBriefForm() {
     audience: val('bfAudience'),
     platforms: [...document.querySelectorAll('[data-bf-plat]:checked')].map(cb => cb.value),
     requested_deliverables: [...document.querySelectorAll('[data-bf-deliv]:checked')].map(cb => cb.value),
+    priority_deliverables: type === 'brief'
+      ? neededFirstFor([...document.querySelectorAll('[data-bf-deliv]:checked')].map(cb => cb.value),
+        [...document.querySelectorAll('[data-bf-first]:checked')].map(cb => cb.value))
+      : [],
+    parent_brief_id: briefParentId,
     content_text: type === 'notify_only' ? val('bfNotifyMessage') : val('bfContent'),
     key_dates: val('bfKeyDates'),
     links: val('bfLinks'),
-    partners_to_tag: val('bfPartnersTag'),
-    media_credits: val('bfCredits'),
     preferred_publish_date: val('bfPublishDate') || null,
     deadline: val('bfDeadline') || null,
     approver_name: briefApproverValue(),
@@ -19572,17 +21588,26 @@ function markBriefFormMissing(missing, requestType = 'brief') {
     const el = document.getElementById(id);
     el?.closest('.form-field')?.classList.add('field-missing');
   });
+  // A required field inside the collapsed section (the urgency reason) must
+  // not be flagged out of sight.
+  const more = document.getElementById('bfMoreDetail');
+  if (more && more.querySelector('.field-missing')) more.open = true;
 }
 
 async function submitPartnerBrief() {
-  if (!state.supabase || !state.partnerProfile) return;
+  const staffRaising = !state.partnerProfile && Boolean(staffBriefOrg) && isBriefReviewer();
+  if (!state.supabase || (!state.partnerProfile && !staffRaising)) return;
   const brief = collectBriefForm();
   const missing = briefMissingFields(brief);
   if ((brief.priority === 'P0' || brief.priority === 'P1') && !brief.urgency_reason) {
     missing.push({ key: 'urgency_reason', label: 'Reason for urgency' });
-    document.getElementById('bfUrgencyWrap')?.classList.add('field-missing');
   }
   markBriefFormMissing(missing, brief.request_type);
+  if (missing.some(m => m.key === 'urgency_reason')) {
+    document.getElementById('bfUrgencyWrap')?.classList.add('field-missing');
+    const more = document.getElementById('bfMoreDetail');
+    if (more) more.open = true;
+  }
   if (missing.length) {
     setBriefFormNotice(`Missing: ${missing.map(m => m.label).join(', ')}`, 'mini-meta warn');
     return;
@@ -19607,6 +21632,19 @@ async function submitPartnerBrief() {
     if (targetStatus === 'ready_for_review' && editingOld?.status === 'pending_info') {
       notifyBriefEvent('ga_approved', briefEditingId);
     }
+  } else if (staffRaising) {
+    // Raised by Your Agency in Colony: the client already asked (on a call, in
+    // a message), so it skips their approval and lands With Your Agency, where
+    // its pieces are prefilled (21 Oct 2026). No email: we raised it.
+    const { data, error } = await state.supabase.from('briefs')
+      .insert({
+        ...brief,
+        status: brief.request_type === 'brief' ? 'ready_for_review' : 'submitted',
+        org: staffBriefOrg,
+        submitted_by_employee_id: state.currentEmployeeId
+      }).select();
+    if (error) { setBriefFormNotice('Could not save: ' + error.message, 'mini-meta warn'); return; }
+    briefId = data?.[0]?.id;
   } else {
     const { data, error } = await state.supabase.from('briefs')
       .insert({
@@ -19630,12 +21668,233 @@ async function submitPartnerBrief() {
     if (upErr) setBriefFormNotice(`Upload failed for ${file.name}: ${upErr.message}`, 'mini-meta warn');
   }
   briefEditingId = null;
+  briefParentId = null;
   await loadBriefsData();
   if (state.partnerProfile) {
     openPartnerBriefDetail(briefId);
+  // @circle-omit staff cannot raise a brief on Circle
   } else {
+    closeStaffBriefForm();
     renderBriefBoard();
+    if (briefId) renderBriefDrawer(briefId).catch(console.error);
+  // @circle-omit-end
   }
+}
+
+// @circle-omit Colony-only: NDAs
+// ── NDAs (22 Oct 2026; _youragency_ops/Agreements/Colony-NDA-brief.md) ──
+// Opened from the NDAs button on Clients. Every write goes through the
+// nda-action function; the table is read-only to the team (app.is_nda_crew).
+const NDA_TYPES = [
+  ['pvt_ltd', 'Private Limited company'], ['public_ltd', 'Public Limited company'], ['llp', 'LLP'],
+  ['partnership', 'Partnership firm'], ['proprietorship', 'Sole proprietorship'], ['individual', 'Individual'],
+  ['foreign', 'Company outside India']
+];
+const NDA_COLUMNS = 'id, with_name, purpose, status, party_name, signatory_email, details_by, details_at, intake_expires_at, papersign_document_id, draft_error, sent_at, signed_at, signed_file_path, drive_link, created_by, created_at';
+let ndaRows = [];
+
+async function applyNdaVisibility() {
+  const btn = document.getElementById('ndasBtn');
+  if (!btn || !state.supabase) return;
+  const { data } = await state.supabase.rpc('is_nda_crew');
+  state.isNdaCrew = data === true;
+  btn.classList.toggle('hidden', !state.isNdaCrew);
+}
+
+async function ndaCall(payload) {
+  const token = state.session?.access_token;
+  const res = await fetch('/.netlify/functions/nda-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload)
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "Couldn't do that. Try again.");
+  return body;
+}
+
+async function loadNdas() {
+  const { data, error } = await state.supabase.from('ndas').select(NDA_COLUMNS).neq('status', 'cancelled').order('created_at', { ascending: false });
+  if (error) { notSaved("Couldn't load the NDAs", error); return; }
+  ndaRows = data || [];
+  renderNdas();
+}
+
+function ndaShortDate(iso) { return iso ? briefDateLabel(iso) : ''; }
+
+function ndaStatus(n) {
+  if (n.status === 'awaiting_details') return { label: 'Needs their details', cls: '' };
+  if (n.status === 'ready') return n.draft_error && !n.papersign_document_id
+    ? { label: "Draft didn't go through", cls: 'is-error' } : { label: 'Ready to send', cls: 'is-ready' };
+  if (n.status === 'sent') return { label: 'Out for signing', cls: '' };
+  if (n.status === 'signed') return { label: 'Signed', cls: 'is-signed' };
+  return { label: n.status, cls: '' };
+}
+
+function ndaDates(n) {
+  if (n.status === 'awaiting_details') return `Started ${ndaShortDate(n.created_at)}`;
+  if (n.status === 'ready') return `Details in ${ndaShortDate(n.details_at)}`;
+  if (n.status === 'sent') return `Sent ${ndaShortDate(n.sent_at)}`;
+  if (n.status === 'signed') return `Signed ${ndaShortDate(n.signed_at)}`;
+  return '';
+}
+
+function ndaActionsHtml(n) {
+  const mine = !n.created_by || n.created_by === state.currentEmployeeId || isSuperadminUser();
+  const out = [];
+  if (n.status === 'awaiting_details') {
+    out.push('<button class="ghost" data-nda-link type="button">Copy link</button>', '<button class="ghost" data-nda-fill type="button">Fill in</button>');
+  }
+  if (n.status === 'ready' && !n.papersign_document_id) out.push('<button class="ghost" data-nda-retry type="button">Try again</button>');
+  if (n.status === 'ready' && n.papersign_document_id) {
+    out.push(`<a href="https://paperform.co/sign/${encodeURIComponent(n.papersign_document_id)}" target="_blank" rel="noopener">Preview ↗</a>`);
+    if (mine) out.push('<button class="primary" data-nda-send type="button">Send</button>');
+  }
+  if (n.status === 'signed') out.push(n.drive_link ? `<a href="${escapeHtml(n.drive_link)}" target="_blank" rel="noopener">PDF ↗</a>` : '<button class="ghost" data-nda-pdf type="button">PDF</button>');
+  if (['awaiting_details', 'ready'].includes(n.status) && mine) out.push('<button class="ghost" data-nda-cancel type="button">Cancel</button>');
+  return out.join('');
+}
+
+function renderNdas() {
+  const el = document.getElementById('ndaList');
+  if (!el) return;
+  if (!ndaRows.length) { el.innerHTML = '<p class="mini-meta">No NDAs yet.</p>'; return; }
+  el.innerHTML = '<div class="nda-row nda-head"><span>With</span><span>Status</span><span>Dates</span><span></span></div>'
+    + ndaRows.map((n) => {
+      const st = ndaStatus(n);
+      const who = displayPersonName(getEmployeeNameById(n.created_by), '').split(' ')[0];
+      return `<div class="nda-row" data-nda-id="${n.id}">
+        <div class="nda-name"><strong>${escapeHtml(n.with_name)}</strong><span class="mini-meta">${escapeHtml(n.purpose)}${who ? ` · ${escapeHtml(who)}` : ''}</span></div>
+        <div class="nda-status ${st.cls}" title="${escapeHtml(n.draft_error || '')}">${escapeHtml(st.label)}</div>
+        <div class="mini-meta">${escapeHtml(ndaDates(n))}</div>
+        <div class="nda-act">${ndaActionsHtml(n)}</div>
+      </div>`;
+    }).join('');
+}
+
+async function ndaCopy(link) {
+  try { await navigator.clipboard.writeText(link); await appAlert('Link copied. Paste it to them; it works once, for 7 days.'); }
+  catch (e) { await appPrompt('Copy this link and send it to them. It works once, for 7 days.', { okLabel: 'Done', title: 'Link' }).catch(() => {}); }
+}
+
+// The New NDA dialog, and "Fill in" for an NDA waiting on their details.
+function openNdaDialog(existing = null) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'app-modal nda-dialog';
+    const opts = NDA_TYPES.map(([v, l]) => `<option value="${v}">${escapeHtml(l)}</option>`).join('');
+    dialog.innerHTML = `<form class="app-modal-form" novalidate>
+      <h3 class="app-modal-title">${existing ? `NDA with ${escapeHtml(existing.with_name)}` : 'New NDA'}</h3>
+      ${existing ? '' : `<label class="nda-field">Who is it with?<input name="with_name" maxlength="120" placeholder="Acme Studios"></label>
+      <label class="nda-field">What's it for?<input name="purpose" maxlength="300" placeholder="Pitch for brand refresh"></label>
+      <div class="nda-field">Who fills in their company details?
+        <div class="nda-choice" role="radiogroup">
+          <button type="button" class="is-on" data-by="them" role="radio" aria-checked="true"><strong>They do</strong><small>(You'll get a link to send them)</small></button>
+          <button type="button" data-by="us" role="radio" aria-checked="false">I'll do it now</button>
+        </div></div>`}
+      <div class="nda-us"${existing ? '' : ' hidden'}>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label class="nda-field">Registered name<input name="party_name" maxlength="160"></label>
+          <div class="nda-grid2"><label class="nda-field">Type<select name="party_type"><option value="">Choose</option>${opts}</select></label>
+            <label class="nda-field">Address<input name="party_address" maxlength="300"></label></div>
+          <div class="nda-grid3"><label class="nda-field">Who signs<input name="signatory_name" maxlength="120"></label>
+            <label class="nda-field">Their title<input name="signatory_title" maxlength="120"></label>
+            <label class="nda-field">Their email<input name="signatory_email" type="email" maxlength="200"></label></div>
+        </div></div>
+      <p class="status error" data-err hidden></p>
+      <div class="app-modal-actions"><button type="button" class="ghost" data-cancel>Cancel</button><button type="submit" class="primary" data-save>Save</button></div>
+    </form>`;
+    document.body.appendChild(dialog);
+    let by = existing ? 'us' : 'them';
+    const usBox = dialog.querySelector('.nda-us');
+    dialog.querySelectorAll('[data-by]').forEach((b) => b.addEventListener('click', () => {
+      by = b.dataset.by;
+      dialog.querySelectorAll('[data-by]').forEach((x) => { x.classList.toggle('is-on', x === b); x.setAttribute('aria-checked', String(x === b)); });
+      usBox.hidden = by !== 'us';
+    }));
+    const close = (v) => { if (dialog.open) dialog.close(); dialog.remove(); resolve(v); };
+    dialog.addEventListener('cancel', (e) => { e.preventDefault(); close(null); });
+    dialog.querySelector('[data-cancel]').addEventListener('click', () => close(null));
+    const err = dialog.querySelector('[data-err]');
+    dialog.querySelector('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const save = dialog.querySelector('[data-save]');
+      if (save.disabled) return;
+      const details = by === 'us' ? Object.fromEntries(['party_name', 'party_type', 'party_address', 'signatory_name', 'signatory_title', 'signatory_email'].map((k) => [k, f.elements[k].value])) : null;
+      save.disabled = true; err.hidden = true;
+      try {
+        const r = existing
+          ? await ndaCall({ action: 'fill', id: existing.id, details })
+          : await ndaCall({ action: 'create', with_name: f.elements.with_name.value, purpose: f.elements.purpose.value, details_by: by, details });
+        close(r);
+      } catch (ex) {
+        err.textContent = ex.message; err.hidden = false; save.disabled = false;
+      }
+    });
+    dialog.showModal();
+  });
+}
+
+document.getElementById('ndasBtn')?.addEventListener('click', () => navigateToScreen('ndas'));
+document.getElementById('ndasBackBtn')?.addEventListener('click', () => navigateToScreen('client-projects'));
+document.getElementById('ndaNewBtn')?.addEventListener('click', async () => {
+  const r = await openNdaDialog();
+  if (!r) return;
+  await loadNdas();
+  if (r.link) await ndaCopy(r.link);
+  else if (r.draftError) await appAlert(`The NDA is saved, but Papersign didn't make the draft: ${r.draftError}`);
+});
+document.getElementById('ndaList')?.addEventListener('click', (e) => {
+  const row = e.target.closest('[data-nda-id]');
+  const btn = e.target.closest('button');
+  if (!row || !btn) return;
+  const n = ndaRows.find((x) => x.id === row.dataset.ndaId);
+  if (!n) return;
+  withBusyButton(btn, async () => {
+    try {
+      if (btn.matches('[data-nda-link]')) { const r = await ndaCall({ action: 'link', id: n.id }); await ndaCopy(r.link); }
+      else if (btn.matches('[data-nda-fill]')) { if (!await openNdaDialog(n)) return; }
+      else if (btn.matches('[data-nda-retry]')) { await ndaCall({ action: 'draft', id: n.id }); }
+      else if (btn.matches('[data-nda-send]')) {
+        if (!await appConfirm(`Send the NDA with ${n.with_name}? Alex signs first, then ${n.signatory_email}.`, { confirmLabel: 'Send' })) return;
+        await ndaCall({ action: 'send', id: n.id });
+      } else if (btn.matches('[data-nda-cancel]')) {
+        if (!await appConfirm(`Cancel the NDA with ${n.with_name}? Its link stops working.`, { confirmLabel: 'Cancel NDA', cancelLabel: 'Keep', danger: true })) return;
+        await ndaCall({ action: 'cancel', id: n.id });
+      } else if (btn.matches('[data-nda-pdf]') && n.signed_file_path) {
+        const { data } = await state.supabase.storage.from('ndas').createSignedUrl(n.signed_file_path, 300);
+        if (data?.signedUrl) window.open(data.signedUrl, '_blank', 'noopener');
+        return;
+      }
+    } catch (ex) { await appAlert(ex.message); }
+    await loadNdas();
+    loadNotifySignals().catch(() => {});
+  });
+});
+// @circle-omit-end
+
+// ── Your Agency raises a brief in Colony (21 Oct 2026) ──
+// For something a client mentioned but didn't raise on Circle. Same form;
+// brief reviewers only (briefs_insert_employee).
+let staffBriefOrg = null;
+async function openStaffBriefForm() {
+  const orgs = [...new Set(Object.values(briefPartnersById || {}).map((p) => p.org).filter(Boolean))].sort();
+  let org = orgs.length === 1 ? orgs[0] : null;
+  if (!org) {
+    if (!orgs.length) { await appAlert('No client is on Circle yet.'); return; }
+    org = await appChoice('Which client is it for?', { choices: orgs.map((o) => ({ label: o, value: o })) });
+    if (!org) return;
+  }
+  staffBriefOrg = org;
+  resetBriefForm();
+  document.getElementById('partner-brief-form')?.classList.remove('hidden');
+  navigateToScreen('partner-brief-form');
+}
+
+function closeStaffBriefForm() {
+  staffBriefOrg = null;
+  navigateToScreen('briefs-pipeline');
+  document.getElementById('partner-brief-form')?.classList.add('hidden');
 }
 
 function openPartnerBriefDetail(briefId) {
@@ -19655,6 +21914,8 @@ function briefSummaryRows(brief) {
     ['Key message', brief.key_message],
     ['Audience', brief.audience],
     ['Deliverables', delivLabels.join(', ')],
+    ['Needed first', (brief.priority_deliverables || []).map(t =>
+      BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === t)?.label || t).join(', ')],
     ['Platforms', (brief.platforms || []).join(', ')],
     ['Content / copy', brief.content_text],
     ['Key dates', brief.key_dates],
@@ -19662,13 +21923,20 @@ function briefSummaryRows(brief) {
     ['Partners to tag', brief.partners_to_tag],
     ['Media credits', brief.media_credits],
     ['Preferred publish', brief.preferred_publish_date],
-    ['Deadline', brief.deadline],
+    // A new date agreed with the client reads as the deadline, with the date
+    // they asked for kept beside it (21 Oct 2026).
+    ['Deadline', briefWasDate(brief)
+      ? `${formatDealDate(briefDueDate(brief))} (new date, was ${formatDealDate(briefWasDate(brief))})`
+      : brief.deadline],
     ['Approver', brief.approver_name],
     ['Notes', brief.notes],
     ['Submitted by', briefSubmitterName(brief)],
     // Only appears when someone logged it for another person — the row the
     // team needs to know who to go back to with a question.
-    ['Raised for', briefOnBehalfDetail(brief)]
+    ['Raised for', briefOnBehalfDetail(brief)],
+    // Follow-ups raised with "Request something related", both directions.
+    ['Related to', brief.parent_brief_id ? (briefById(brief.parent_brief_id)?.title || 'An earlier brief') : ''],
+    ['Follow-ups', briefsCache.filter(b => b.parent_brief_id === brief.id).map(b => b.title).join(', ')]
   ];
   return rows.filter(([, v]) => v && String(v).trim() !== '');
 }
@@ -19693,12 +21961,12 @@ function renderBriefTimelineHtml(history) {
   }).join('')}</div>`;
 }
 
-function renderBriefDeliverablesReadonlyHtml(briefId) {
+function renderBriefDeliverablesReadonlyHtml(briefId, parent = briefsCache.find((b) => b.id === briefId)) {
   const rows = briefDeliverablesFor(briefId);
   if (!rows.length) return '';
   return rows.map(d => {
     const label = d.title || BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === d.deliverable_type)?.label || d.deliverable_type || 'Deliverable';
-    const overdue = deliverableIsOverdue(d) ? ' <span class="overdue">overdue</span>' : '';
+    const overdue = deliverableIsOverdue(d, undefined, parent) ? ' <span class="overdue">overdue</span>' : '';
     const driveLink = (d.delivery_url && d.status === 'delivered')
       ? ` <a href="${escapeHtml(d.delivery_url)}" target="_blank" rel="noopener" class="ghost small" style="text-decoration:none;">Open in Drive ↗</a>`
       : '';
@@ -19714,14 +21982,41 @@ async function listBriefFiles(briefId, includeDelivered) {
     const { data } = await state.supabase.storage.from('briefs').list(`${briefId}/${folder}`, { limit: 100 });
     (data || []).forEach(f => { if (f.name) out.push({ folder, name: f.name, path: `${briefId}/${folder}/${f.name}` }); });
   }
+  // Links sit with the files, in the same two places (21 Oct 2026, Rhea).
+  // brief_links' RLS hides a client's delivered links until delivery, as the
+  // storage policy does for files.
+  const { data: links } = await state.supabase.from('brief_links')
+    .select('id, folder, url, label, created_at').eq('brief_id', briefId).in('folder', folders)
+    .order('created_at', { ascending: true });
+  (links || []).forEach(l => out.push({ folder: l.folder, name: l.label || briefLinkName(l.url), url: l.url, linkId: l.id }));
   return out;
 }
 
-function renderBriefFilesHtml(files) {
-  if (!files.length) return '<p class="mini-meta">No files yet.</p>';
+// "drive.google.com" for a pasted link with no name.
+function briefLinkName(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'Link'; }
+}
+
+// Adds a Drive or Canva link to a brief. Returns an error message, or ''.
+async function addBriefLink(briefId, folder, url, label, author) {
+  const clean = String(url || '').trim();
+  if (!/^https:\/\/\S+$/i.test(clean)) return 'Paste a link starting with https://';
+  const { error } = await state.supabase.from('brief_links').insert({
+    brief_id: briefId, folder, url: clean, label: String(label || '').trim() || null, ...author
+  });
+  if (error) return /already on this brief/.test(error.message || '') ? 'That link is already here' : "Couldn't add the link";
+  return '';
+}
+
+// Reviewers can remove a link added twice or by mistake (21 Oct
+// 2026); brief_links_delete allows only them.
+function renderBriefFilesHtml(files, canRemoveLinks = false) {
+  if (!files.length) return '';
   return files.map(f => `<div class="brief-deliv-row">
-    <span style="flex:1;">${f.folder === 'delivered' ? '📦 ' : ''}${escapeHtml(f.name.replace(/^\d+_/, ''))}</span>
-    <button class="ghost small" data-brief-file="${escapeHtml(f.path)}" type="button">Download</button>
+    <span style="flex:1;">${f.folder === 'delivered' ? '📦 ' : ''}${escapeHtml(f.url ? f.name : f.name.replace(/^\d+_/, ''))}</span>
+    ${f.url
+      ? `<a class="ghost small" href="${escapeHtml(f.url)}" target="_blank" rel="noopener">Open ↗</a>${canRemoveLinks && f.linkId ? `<button class="ghost small" data-brief-link-remove="${f.linkId}" type="button">Remove</button>` : ''}`
+      : `<button class="ghost small" data-brief-file="${escapeHtml(f.path)}" type="button">Download</button>`}
   </div>`).join('');
 }
 
@@ -19762,8 +22057,15 @@ async function renderPartnerBriefDetail() {
   // for a reviewer (no partner profile at all), so the edit bar, the revision
   // button and the upload box all showed on clients.youragency.com (audit 17 Sep).
   const staffView = Boolean(state.staffOnCircle) && !state.partnerProfile;
-  const editable = !staffView && ['submitted', 'pending_info'].includes(brief.status)
-    && state.partnerProfile?.partner_role !== 'client_viewer';
+  // Mirrors the DB's write rule for partners (briefs_update_partner,
+  // brief_comments_insert_partner, briefs_storage_insert): a coordinator may
+  // act on any brief in the org, a submitter only on their own, a
+  // client_viewer on none. Every partner READS the whole org's briefs, so
+  // without this a submitter was offered Edit, Request revision, comment and
+  // upload on colleagues' briefs, and every one failed at the DB (access
+  // parity audit, 22 Sep 2026).
+  const canWrite = !staffView && partnerCanWriteBrief(brief, state.partnerProfile);
+  const editable = canWrite && ['submitted', 'pending_info'].includes(brief.status);
   document.getElementById('pbdEditBar')?.classList.toggle('hidden', !editable);
   const approveBtn = document.getElementById('pbdApproveBtn');
   if (approveBtn) {
@@ -19773,15 +22075,20 @@ async function renderPartnerBriefDetail() {
   const revisionBtn = document.getElementById('pbdRevisionBtn');
   if (revisionBtn) {
     revisionBtn.classList.toggle('hidden',
-      !(!staffView && brief.status === 'delivered' && state.partnerProfile?.partner_role !== 'client_viewer'));
+      !(canWrite && brief.status === 'delivered'));
   }
-  ['pbdUploadInput', 'pbdCommentInput'].forEach((id) => {
-    document.getElementById(id)?.closest('.action-row')?.classList.toggle('hidden', staffView);
+  // The same people who can ask for changes can approve (30 Sep 2026).
+  document.getElementById('pbdAcceptBtn')?.classList.toggle('hidden',
+    !(canWrite && brief.status === 'delivered'));
+  ['pbdUploadInput', 'pbdLinkUrl', 'pbdCommentInput'].forEach((id) => {
+    document.getElementById(id)?.closest('.action-row')?.classList.toggle('hidden', !canWrite);
   });
+  document.getElementById('pbdRelatedBtn')?.classList.toggle('hidden',
+    staffView || !state.partnerProfile || state.partnerProfile.partner_role === 'client_viewer');
   const summaryEl = document.getElementById('pbdSummary');
   if (summaryEl) summaryEl.innerHTML = renderBriefSummaryHtml(brief);
   const delivEl = document.getElementById('pbdDeliverables');
-  if (delivEl) delivEl.innerHTML = renderBriefDeliverablesReadonlyHtml(brief.id);
+  if (delivEl) delivEl.innerHTML = renderBriefDeliverablesReadonlyHtml(brief.id, brief);
   const [history, comments, files] = await Promise.all([
     loadBriefHistory(brief.id),
     loadBriefComments(brief.id),
@@ -19810,6 +22117,24 @@ async function submitPartnerComment() {
   if (error) { if (notice) notice.textContent = 'Could not send: ' + error.message; return; }
   if (input) input.value = '';
   if (notice) notice.textContent = '';
+  renderPartnerBriefDetail().catch(console.error);
+}
+
+async function addPartnerBriefLink() {
+  const notice = document.getElementById('pbdFilesNotice');
+  if (!activeBriefId || !state.partnerProfile) return;
+  const urlEl = document.getElementById('pbdLinkUrl');
+  const labelEl = document.getElementById('pbdLinkLabel');
+  const btn = document.getElementById('pbdLinkBtn');
+  if (btn?.disabled) return;
+  if (btn) btn.disabled = true;
+  const err = await addBriefLink(activeBriefId, 'ga', urlEl?.value, labelEl?.value,
+    { added_by_partner_id: state.partnerProfile.id });
+  if (btn) btn.disabled = false;
+  if (notice) notice.textContent = err;
+  if (err) return;
+  if (urlEl) urlEl.value = '';
+  if (labelEl) labelEl.value = '';
   renderPartnerBriefDetail().catch(console.error);
 }
 
@@ -19861,7 +22186,7 @@ function renderBriefBoard() {
   const awaitingClient = briefsCache.filter(briefAwaitsClientApproval);
   const fullBriefs = briefsCache.filter(b => b.request_type === 'brief')
     .filter(b => !briefAwaitsClientApproval(b))
-    .filter(b => !assignedOnly || briefDeliverablesFor(b.id).some(d => d.assignee_employee_id === myId));
+    .filter(b => !assignedOnly || briefDeliverablesFor(b.id).some(d => [d.assignee_employee_id, d.copy_assignee_id, d.design_assignee_id].includes(myId)));
   const quick = briefsCache.filter(b => b.request_type === 'notify_only' && b.status !== 'closed');
 
   if (quickLane) {
@@ -19896,39 +22221,66 @@ function renderBriefBoard() {
         Colony chases them by email every working morning.</p>
     </div>` : '';
   if (waitingBanner) waitingBanner.innerHTML = waitingHtml;
-  let html = '';
-  BRIEF_BOARD_COLUMNS.forEach(status => {
-    // Paused work leaves its stage column so nobody counts it as in flight.
-    const cards = fullBriefs.filter(b => briefBoardColumn(b) === status);
-    // An empty pause column is noise on a board that usually has none.
-    if (status === BRIEF_PAUSED_COLUMN && !cards.length) return;
-    html += `<div class="deal-col" data-brief-status="${status}">
-      <div class="deal-col-header">
-        <span class="deal-col-title">${escapeHtml(status === BRIEF_PAUSED_COLUMN ? 'On pause' : BRIEF_STATUS_LABEL[status])}</span>
-        <span class="deal-col-count">${cards.length}</span>
-      </div>
-      <div class="deal-col-body">`;
-    cards.forEach(b => {
-      const urgent = (b.priority === 'P0' || b.priority === 'P1')
-        ? `<span class="deal-badge deal-badge-project">${escapeHtml(b.priority)}</span>` : '';
-      const deadlineClass = getDealDeadlineClass(b.deadline);
-      const deadlineLabel = b.deadline ? formatDealDate(b.deadline) : '';
+
+  // One list in tabs, not stage columns (13 Oct 2026, option B).
+  // Only Active is open by default; On pause, Completed and Quick requests
+  // wait behind their tabs.
+  const todayIso = istToday();
+  const groups = { active: [], paused: [], archive: [], quick: [] };
+  fullBriefs.forEach((b) => { const t = briefListTab(b); groups[t === 'completed' ? 'archive' : t].push(b); });
+  // Archive: completed briefs and deleted ones (restorable), newest first.
+  groups.archive.push(...briefsArchivedCache.filter((b) => b.request_type === 'brief' || !b.request_type));
+  groups.quick = quick;
+  const byDeadline = (a, b) => (briefDueDate(a) || '9999').localeCompare(briefDueDate(b) || '9999');
+  groups.active.sort(byDeadline);
+  groups.paused.sort(byDeadline);
+  groups.archive.sort((a, b) => String(b.archived_at || b.updated_at || '').localeCompare(String(a.archived_at || a.updated_at || '')));
+  if (!groups[briefListTabSel]) briefListTabSel = 'active';
+  const tabs = [['active', 'Active', groups.active.length], ['paused', 'On pause', groups.paused.length],
+    ['quick', 'Quick requests', groups.quick.length], ['archive', 'Archive', groups.archive.length]];
+  // Who has it now: the client while it waits on them, otherwise whoever is
+  // assigned to its deliverables, or Your Agency until someone is.
+  const withWho = (b) => {
+    if (b.archived_at) return '';
+    if (['pending_info', 'delivered'].includes(b.status)) return b.org || 'the client';
+    const names = [...new Set(briefDeliverablesFor(b.id).flatMap((d) => [d.copy_assignee_id, d.design_assignee_id, d.assignee_employee_id]).filter(Boolean)
+      .map((id) => displayPersonName(getEmployeeNameById(id), '').split(' ')[0]).filter(Boolean))];
+    return names.length ? names.join(', ') : 'Your Agency';
+  };
+  const rows = groups[briefListTabSel];
+  const body = briefListTabSel === 'quick'
+    ? rows.map((b) => `<div class="bt-row bt-row-quick" data-open-brief-drawer="${b.id}">
+        <div class="bt-title"><strong>${escapeHtml(b.title)}</strong><span class="mini-meta">${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))} · ${escapeHtml(briefDateLabel(b.created_at))}</span></div>
+        <div>${briefStatusChip(b)}</div>
+      </div>`).join('')
+    : rows.map((b) => {
+      // Done work shows the day it was finished, not its old deadline.
+      const due = b.archived_at
+        ? { text: `deleted ${briefDateLabel(b.archived_at)}`, late: false }
+        : b.status === 'completed'
+          ? { text: `done ${briefDateLabel(b.updated_at)}`, late: false }
+          : briefDueInfo(briefDueDate(b), todayIso, briefIsFinished(b));
+      const was = b.archived_at || b.status === 'completed' ? '' : briefWasHtml(b, todayIso);
       const deliv = briefDeliverablesFor(b.id);
-      const overdueCount = deliv.filter(d => deliverableIsOverdue(d)).length;
-      html += `<div class="deal-card" data-open-brief-drawer="${b.id}">
-        <div class="deal-card-top"><span class="deal-card-name">${escapeHtml(b.title)}</span>${urgent}</div>
-        <div class="deal-card-bottom">
-          <span class="mini-meta">${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))}</span>
-          ${overdueCount ? `<span class="deal-card-deadline deal-overdue">${overdueCount} overdue</span>` : ''}
-          ${deadlineLabel ? `<span class="deal-card-deadline ${deadlineClass}">${deadlineLabel}</span>` : ''}
-        </div>
+      const overdue = deliv.filter((d) => deliverableIsOverdue(d, undefined, b)).length;
+      return `<div class="bt-row" data-open-brief-drawer="${b.id}">
+        <div class="bt-title"><strong>${escapeHtml(b.title)}</strong><span class="mini-meta">${escapeHtml(briefRequesterLine(b, briefSubmitterName(b)))}</span></div>
+        ${briefTrackHtml(b, 'team', withWho(b))}
+        <div class="bt-due${due.late ? ' is-late' : ''}">${escapeHtml(due.text)}${was}${overdue ? `<span class="mini-meta">${overdue} deliverable${overdue === 1 ? '' : 's'} overdue</span>` : ''}</div>
       </div>`;
-    });
-    html += `</div></div>`;
-  });
-  board.innerHTML = html;
-  if (meta) meta.textContent = `${fullBriefs.length} brief${fullBriefs.length === 1 ? '' : 's'}${quick.length ? ` · ${quick.length} quick request${quick.length === 1 ? '' : 's'}` : ''}`;
+    }).join('');
+  board.innerHTML = piecesWaitingHtml() + briefTabsHtml(tabs, briefListTabSel, 'data-brief-tab')
+    + `<div class="bt-list">${body || '<p class="mini-meta bt-empty">Nothing here.</p>'}</div>`;
+  if (quickLane) quickLane.innerHTML = '';
+  if (meta) meta.textContent = '';
 }
+let briefListTabSel = 'active';
+document.getElementById('briefBoard')?.addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-brief-tab]');
+  if (!tab) return;
+  briefListTabSel = tab.dataset.briefTab;
+  renderBriefBoard();
+});
 
 const BRIEF_ACTION_LABEL = {
   pending_info: 'Request changes',
@@ -19955,7 +22307,7 @@ async function updateBriefStatus(briefId, toStatus) {
     patch.locked_by_employee_id = state.currentEmployeeId;
   }
   const { data, error } = await state.supabase.from('briefs').update(patch).eq('id', briefId).select();
-  if (error || !data?.length) { console.error('Brief status update failed', error); return; }
+  if (error || !data?.length) { notSaved(`Couldn't move this brief to ${BRIEF_STATUS_LABEL[toStatus] || toStatus}`, error); return; }
   // Notification matrix (v2): each handoff pings whoever's turn is next.
   if (toStatus === 'pending_info') notifyBriefEvent('changes_requested', briefId);
   else if (toStatus === 'ready_for_review') notifyBriefEvent('ga_approved', briefId);
@@ -19989,13 +22341,28 @@ async function renderBriefDrawer(briefId) {
   if (!drawer || !brief) return;
   activeBriefId = briefId;
   const reviewer = isBriefReviewer();
+  // Brief viewers see every brief but change none (27 Sep 2026). The database
+  // is the boundary (can_work_brief gates every write); this only stops the
+  // drawer offering controls that would fail. Allocated or assigned people
+  // still work their own client's briefs.
+  let canWork = reviewer;
+  if (!canWork) {
+    const { data } = await state.supabase.rpc('can_work_brief', { p_brief_id: briefId });
+    canWork = data === true;
+  }
+  const ro = canWork ? '' : ' disabled';
   const transitions = (brief.request_type === 'notify_only'
     ? { submitted: ['acknowledged', 'closed'], acknowledged: ['closed'], closed: [] }
     : null);
   const allowedTargets = (isBriefPaused(brief) ? [] : (transitions
     ? (transitions[brief.status] || [])
     : (BRIEF_TRANSITIONS.brief[brief.status] || [])))
-    .filter(t => reviewer || !BRIEF_REVIEWER_ACTIONS.includes(t));
+    .filter(t => reviewer || !BRIEF_REVIEWER_ACTIONS.includes(t))
+    // Complete is the client's answer now ("Approve delivery" on Circle), or the
+    // brief-auto-complete cron after 7 days (30 Sep 2026). Your Agency only
+    // sends a delivered brief back for revision.
+    .filter(t => t !== 'completed')
+    .filter(() => canWork);
 
   const [history, comments, files] = await Promise.all([
     loadBriefHistory(briefId), loadBriefComments(briefId), listBriefFiles(briefId, true)
@@ -20003,14 +22370,6 @@ async function renderBriefDrawer(briefId) {
   const { data: creativeRows } = await state.supabase.from('creative_briefs').select('*').eq('brief_id', briefId);
   const creative = creativeRows?.[0] || null;
   const delivRows = briefDeliverablesFor(briefId);
-  const employeeOptions = state.employeeDirectory
-    .map(e => `<option value="${e.id}">${escapeHtml(displayPersonName(e.full_name, 'Employee'))}</option>`).join('');
-  const slaOptions = Object.values(slaForOrg(brief.org))
-    .sort((a, b) => a.label.localeCompare(b.label))
-    .map(s => {
-      const days = Number.isFinite(s.max_days) ? ` (${formatSlaDays(s)})` : ' (scoped per project)';
-      return `<option value="${escapeHtml(s.deliverable_type)}">${escapeHtml(s.label)}${escapeHtml(days)}</option>`;
-    }).join('');
   const suggested = (brief.requested_deliverables || [])
     .map(t => BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === t)?.label || t).join(', ');
 
@@ -20029,45 +22388,44 @@ async function renderBriefDrawer(briefId) {
         ${allowedTargets.map(t => `<button class="ghost small" data-brief-action="${t}" type="button">${escapeHtml(BRIEF_ACTION_LABEL[t] || t)}</button>`).join('')}
         ${reviewer && canPauseBrief(brief) ? '<button class="ghost small" data-brief-pause type="button">Pause</button>' : ''}
         ${reviewer && isBriefPaused(brief) ? `<button class="ghost small" data-brief-resume type="button">Resume ${escapeHtml(BRIEF_STATUS_LABEL[brief.status] || brief.status)}</button>` : ''}
-        ${isBriefPaused(brief) ? `<span class="mini-meta" style="align-self:center;">${escapeHtml(briefPauseDetail(brief))}</span>` : ''}
+        ${reviewer && !brief.archived_at ? '<button class="ghost small bt-delete" data-brief-delete type="button">Delete brief</button>' : ''}
+        ${reviewer && brief.archived_at ? '<button class="ghost small" data-brief-restore type="button">Restore</button>' : ''}
       </div>
       <h3>Brief summary</h3>
       ${renderBriefSummaryHtml(brief)}
+      ${brief.request_type === 'brief' && canSetClientDate() ? `<div class="action-row bd-client-date">
+        <label class="form-field"><span>New date for the client</span>
+          <input type="date" id="bdRevisedDeadline" value="${escapeHtml(brief.revised_deadline || '')}"></label>
+        <button class="ghost small" id="bdSaveRevisedBtn" type="button">Save date</button>
+        <span class="status error" id="bdRevisedError" hidden></span>
+      </div>` : ''}
       ${brief.request_type === 'brief' ? `
       <h3>Creative brief <span class="mini-meta">(internal)</span></h3>
       <div class="form-grid">
         <label class="form-field"><span>Internal notes</span>
-          <textarea id="bdCreativeNotes" rows="3">${escapeHtml(creative?.internal_notes || '')}</textarea></label>
+          <textarea id="bdCreativeNotes" rows="3"${ro}>${escapeHtml(creative?.internal_notes || '')}</textarea></label>
         <label class="form-field"><span>Internal deadline</span>
-          <input type="date" id="bdCreativeDeadline" value="${escapeHtml(creative?.internal_deadline || '')}"></label>
-        <div class="action-row"><button class="ghost small" id="bdSaveCreativeBtn" type="button">Save creative brief</button></div>
+          <input type="date" id="bdCreativeDeadline" value="${escapeHtml(creative?.internal_deadline || '')}"${ro}></label>
+        ${canWork ? '<div class="action-row"><button class="ghost small" id="bdSaveCreativeBtn" type="button">Save creative brief</button></div>' : ''}
       </div>
-      <h3>Deliverables</h3>
-      ${suggested ? `<p class="mini-meta">Requested by the client: ${escapeHtml(suggested)}</p>` : ''}
-      <div id="bdDeliverableRows">
-        ${delivRows.map(d => {
-          const label = d.title || BRIEF_DELIVERABLE_OPTIONS.find(o => o.type === d.deliverable_type)?.label || d.deliverable_type || 'Deliverable';
-          const due = d.due_at ? `due ${briefDateLabel(d.due_at)}` : '';
-          const overdue = deliverableIsOverdue(d) ? ' <span class="overdue">OVERDUE</span>' : '';
-          return `<div class="brief-deliv-row" data-deliv-id="${d.id}">
-            <span style="flex:1;min-width:140px;">${escapeHtml(label)} <span class="mini-meta">${escapeHtml(d.discipline || '')} ${due}</span>${overdue}</span>
-            <select data-deliv-status style="width:auto;">
-              ${['queued','in_progress','in_review','ready_to_share','delivered'].map(s => `<option value="${s}"${d.status === s ? ' selected' : ''}>${s.replace(/_/g, ' ')}</option>`).join('')}
-            </select>
-            <select data-deliv-assignee style="width:auto;">
-              <option value="">Unassigned</option>${employeeOptions}
-            </select>
-            <input type="url" data-deliv-url placeholder="Google Drive link" value="${escapeHtml(d.delivery_url || '')}" style="flex:1;min-width:160px;">
-          </div>`;
-        }).join('') || '<p class="mini-meta">None yet — add from the requested list below.</p>'}
+      <h3>Pieces</h3>
+      ${suggested ? `<p class="mini-meta">Requested by ${escapeHtml(brief.org || 'the client')}: ${escapeHtml(suggested)}</p>` : ''}
+      <div class="pc-list" id="bdPieceRows">
+        ${delivRows.length ? pieceHeadHtml() + delivRows.map((d) => pieceRowHtml(d, brief)).join('') : '<p class="mini-meta">No pieces yet.</p>'}
       </div>
-      <div class="action-row" style="flex-wrap:wrap;">
-        <select id="bdNewDelivSla" style="width:auto;"><option value="">Add deliverable…</option>${slaOptions}</select>
-        <button class="ghost small" id="bdAddDelivBtn" type="button">Add</button>
-      </div>` : ''}
+      ${reviewer && !delivRows.length && (brief.requested_deliverables || []).length
+        ? `<div class="pc-add"><button class="ghost small" id="bdPiecePrefillBtn" type="button">Add ${escapeHtml(brief.org || 'the client')}'s pieces (${brief.requested_deliverables.length})</button></div>` : ''}
+      ${reviewer ? `<div class="pc-add">
+        <input type="text" id="bdPieceName" placeholder="Piece, e.g. Carousel, 5 frames" aria-label="Piece">
+        <label><input type="checkbox" id="bdPieceCopy"> Copy</label>
+        <label><input type="checkbox" id="bdPieceDesign"> Design</label>
+        <input type="date" id="bdPieceDue" value="${escapeHtml(briefDueDate(brief) || '')}" aria-label="Due">
+        <button class="ghost small" id="bdPieceAddBtn" type="button">Add piece</button>
+        <span class="status error" id="bdPieceError" hidden></span>
+      </div>` : ''}` : ''}
       <h3>Files</h3>
-      <div id="bdFiles">${renderBriefFilesHtml(files)}</div>
-      <div class="action-row" style="flex-wrap:wrap;">
+      <div id="bdFiles">${renderBriefFilesHtml(files, reviewer)}</div>
+      ${canWork ? `<div class="action-row" style="flex-wrap:wrap;">
         <input type="file" id="bdUploadInput" multiple style="width:auto;">
         <select id="bdUploadFolder" style="width:auto;">
           <option value="ga">Working file (the client can see)</option>
@@ -20075,25 +22433,49 @@ async function renderBriefDrawer(briefId) {
         </select>
         <button class="ghost small" id="bdUploadBtn" type="button">Upload</button>
       </div>
+      <div class="action-row" style="flex-wrap:wrap;">
+        <input type="url" id="bdLinkUrl" placeholder="Paste a Drive or Canva link" style="flex:1;min-width:200px;">
+        <input type="text" id="bdLinkLabel" placeholder="Name (optional)" style="width:auto;">
+        <button class="ghost small" id="bdLinkBtn" type="button">Add link</button>
+        <span class="status error" id="bdLinkError" hidden></span>
+      </div>` : ''}
       <h3>Comments</h3>
       <div id="bdComments">${renderBriefCommentsHtml(comments)}</div>
-      <div class="action-row" style="flex-wrap:wrap;">
+      ${canWork ? `<div class="action-row" style="flex-wrap:wrap;">
         <textarea id="bdCommentInput" rows="2" placeholder="Write a comment…" style="flex:1;min-width:200px;"></textarea>
         <select id="bdCommentVisibility" style="width:auto;">
           <option value="shared">Shared with the client</option>
           <option value="internal">Internal only</option>
         </select>
         <button class="primary" id="bdCommentBtn" type="button">Send</button>
-      </div>
+      </div>` : '<p class="mini-meta">You can view this brief. Changes are made by the brief team.</p>'}
       <h3>Timeline</h3>
       ${renderBriefTimelineHtml(history)}
     </div>`;
 
-  // set current assignee selections
-  delivRows.forEach(d => {
-    const sel = drawer.querySelector(`[data-deliv-id="${d.id}"] [data-deliv-assignee]`);
-    if (sel) sel.value = d.assignee_employee_id || '';
-  });
+}
+
+// A new date for the client (21 Oct 2026). The database allows only the brief
+// reviewers and Alex (guard_brief_revised_deadline); the approver(s) on the
+// brief get one email. Clearing the date goes back to what they asked for,
+// quietly.
+async function bdSaveRevisedDeadline() {
+  if (!activeBriefId) return;
+  const value = document.getElementById('bdRevisedDeadline')?.value || null;
+  const errEl = document.getElementById('bdRevisedError');
+  const brief = briefById(activeBriefId);
+  if ((brief?.revised_deadline || null) === value) return;
+  const { data, error } = await state.supabase.from('briefs')
+    .update({ revised_deadline: value }).eq('id', activeBriefId).select('id');
+  if (error || !data?.length) {
+    console.error('New date refused', error);
+    if (errEl) { errEl.textContent = "Couldn't save the date"; errEl.hidden = false; }
+    return;
+  }
+  if (value) notifyBriefEvent('date_changed', activeBriefId);
+  await loadBriefsData();
+  renderBriefBoard();
+  renderBriefDrawer(activeBriefId).catch(console.error);
 }
 
 async function bdSaveCreativeBrief() {
@@ -20109,48 +22491,172 @@ async function bdSaveCreativeBrief() {
   renderBriefDrawer(activeBriefId).catch(console.error);
 }
 
-async function bdAddDeliverable() {
-  const type = document.getElementById('bdNewDelivSla')?.value;
-  const brief = briefById(activeBriefId);
-  const sla = slaForOrg(brief?.org)[type];
-  if (!sla || !activeBriefId) return;
-  // The client-facing turnaround IS the internal one. Ranges commit to the
-  // slower end — it is the date the client was given.
-  const slaDays = Number.isFinite(sla.max_days) ? sla.max_days : null;
-  const patch = {
-    brief_id: activeBriefId,
-    deliverable_type: sla.deliverable_type,
-    title: sla.label,
-    sla_days: slaDays
-  };
-  // If creative already started, start this one's clock immediately.
-  if (brief && brief.status === 'in_creative') {
-    const now = new Date().toISOString();
-    patch.started_at = now;
-    patch.status = 'in_progress';
-    patch.due_at = deliverableDueAt(now, slaDays, brief.priority, holidayDates());
-  }
-  await state.supabase.from('brief_deliverables').insert(patch);
-  await loadBriefsData();
-  renderBriefBoard();
-  renderBriefDrawer(activeBriefId).catch(console.error);
+// Runs an async action with its button off, so a second click can't repeat
+// it (a double click added Rhea's link twice, 21 Oct 2026).
+async function withBusyButton(btn, fn) {
+  if (btn?.disabled) return;
+  if (btn) btn.disabled = true;
+  try { await fn(); } catch (err) { console.error(err); } finally { if (btn) btn.disabled = false; }
 }
 
-async function bdUpdateDeliverable(delivId, patch) {
-  if (patch.status === 'delivered') patch.delivered_at = new Date().toISOString();
-  await state.supabase.from('brief_deliverables').update(patch).eq('id', delivId);
-  const deliv = briefDeliverablesCache.find(d => d.id === delivId);
-  if (deliv) {
-    if (patch.assignee_employee_id) {
-      notifyBriefEvent('deliverable_assigned', deliv.brief_id, { assigneeEmployeeId: patch.assignee_employee_id });
+// ── Pieces (21 Oct 2026: Rhea's workflow, Alex's mock) ──
+// A brief is split into pieces; each needs copy, design or both, one owner
+// per part. One row component serves the brief drawer, the "Waiting for you"
+// strip on Briefs and My week. The database decides who may do what and moves
+// the stage (guard_brief_deliverable_update); the rows only offer what it
+// accepts. No email and no Slack: the bell and My week carry it.
+function pieceTeam(deptName) {
+  return (state.employeeDirectory || []).filter((e) => e.department?.name === deptName);
+}
+
+function pieceFirstName(id) {
+  const e = (state.employeeDirectory || []).find((x) => x.id === id);
+  return displayPersonName(e?.full_name, 'Someone').split(' ')[0];
+}
+
+function pieceLeadFor(brief) {
+  return isCreativeLeadFor(brief?.org, state.employeeProfile?.email || state.session?.user?.email, getConfigMap('creative_leads', {}));
+}
+
+function pieceHeadHtml() {
+  return '<div class="pc-row pc-head"><span>Piece</span><span>Copy</span><span>Design</span><span>Stage</span><span></span></div>';
+}
+
+function pieceSlotHtml(p, kind, canAssign) {
+  const needs = kind === 'copy' ? p.needs_copy : p.needs_design;
+  const otherNeeded = kind === 'copy' ? p.needs_design : p.needs_copy;
+  if (!needs && !(canAssign && p.status !== 'delivered')) return '<span class="mini-meta">Not needed</span>';
+  const owner = kind === 'copy' ? p.copy_assignee_id : p.design_assignee_id;
+  const done = kind === 'copy' ? p.copy_done_at : p.design_done_at;
+  // The tick's space is always there, so a finished part never shifts the
+  // column (21 Oct 2026).
+  const tick = `<span class="pc-done"${done ? ' title="Done"' : ' aria-hidden="true"'}>${done ? '✓' : ''}</span>`;
+  if (canAssign && p.status !== 'delivered') {
+    // Design lists the Art team, copy the Copy team (21 Oct 2026).
+    const team = pieceTeam(kind === 'copy' ? 'Copy' : 'Art');
+    const current = owner && !team.some((e) => e.id === owner) ? (state.employeeDirectory || []).find((e) => e.id === owner) : null;
+    const opts = current ? [...team, current] : team;
+    return `<span class="pc-slot"><select class="pc-pick" data-piece-assign="${kind}" aria-label="${kind === 'copy' ? 'Copy' : 'Design'}">
+      <option value="">${kind === 'copy' ? 'Assign Copy' : 'Assign Design'}</option>
+      <option value="none"${needs ? '' : ' selected'}${otherNeeded ? '' : ' disabled'}>Not needed</option>
+      ${opts.map((e) => `<option value="${e.id}"${needs && e.id === owner ? ' selected' : ''}>${escapeHtml(displayPersonName(e.full_name, 'Someone').split(' ')[0])}</option>`).join('')}
+    </select>${tick}</span>`;
+  }
+  if (!owner) return '<span class="mini-meta">Not assigned</span>';
+  return `<span class="pc-slot">${escapeHtml(pieceFirstName(owner))}${tick}</span>`;
+}
+
+function pieceRowHtml(p, brief, { showBrief = false } = {}) {
+  const reviewer = isBriefReviewer();
+  const lead = pieceLeadFor(brief);
+  const canAssign = reviewer || lead;
+  const owner = [p.copy_assignee_id, p.design_assignee_id].includes(state.currentEmployeeId);
+  const client = brief?.org || 'the client';
+  const meta = [];
+  if (p.due_at) meta.push(`due ${escapeHtml(briefDateLabel(p.due_at))}`);
+  if (p.delivery_url) meta.push(`<a class="pc-textbtn" href="${escapeHtml(p.delivery_url)}" target="_blank" rel="noopener">Open ↗</a>`);
+  if (p.status !== 'delivered' && (owner || canAssign)) {
+    meta.push(`<button class="pc-textbtn" data-piece-link type="button">${p.delivery_url ? 'Change link' : 'Add link'}</button>`);
+  }
+  // Last, so a long brief name never hides the date or the link.
+  if (showBrief) meta.push(`<button class="pc-textbtn" data-piece-open type="button" title="${escapeHtml(brief?.title || '')}">${escapeHtml(brief?.title || 'Brief')}</button>`);
+  const acts = [];
+  // My part's Done sits with the other actions on the right, never inside
+  // the copy/design cell, so the row keeps its shape (21 Oct 2026).
+  if (p.status === 'in_progress') {
+    if (p.needs_copy && p.copy_assignee_id === state.currentEmployeeId && !p.copy_done_at) {
+      acts.push('<button class="pc-btn" data-piece-done="copy" type="button">Copy done</button>');
     }
-    if (patch.status === 'ready_to_share') {
-      notifyBriefEvent('deliverable_ready', deliv.brief_id);
+    if (p.needs_design && p.design_assignee_id === state.currentEmployeeId && !p.design_done_at) {
+      acts.push('<button class="pc-btn" data-piece-done="design" type="button">Design done</button>');
     }
   }
-  await loadBriefsData();
-  renderBriefBoard();
-  if (activeBriefId) renderBriefDrawer(activeBriefId).catch(console.error);
+  if (p.status === 'in_review' && canAssign) {
+    acts.push('<button class="pc-btn" data-piece-move="ready_to_share" type="button">Approve</button>',
+      '<button class="pc-btn" data-piece-sendback type="button">Send back</button>');
+  }
+  if (p.status === 'ready_to_share' && reviewer) {
+    acts.push(`<button class="pc-btn" data-piece-move="delivered" type="button" title="Share with ${escapeHtml(client)}">Share with client</button>`,
+      '<button class="pc-btn" data-piece-sendback type="button">Send back</button>');
+  }
+  if (reviewer && !showBrief && p.status !== 'delivered') {
+    acts.push('<button class="pc-textbtn" data-piece-remove type="button" aria-label="Remove piece">Remove</button>');
+  }
+  const back = p.status === 'in_progress' && p.sent_back_at;
+  return `<div class="pc-row" data-piece-id="${p.id}" data-piece-brief="${p.brief_id}">
+    <div class="pc-name"><span class="pc-title">${escapeHtml(p.title || 'Piece')}</span>${meta.length ? `<span class="mini-meta">${meta.join(' · ')}</span>` : ''}</div>
+    <div>${pieceSlotHtml(p, 'copy', canAssign)}</div>
+    <div>${pieceSlotHtml(p, 'design', canAssign)}</div>
+    <div class="pc-stage${back ? ' is-back' : ''}">${escapeHtml(pieceStageLabel(p, client))}</div>
+    <div class="pc-act">${acts.join('')}</div>
+  </div>`;
+}
+
+// Pieces waiting on the signed-in person, across briefs.
+function piecesWaitingForMe(pieces, briefOf) {
+  const reviewer = isBriefReviewer();
+  return (pieces || []).filter((p) => {
+    const brief = briefOf(p);
+    return pieceActionsFor(p, brief, { me: state.currentEmployeeId, reviewer, lead: pieceLeadFor(brief) }).length > 0;
+  });
+}
+
+function piecesWaitingHtml() {
+  const mine = piecesWaitingForMe(briefDeliverablesCache, (p) => briefById(p.brief_id));
+  if (!mine.length) return '';
+  return `<div class="pc-waiting"><p class="pc-waiting-title">Waiting for you</p>
+    <div class="pc-list">${pieceHeadHtml()}${mine.map((p) => pieceRowHtml(p, briefById(p.brief_id), { showBrief: true })).join('')}</div></div>`;
+}
+
+// My week: the parts of pieces that are mine to do, on top while they exist.
+function renderMyWeekPieces() {
+  const el = document.getElementById('myWeekPieces');
+  if (!el) return;
+  const me = state.currentEmployeeId;
+  const mine = (state.openPieces || []).filter((p) => pieceActionsFor(p, p.brief, { me }).some((a) => a === 'copy' || a === 'design'));
+  el.innerHTML = mine.length
+    ? `<div class="pc-waiting"><p class="pc-waiting-title">From briefs</p>
+        <div class="pc-list">${pieceHeadHtml()}${mine.map((p) => pieceRowHtml(p, p.brief, { showBrief: true })).join('')}</div></div>`
+    : '';
+}
+
+async function refreshPiecesEverywhere() {
+  await loadBriefsData().catch(console.error);
+  if (getActiveScreenId() === 'briefs-pipeline') renderBriefBoard();
+  const drawer = document.getElementById('briefDrawer');
+  if (activeBriefId && drawer && !drawer.classList.contains('hidden')) await renderBriefDrawer(activeBriefId).catch(console.error);
+  await loadNotifySignals().catch(console.error);
+}
+
+// A refused update returns no rows rather than an error, so check both.
+async function pieceUpdate(id, patch) {
+  const { data, error } = await state.supabase.from('brief_deliverables').update(patch).eq('id', id).select('id');
+  if (error || !data?.length) {
+    console.error('Piece not saved', error);
+    await appAlert(/^(Only |A piece )/.test(error?.message || '') ? error.message : "Couldn't save that. Try again.");
+    return false;
+  }
+  await refreshPiecesEverywhere();
+  return true;
+}
+
+async function bdAddPiece() {
+  const brief = briefById(activeBriefId);
+  const name = (document.getElementById('bdPieceName')?.value || '').trim();
+  const needsCopy = Boolean(document.getElementById('bdPieceCopy')?.checked);
+  const needsDesign = Boolean(document.getElementById('bdPieceDesign')?.checked);
+  const due = document.getElementById('bdPieceDue')?.value || '';
+  const errEl = document.getElementById('bdPieceError');
+  const say = (t) => { if (errEl) { errEl.textContent = t; errEl.hidden = !t; } };
+  if (!brief) return;
+  if (!name) return say('Name the piece');
+  if (!needsCopy && !needsDesign) return say('Tick copy, design or both');
+  const { error } = await state.supabase.from('brief_deliverables').insert({
+    brief_id: brief.id, title: name, needs_copy: needsCopy, needs_design: needsDesign,
+    due_at: due ? `${due}T18:00:00+05:30` : null
+  });
+  if (error) { console.error(error); return say("Couldn't add the piece"); }
+  await refreshPiecesEverywhere();
 }
 
 async function bdSubmitComment() {
@@ -20165,6 +22671,29 @@ async function bdSubmitComment() {
     author_employee_id: state.currentEmployeeId,
     author_name: state.employeeProfile?.full_name || 'Your Agency'
   });
+  renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+async function bdAddLink() {
+  if (!activeBriefId) return;
+  const folder = document.getElementById('bdUploadFolder')?.value || 'ga';
+  // Off while saving: a second click added the same link twice (21 Oct 2026).
+  const btn = document.getElementById('bdLinkBtn');
+  if (btn?.disabled) return;
+  if (btn) btn.disabled = true;
+  const err = await addBriefLink(activeBriefId, folder,
+    document.getElementById('bdLinkUrl')?.value, document.getElementById('bdLinkLabel')?.value,
+    { added_by_employee_id: state.currentEmployeeId });
+  if (btn) btn.disabled = false;
+  const errEl = document.getElementById('bdLinkError');
+  if (err) { if (errEl) { errEl.textContent = err; errEl.hidden = false; } return; }
+  renderBriefDrawer(activeBriefId).catch(console.error);
+}
+
+async function bdRemoveLink(linkId) {
+  if (!await appConfirm('Remove this link from the brief?', { confirmLabel: 'Remove', danger: true })) return;
+  const { data, error } = await state.supabase.from('brief_links').delete().eq('id', linkId).select('id');
+  if (error || !data?.length) { notSaved("Couldn't remove the link", error); return; }
   renderBriefDrawer(activeBriefId).catch(console.error);
 }
 
@@ -20185,13 +22714,34 @@ document.getElementById('newBriefBtn')?.addEventListener('click', () => {
   resetBriefForm();
   navigateToScreen('partner-brief-form');
 });
-document.getElementById('briefFormBackBtn')?.addEventListener('click', () => navigateToScreen('partner-home'));
+document.getElementById('briefFormBackBtn')?.addEventListener('click', () => {
+  // @circle-omit staff raise briefs only in Colony
+  if (staffBriefOrg && !state.partnerProfile) { closeStaffBriefForm(); return; }
+  // @circle-omit-end
+  navigateToScreen('partner-home');
+});
+// @circle-omit Colony-only wiring
+document.getElementById('staffNewBriefBtn')?.addEventListener('click', () => { openStaffBriefForm().catch(actionFailed); });
+// @circle-omit-end
 document.getElementById('pbdBackBtn')?.addEventListener('click', () => navigateToScreen('partner-home'));
 document.getElementById('bfRequestType')?.addEventListener('change', applyBriefFormTypeVisibility);
 document.getElementById('bfPriority')?.addEventListener('change', applyBriefFormPriorityVisibility);
-document.getElementById('submitBriefBtn')?.addEventListener('click', () => submitPartnerBrief().catch(console.error));
-document.getElementById('pbdCommentBtn')?.addEventListener('click', () => submitPartnerComment().catch(console.error));
-document.getElementById('pbdUploadBtn')?.addEventListener('click', () => uploadPartnerBriefFiles().catch(console.error));
+document.getElementById('submitBriefBtn')?.addEventListener('click', () => submitPartnerBrief().catch(actionFailed));
+document.getElementById('pbdCommentBtn')?.addEventListener('click', () => submitPartnerComment().catch(actionFailed));
+document.getElementById('pbdUploadBtn')?.addEventListener('click', () => uploadPartnerBriefFiles().catch(actionFailed));
+document.getElementById('pbdLinkBtn')?.addEventListener('click', () => addPartnerBriefLink().catch(actionFailed));
+document.getElementById('pbdRelatedBtn')?.addEventListener('click', () => {
+  const prefill = relatedBriefPrefill(briefById(activeBriefId));
+  if (!prefill) return;
+  resetBriefForm(prefill);
+  navigateToScreen('partner-brief-form');
+  document.getElementById('bfTitle')?.focus();
+});
+document.getElementById('bfRelatedBanner')?.addEventListener('click', (e) => {
+  if (!e.target.closest('#bfRelatedUnlink')) return;
+  briefParentId = null;
+  renderBriefRelatedBanner();
+});
 document.getElementById('pbdEditBtn')?.addEventListener('click', () => {
   const brief = briefById(activeBriefId);
   if (!brief) return;
@@ -20203,9 +22753,22 @@ document.getElementById('pbdApproveBtn')?.addEventListener('click', async () => 
   if (!brief || brief.status !== 'submitted' || !state.partnerProfile) return;
   const { data, error } = await state.supabase.from('briefs')
     .update({ status: 'ready_for_review' }).eq('id', brief.id).select();
-  if (error || !data?.length) { console.error(error); return; }
+  if (error || !data?.length) { notSaved("Couldn't approve this brief", error); return; }
   brief.status = 'ready_for_review';
   notifyBriefEvent('ga_approved', brief.id);
+  renderPartnerBriefDetail().catch(console.error);
+});
+// the client closes its own delivery (30 Sep 2026). No email: Mara asked for emails
+// only when the client asks for changes. guard_partner_brief_update allows delivered
+// -> completed for the submitter or a coordinator.
+document.getElementById('pbdAcceptBtn')?.addEventListener('click', async () => {
+  const brief = briefById(activeBriefId);
+  if (!brief || brief.status !== 'delivered' || !state.partnerProfile) return;
+  if (!await appConfirm(`Approve “${brief.title}”? It will be marked complete. You can still comment on it afterwards.`, { title: 'Approve delivery', confirmLabel: 'Approve' })) return;
+  const { data, error } = await state.supabase.from('briefs')
+    .update({ status: 'completed' }).eq('id', brief.id).select();
+  if (error || !data?.length) { await appAlert(error?.message || 'Could not approve this brief.', { title: 'Approve delivery' }); return; }
+  brief.status = 'completed';
   renderPartnerBriefDetail().catch(console.error);
 });
 document.getElementById('pbdRevisionBtn')?.addEventListener('click', async () => {
@@ -20214,13 +22777,15 @@ document.getElementById('pbdRevisionBtn')?.addEventListener('click', async () =>
   if (!await appConfirm('Send this back to Your Agency for revision? Describe what needs changing in a comment.', { title: 'Request revision', confirmLabel: 'Request revision' })) return;
   const { data, error } = await state.supabase.from('briefs')
     .update({ status: 'under_revision' }).eq('id', brief.id).select();
-  if (error || !data?.length) { console.error(error); return; }
+  if (error || !data?.length) { notSaved("Couldn't send this back for revision", error); return; }
   brief.status = 'under_revision';
   notifyBriefEvent('revision_requested', brief.id);
   renderPartnerBriefDetail().catch(console.error);
   document.getElementById('pbdCommentInput')?.focus();
 });
 document.getElementById('partnerBriefList')?.addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-partner-tab]');
+  if (tab) { partnerListTabSel = tab.dataset.partnerTab; renderPartnerHome(); return; }
   const card = e.target.closest('[data-open-brief]');
   if (card) openPartnerBriefDetail(card.dataset.openBrief);
 });
@@ -20229,18 +22794,32 @@ document.getElementById('briefAssignedToMe')?.addEventListener('change', renderB
 const briefsScreenEl = document.getElementById('briefs-pipeline');
 briefsScreenEl?.addEventListener('click', (e) => {
   const opener = e.target.closest('[data-open-brief-drawer]');
-  if (opener) { renderBriefDrawer(opener.dataset.openBriefDrawer).catch(console.error); return; }
+  if (opener) { renderBriefDrawer(opener.dataset.openBriefDrawer).catch(actionFailed); return; }
   if (e.target.closest('[data-close-brief-drawer]')) { closeBriefDrawer(); return; }
   const action = e.target.closest('[data-brief-action]');
-  if (action && activeBriefId) { updateBriefStatus(activeBriefId, action.dataset.briefAction).catch(console.error); return; }
-  if (e.target.closest('[data-brief-pause]') && activeBriefId) { pauseBrief(activeBriefId).catch(console.error); return; }
-  if (e.target.closest('[data-brief-resume]') && activeBriefId) { resumeBrief(activeBriefId).catch(console.error); return; }
+  if (action && activeBriefId) { updateBriefStatus(activeBriefId, action.dataset.briefAction).catch(actionFailed); return; }
+  if (e.target.closest('[data-brief-pause]') && activeBriefId) { pauseBrief(activeBriefId).catch(actionFailed); return; }
+  if (e.target.closest('[data-brief-resume]') && activeBriefId) { resumeBrief(activeBriefId).catch(actionFailed); return; }
+  if (e.target.closest('[data-brief-delete]') && activeBriefId) { archiveBrief(activeBriefId, true).catch(actionFailed); return; }
+  if (e.target.closest('[data-brief-restore]') && activeBriefId) { archiveBrief(activeBriefId, false).catch(actionFailed); return; }
   const file = e.target.closest('[data-brief-file]');
-  if (file) { openBriefFile(file.dataset.briefFile).catch(console.error); return; }
-  if (e.target.id === 'bdSaveCreativeBtn') { bdSaveCreativeBrief().catch(console.error); return; }
-  if (e.target.id === 'bdAddDelivBtn') { bdAddDeliverable().catch(console.error); return; }
-  if (e.target.id === 'bdCommentBtn') { bdSubmitComment().catch(console.error); return; }
-  if (e.target.id === 'bdUploadBtn') { bdUploadFiles().catch(console.error); return; }
+  if (file) { openBriefFile(file.dataset.briefFile).catch(actionFailed); return; }
+  if (e.target.id === 'bdSaveCreativeBtn') { bdSaveCreativeBrief().catch(actionFailed); return; }
+  if (e.target.id === 'bdSaveRevisedBtn') { bdSaveRevisedDeadline().catch(actionFailed); return; }
+  if (e.target.id === 'bdPieceAddBtn') { withBusyButton(e.target, bdAddPiece); return; }
+  if (e.target.id === 'bdPiecePrefillBtn') {
+    withBusyButton(e.target, async () => {
+      const { error } = await state.supabase.rpc('prefill_brief_pieces', { p_brief_id: activeBriefId });
+      if (error) { console.error(error); await appAlert("Couldn't add them. Try again."); return; }
+      await refreshPiecesEverywhere();
+    });
+    return;
+  }
+  if (e.target.id === 'bdCommentBtn') { bdSubmitComment().catch(actionFailed); return; }
+  if (e.target.id === 'bdUploadBtn') { bdUploadFiles().catch(actionFailed); return; }
+  if (e.target.id === 'bdLinkBtn') { bdAddLink().catch(actionFailed); return; }
+  const linkRemove = e.target.closest('[data-brief-link-remove]');
+  if (linkRemove) { bdRemoveLink(linkRemove.dataset.briefLinkRemove).catch(actionFailed); return; }
 });
 // ── Pause / resume ───────────────────────────────────────────────────────
 // The status column is never touched: it holds the stage the brief returns
@@ -20257,10 +22836,30 @@ async function pauseBrief(briefId) {
     pause_reason: why.trim() || null,
     paused_by: state.currentEmployeeId
   }).eq('id', briefId).select();
-  if (error || !data?.length) { console.error('Brief pause failed', error); return; }
+  if (error || !data?.length) { notSaved("Couldn't pause this brief", error); return; }
   await loadBriefsData();
   renderBriefBoard();
   renderBriefDrawer(briefId).catch(console.error);
+}
+
+// Delete moves a brief to the Archive; Restore brings it back (Alex,
+// 13 Oct 2026: "just in case somebody mistakenly deletes something").
+// The database only lets leadership and account managers do either.
+async function archiveBrief(briefId, archive) {
+  const brief = briefById(briefId);
+  if (!brief) return;
+  const ok = archive
+    ? await appConfirm(`It moves to Archive and disappears for Example Collective on Circle. You can restore it from Archive.`.replace('Example Collective', brief.org || 'the client'), { title: `Delete “${brief.title}”?`, confirmLabel: 'Delete', danger: true })
+    : await appConfirm('It goes back to where it was.', { title: `Restore “${brief.title}”?`, confirmLabel: 'Restore' });
+  if (!ok) return;
+  const { data, error } = await state.supabase.from('briefs')
+    .update(archive ? { archived_at: new Date().toISOString(), archived_by: state.currentEmployeeId } : { archived_at: null, archived_by: null })
+    .eq('id', briefId).select('id');
+  if (error || !data?.length) { await appAlert(error?.message || 'That did not go through. Try again.', { title: 'Not saved' }); return; }
+  await loadBriefsData();
+  if (archive) { closeBriefDrawer(); briefListTabSel = 'archive'; }
+  renderBriefBoard();
+  if (!archive) renderBriefDrawer(briefId).catch(console.error);
 }
 
 async function resumeBrief(briefId) {
@@ -20271,27 +22870,89 @@ async function resumeBrief(briefId) {
   const { data, error } = await state.supabase.from('briefs')
     .update({ paused_at: null, pause_reason: null, paused_by: null })
     .eq('id', briefId).select();
-  if (error || !data?.length) { console.error('Brief resume failed', error); return; }
+  if (error || !data?.length) { notSaved("Couldn't resume this brief", error); return; }
   await loadBriefsData();
   renderBriefBoard();
   renderBriefDrawer(briefId).catch(console.error);
 }
 
-briefsScreenEl?.addEventListener('change', (e) => {
-  const row = e.target.closest('[data-deliv-id]');
+// One handler for piece rows wherever they are: brief drawer, Briefs'
+// "Waiting for you" and My week. Each control is off while its save runs, so
+// a double click can't do it twice (21 Oct 2026).
+// @circle-omit Colony-only wiring
+document.addEventListener('change', (e) => {
+  const pick = e.target.closest('select[data-piece-assign]');
+  const row = pick?.closest('[data-piece-id]');
   if (!row) return;
-  if (e.target.matches('[data-deliv-status]')) {
-    bdUpdateDeliverable(row.dataset.delivId, { status: e.target.value }).catch(console.error);
-  } else if (e.target.matches('[data-deliv-assignee]')) {
-    bdUpdateDeliverable(row.dataset.delivId, { assignee_employee_id: e.target.value || null }).catch(console.error);
-  } else if (e.target.matches('[data-deliv-url]')) {
-    bdUpdateDeliverable(row.dataset.delivId, { delivery_url: e.target.value.trim() || null }).catch(console.error);
+  const kind = pick.dataset.pieceAssign;
+  const col = kind === 'copy' ? 'copy_assignee_id' : 'design_assignee_id';
+  const need = kind === 'copy' ? 'needs_copy' : 'needs_design';
+  // "Not needed" drops the part; picking a person (or Assign) brings it back.
+  const patch = pick.value === 'none' ? { [need]: false } : { [need]: true, [col]: pick.value || null };
+  pick.disabled = true;
+  pieceUpdate(row.dataset.pieceId, patch).finally(() => { pick.disabled = false; });
+});
+document.addEventListener('click', (e) => {
+  const row = e.target.closest('[data-piece-id]');
+  if (!row) return;
+  const id = row.dataset.pieceId;
+  const btn = e.target.closest('button');
+  if (e.target.closest('[data-piece-open]')) {
+    const briefId = row.dataset.pieceBrief;
+    navigateToScreen('briefs-pipeline');
+    (briefById(briefId) ? Promise.resolve() : loadBriefsData()).then(() => renderBriefDrawer(briefId)).catch(actionFailed);
+    return;
+  }
+  const done = e.target.closest('[data-piece-done]');
+  if (done) {
+    const col = done.dataset.pieceDone === 'copy' ? 'copy_done_at' : 'design_done_at';
+    withBusyButton(btn, () => pieceUpdate(id, { [col]: new Date().toISOString() }));
+    return;
+  }
+  const move = e.target.closest('[data-piece-move]');
+  if (move) { withBusyButton(btn, () => pieceUpdate(id, { status: move.dataset.pieceMove })); return; }
+  if (e.target.closest('[data-piece-sendback]')) {
+    withBusyButton(btn, async () => {
+      const note = await appPrompt('What needs changing? Only the team sees this.', { title: 'Send back', okLabel: 'Send back' });
+      if (note === null) return;
+      const piece = briefDeliverablesCache.find((d) => d.id === id) || (state.openPieces || []).find((d) => d.id === id);
+      if (note.trim()) {
+        await state.supabase.from('brief_comments').insert({
+          brief_id: row.dataset.pieceBrief,
+          body: `${piece?.title || 'Piece'}: ${note.trim()}`,
+          visibility: 'internal',
+          author_employee_id: state.currentEmployeeId,
+          author_name: state.employeeProfile?.full_name || 'Your Agency'
+        });
+      }
+      await pieceUpdate(id, { status: 'in_progress' });
+    });
+    return;
+  }
+  if (e.target.closest('[data-piece-link]')) {
+    withBusyButton(btn, async () => {
+      const url = await appPrompt('Paste the link to this piece', { title: 'Link', placeholder: 'https://', okLabel: 'Save' });
+      if (url === null) return;
+      const clean = url.trim();
+      if (clean && !/^https:\/\/\S+$/i.test(clean)) { await appAlert('Paste a link starting with https://'); return; }
+      await pieceUpdate(id, { delivery_url: clean || null });
+    });
+    return;
+  }
+  if (e.target.closest('[data-piece-remove]')) {
+    withBusyButton(btn, async () => {
+      if (!await appConfirm('Remove this piece from the brief?', { confirmLabel: 'Remove', danger: true })) return;
+      const { data, error } = await state.supabase.from('brief_deliverables').delete().eq('id', id).select('id');
+      if (error || !data?.length) { console.error(error); await appAlert("Couldn't remove it. Try again."); return; }
+      await refreshPiecesEverywhere();
+    });
   }
 });
+// @circle-omit-end
 // Partner detail: file downloads
 document.getElementById('pbdFiles')?.addEventListener('click', (e) => {
   const file = e.target.closest('[data-brief-file]');
-  if (file) openBriefFile(file.dataset.briefFile).catch(console.error);
+  if (file) openBriefFile(file.dataset.briefFile).catch(actionFailed);
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -20331,6 +22992,9 @@ async function renderHireChecklist() {
   const donePanel = document.getElementById('hireDonePanel');
   if (greeting) greeting.textContent = `Welcome to Your Agency, ${displayPersonName(hire.full_name, 'there').split(' ')[0]}`;
 
+  // A consultant or fractional hire invoices, so payroll's salary slips and tax
+  // regime are not asked of them at all (7 Oct 2026).
+  document.querySelectorAll('[data-hf-salaried]').forEach((el) => el.classList.toggle('hidden', !isSalariedHire(hire)));
   const editable = ['invited', 'details_submitted'].includes(hire.stage);
   if (formPanel) formPanel.classList.toggle('hidden', !editable);
   if (donePanel) donePanel.classList.toggle('hidden', editable);
@@ -20351,6 +23015,7 @@ async function renderHireChecklist() {
     setVal('hfBankNumber', hire.bank_account_number);
     setVal('hfIfsc', hire.bank_ifsc);
     setVal('hfStartDate', hire.start_date);
+    showStartDateWarning(document.getElementById('hfStartDate'));
     setVal('hfPermanentAddress', hire.permanent_address);
     setVal('hfSlipsNote', hire.salary_slips_note);
     setVal('hfTaxRegime', hire.tax_regime);
@@ -20437,14 +23102,39 @@ async function submitHireDetails() {
     start_date: val('hfStartDate') || null,
     salary_slips_note: val('hfSlipsNote'),
     no_salary_slips: document.getElementById('hfNoSlips')?.checked === true,
-    tax_regime: val('hfTaxRegime'),
-    tax_declarations_note: val('hfTaxDecl')
+    tax_regime: isSalariedHire(hire) ? val('hfTaxRegime') : null,
+    tax_declarations_note: isSalariedHire(hire) ? val('hfTaxDecl') : ''
   };
   const files = [...(document.getElementById('hfSlips')?.files || [])];
   const existingSlips = await listHireSlips(hire.id).catch(() => []);
   const hasSlips = files.length > 0 || existingSlips.length > 0;
 
-  const missing = hireMissingDetails(details, hasSlips);
+  // What they type goes straight into the agreement, which is prose, not a form.
+  // Fold multi-line entries into one line and show them exactly what will be
+  // printed before it is saved — Modeera's three-line address printed its line
+  // breaks inside the parties clause (7 Oct 2026).
+  const FREE_TEXT = [['address', 'hfAddress', 'Current address'], ['permanent_address', 'hfPermanentAddress', 'Permanent address']];
+  const tidied = [];
+  for (const [key, inputId, label] of FREE_TEXT) {
+    const before = details[key];
+    const after = normalizeAgreementText(before);
+    if (after !== before) { details[key] = after; tidied.push({ inputId, label, after }); }
+  }
+  if (tidied.length) {
+    const shown = tidied.map(t => `${t.label}: ${t.after}`).join('\n\n');
+    if (!await appConfirm(
+      `Your agreement prints this as one line. It will read:\n\n${shown}`,
+      { title: 'Check how this will appear', confirmLabel: 'Looks right', cancelLabel: 'Let me edit' }
+    )) {
+      // Put the tidied version in the field so an edit starts from what prints.
+      tidied.forEach(t => { const el = document.getElementById(t.inputId); if (el) el.value = t.after; });
+      const same = document.getElementById('hfSameAddress');
+      if (same?.checked) { const p = document.getElementById('hfPermanentAddress'); if (p) p.value = details.address; }
+      setHireFormNotice('Edit the address above, then submit again.', 'mini-meta');
+      return;
+    }
+  }
+  const missing = hireMissingDetails(details, hasSlips, isSalariedHire(hire));
   if (missing.length) {
     setHireFormNotice(`Missing: ${missing.map(m => m.label).join(', ')}`, 'mini-meta warn');
     return;
@@ -20478,7 +23168,8 @@ async function submitHireDetails() {
     p_start_date: details.start_date,
     p_permanent_address: details.permanent_address,
     p_tax_regime: details.tax_regime,
-    p_tax_declarations_note: details.tax_declarations_note
+    p_tax_declarations_note: details.tax_declarations_note,
+    p_phone: details.phone
   });
   if (error) { setHireFormNotice('Could not save: ' + error.message, 'mini-meta warn'); return; }
   Object.assign(state.hireProfile, details, { stage: 'details_submitted' });
@@ -20489,7 +23180,7 @@ async function submitHireDetails() {
   renderHireChecklist().catch(console.error);
 }
 
-document.getElementById('hireSubmitBtn')?.addEventListener('click', () => submitHireDetails().catch(console.error));
+document.getElementById('hireSubmitBtn')?.addEventListener('click', () => submitHireDetails().catch(actionFailed));
 // "Same as current" is the common case; mirroring saves retyping and stops the
 // two addresses drifting apart.
 function syncPermanentAddress() {
@@ -20531,7 +23222,9 @@ function setHiringNotice(message = '', className = 'mini-meta') {
 // for the fifth row appeared nowhere near it (8 Sep 2026).
 // `busy` adds the animated ellipsis: an upload gives no other sign it started.
 function setHireRowStatus(hireId, message = '', { busy = false, warn = false } = {}) {
-  const el = document.querySelector(`[data-hire-status="${hireId}"]`);
+  // Beside the button that was pressed when the step has a slot for it;
+  // the hire's header otherwise.
+  const el = document.querySelector(`[data-hire-step-status="${hireId}"]`) || document.querySelector(`[data-hire-status="${hireId}"]`);
   if (!el) return;
   el.textContent = message;
   el.classList.toggle('is-busy', Boolean(message) && busy);
@@ -20540,34 +23233,352 @@ function setHireRowStatus(hireId, message = '', { busy = false, warn = false } =
 
 // The checklist on a hire card. Pure rows from hireChecklist(); this only
 // draws them. "activated" is an employee row that is no longer setup_pending.
-function renderHireChecklistHtml(h) {
+// What the candidate submitted, in one place: the Details drawer and the
+// "Check the details" checklist row both read this, so Legal approves exactly
+// what the drawer shows (7 Oct 2026).
+function hireDetailPairs(h) {
+  const salaried = isSalariedHire(h);
+  return [
+    ['Type', HIRE_TYPE_LABEL[h.hire_type] || h.hire_type],
+    ['Start date', h.start_date],
+    ['Personal email', h.personal_email],
+    ['Mobile', h.phone],
+    ['DOB', h.date_of_birth],
+    ['PAN', h.pan],
+    ['Address', h.address],
+    ['Bank', h.bank_account_name ? `${h.bank_account_name} · ${h.bank_account_number} · ${h.bank_ifsc}` : ''],
+    // Payroll rows only for a salaried hire. A consultant raises invoices, so
+    // slips and a tax regime were never theirs to give (Modeera, 7 Oct 2026).
+    ['Slips', salaried && h.no_salary_slips ? 'Candidate did not have salary slips' : ''],
+    ['Slips note', salaried ? h.salary_slips_note : ''],
+    ['Tax regime', salaried && h.tax_regime ? (h.tax_regime === 'old' ? 'Old' : 'New') : ''],
+    ['HRA/80C/80D', salaried ? h.tax_declarations_note : '']
+  ].filter(([, v]) => v && String(v).trim() !== '');
+}
+
+// A step that carries something opens where it stands, rather than sending you
+// to a second button elsewhere on the row (7 Oct 2026 — "I should be able
+// to click on that, expand the information, and then say move to agreement").
+// The current step is open by default, so opening a hire shows the thing you
+// came to do.
+function hireChecklistExpansion(h, r, ctx = {}) {
+  const { isApprover = false, mySignerTurn = false, terms = {}, viaPapersign = false, workspace = null } = ctx;
+  const act = [];
+  // Each step holds the thing that step needs. These used to sit in the header,
+  // a dozen lines above the row they belonged to.
+  // Once an agreement exists the terms it was built from are history: editing
+  // them afterwards leaves the record and the signed document disagreeing
+  // (7 Oct 2026). A fieldset disables every control inside it, so the
+  // terms stay readable without being changeable. Deleting the draft unfreezes.
+  const agreementExists = Boolean(terms.papersign_draft_id) || ['contract_uploaded', 'reviewed', 'signed', 'payroll_done'].includes(h.stage);
+  if (r.key === 'open') {
+    const editor = renderOfferTermsEditor(h);
+    return agreementExists
+      ? `<fieldset class="ot-frozen" disabled>${editor}</fieldset>`
+      : editor;
+  }
+  // Out for signature, or signed: a new draft at this point only confuses which
+  // document is the agreement.
+  const signatureUnderway = Boolean(terms.papersign_sent_at) || ['signed', 'payroll_done'].includes(h.stage);
+  if (r.key === 'contract') {
+    // Nothing to draft until the joiner has sent their details (PAN, address):
+    // the button used to sit here from day one and fail (30 Oct 2026).
+    // "Skip this step" on the hire still moves past it when the details came another way.
+    if (h.stage === 'invited') return '';
+    if (!signatureUnderway) {
+      if (viaPapersign && !terms.papersign_draft_id) {
+        act.push(`<button class="primary small" data-hire-ps-draft="${h.id}" type="button">Draft agreement in Papersign</button>`);
+        act.push(`<span class="hc-status mini-meta" data-hire-step-status="${h.id}"></span>`);
+      }
+      act.push(`<label class="ghost small" style="cursor:pointer;">Upload a draft<input type="file" data-hire-contract="${h.id}" accept=".pdf,.doc,.docx" style="display:none;"></label>`);
+    }
+    // Once it is signed there is nothing to do here, but there IS something to
+    // see: the agreement itself. Without this the row kept its chevron and
+    // expanded to an empty box (7 Oct 2026).
+    if (!act.length && terms.papersign_draft_id) {
+      act.push(`<a class="ghost small" href="https://paperform.co/sign/${encodeURIComponent(terms.papersign_draft_id)}" target="_blank" rel="noopener">View agreement ↗</a>`);
+    }
+    const body = act.length ? `<div class="hc-actions">${act.join('')}</div>` : '';
+    // No actions and no document: nothing to open, so do not offer a chevron.
+    return body ? `${body}<div data-hire-files="${h.id}"></div>` : '';
+  }
+  if (r.key === 'review') {
+    if (terms.papersign_draft_id && !terms.papersign_sent_at) {
+      // The draft itself, not Papersign's front door. This was hardcoded to
+      // /sign, which is a generic page: you landed in Papersign with no way to
+      // find the document (7 Oct 2026). Verified against Siva's draft.
+      act.push(`<a class="ghost small" href="https://paperform.co/sign/${encodeURIComponent(terms.papersign_draft_id)}" target="_blank" rel="noopener">Review draft ↗</a>`);
+      if (isApprover) act.push(`<button class="primary small" data-hire-ps-send="${h.id}" type="button">Approve &amp; send for signing</button>`);
+      // "Sending…" shows HERE, beside the button, not in the hire's header
+      // (7 Oct 2026).
+      act.push(`<span class="hc-status mini-meta" data-hire-step-status="${h.id}"></span>`);
+    }
+    // Once sent, the row itself says "Sent for signature" with its date, like
+    // every other finished step (7 Oct 2026) — nothing extra here.
+    // A finished step offers nothing to press (8 Oct 2026: these showed on
+    // done rows whenever Papersign was not connected).
+    if (!viaPapersign && isApprover && !r.done) {
+      act.push(`<button class="primary small" data-hire-action="reviewed" data-hire-id="${h.id}" type="button">Approve draft</button>`);
+      act.push(`<button class="ghost small" data-hire-action="details_submitted" data-hire-id="${h.id}" type="button">Send back</button>`);
+    }
+    // Legal can correct a draft at any point before signature: a typo spotted
+    // after approval had no route back at all (Maya's contract, 25 Aug 2026).
+    if (!viaPapersign && !signatureUnderway) act.push(`<label class="ghost small" style="cursor:pointer;">Replace draft<input type="file" data-hire-contract="${h.id}" accept=".pdf,.doc,.docx" style="display:none;"></label>`);
+    return act.length ? `<div class="hc-actions">${act.join('')}</div>` : '';
+  }
+  if (r.key === 'sign' && !viaPapersign && mySignerTurn && !r.done) {
+    return `<div class="hc-actions"><label class="ghost small" style="cursor:pointer;">Upload signed contract<input type="file" data-hire-signed="${h.id}" accept=".pdf" style="display:none;"></label></div>`;
+  }
+  // Only payroll is something Finance confirms. Someone who invoices moves on
+  // by themselves once signed — "Noted ✓" was a button that only existed to be
+  // clicked (7 Oct 2026). A hire already parked at 'signed' still gets
+  // a quiet way through.
+  if (r.key === 'pay' && h.stage === 'signed') {
+    return isSalariedHire(h)
+      ? `<div class="hc-actions"><button class="primary small" data-hire-action="payroll_done" data-hire-id="${h.id}" type="button">Payroll started</button></div>`
+      : `<div class="hc-actions"><button class="ghost small" data-hire-action="payroll_done" data-hire-id="${h.id}" type="button">Move on</button></div>`;
+  }
+  // Switching their Colony access on (8 Oct 2026): the hiring manager's
+  // step, or Alex's, once they have signed in. Now, or on a chosen day.
+  if (r.key === 'activate' && !r.done && hireHasEmployeeRow(h) && canActivateHire(terms)) {
+    if (h.activation_scheduled_on) {
+      return `<div class="hc-actions"><button class="ghost small" data-hire-activate-now="${h.id}" type="button">Activate now</button><button class="ghost small" data-hire-unschedule="${h.id}" type="button">Cancel schedule</button><span class="hc-status mini-meta" data-hire-step-status="${h.id}"></span></div>`;
+    }
+    const tomorrow = shiftIsoDays(istToday(), 1);
+    const start = h.start_date && h.start_date > istToday() ? h.start_date : tomorrow;
+    return `<div class="hc-actions"><button class="primary small" data-hire-activate-now="${h.id}" type="button">Activate now</button><span class="mini-meta">or</span><input type="date" class="hc-date" data-hire-activate-on="${h.id}" min="${escapeHtml(tomorrow)}" value="${escapeHtml(start)}"><button class="ghost small" data-hire-schedule="${h.id}" type="button">Schedule</button><span class="hc-status mini-meta" data-hire-step-status="${h.id}"></span></div>`;
+  }
+  if (r.key === 'account') {
+    // No account wanted (30 Oct 2026): say so, and let it be undone
+    // while nothing has been created.
+    if (h.workspace_not_needed) {
+      return isApprover && !h.work_email
+        ? `<div class="hc-actions"><button class="ghost small" data-hire-account-needed="${h.id}" type="button">Needed after all</button><span class="hc-status mini-meta" data-hire-step-status="${h.id}"></span></div>`
+        : '';
+    }
+    // Waiting on a licence: Colony asked the reseller and retries every six
+    // hours, so there is nothing to press.
+    if (workspace === 'needed' && h.workspace_licence_requested_at) return '';
+    if (workspace === 'needed' && isApprover) {
+      return `<div class="hc-actions"><button class="primary small" data-hire-workspace="${h.id}" type="button">${state.runtimeConfig?.workspaceProvisioning ? 'Create' : 'Add'} @youragency.com account</button><button class="ghost small" data-hire-account-not-needed="${h.id}" type="button">Not needed</button><span class="hc-status mini-meta" data-hire-step-status="${h.id}"></span></div>`;
+    }
+    if (workspace === 'requested') {
+      return `<p class="mini-meta">Added ${escapeHtml(briefDateLabel(h.workspace_requested_at))} — waiting for their first sign-in.</p>`;
+    }
+    if (h.work_email) return `<dl class="hc-kv"><div><dt>Account</dt><dd>${escapeHtml(h.work_email)}</dd></div></dl>`;
+    return '';
+  }
+  if (r.key !== 'details') return '';
+  const pairs = hireDetailPairs(h);
+  if (!pairs.length) return '';
+  const grid = pairs.map(([k, v]) =>
+    `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd></div>`).join('');
+  return `<dl class="hc-kv">${grid}</dl>`;
+}
+
+// An action that belongs ON the row rather than under it. Approving the
+// submitted details is the row, not a thing beneath it (7 Oct 2026).
+// Only the hiring manager on the hire, or the superadmin (8 Oct 2026).
+// The database checks the same thing (app_private.can_activate_hire).
+function canActivateHire(terms = {}) {
+  if (isSuperadminUser()) return true;
+  const manager = normalizeEmail(terms.hiring_manager_email || '');
+  return Boolean(manager) && manager === normalizeEmail(state.session?.user?.email || '');
+}
+
+async function activateHire(hireId, onIso = null) {
+  setHireRowStatus(hireId, onIso ? 'Scheduling' : 'Switching on', { busy: true });
+  const { data, error } = await state.supabase.rpc('activate_hire', { p_hire_id: hireId, p_activate_on: onIso });
+  if (error) { setHireRowStatus(hireId, error.message, { warn: true }); return; }
+  pendingHireFocus = hireId; pendingHireFocusQuiet = true;
+  await loadEmployeeDirectoryFromSupabase().catch(() => {});
+  await loadHiringPanel();
+  setHireRowStatus(hireId, data === 'scheduled' ? `Scheduled for ${shortHireDate(onIso)}` : 'Switched on');
+}
+
+function hireChecklistInline(h, r) {
+  // "Added to": three chips Colony ticks itself — never a button (Alex,
+  // 7 Oct 2026: "the whole point is automating the system"). Hires active
+  // before this existed are done without chips.
+  // No Approve on the details row (7 Oct 2026): the draft is reviewed
+  // before it is sent, and that is where the details get checked.
+  return '';
+}
+
+// Who each step is waiting on, by name rather than by role (7 Oct
+// 2026): you see at a glance who is holding a hire up. Steps Colony does by
+// itself say so. Roles are the fallback when nobody is on file.
+function hireOwnerName(h, owner, terms = {}) {
+  const firstOf = (email) => {
+    const e = String(email || '').toLowerCase();
+    if (!e) return '';
+    const emp = (state.employeeDirectory || []).find((x) => String(x.email || '').toLowerCase() === e);
+    const name = emp?.full_name || e.split('@')[0];
+    return name.split(/[\s._-]+/)[0].replace(/^./, (c) => c.toUpperCase());
+  };
+  const crew = getHiringCrewEmails();
+  const legal = firstOf(crew.find((e) => /leo/i.test(e))) || 'Legal';
+  const finance = firstOf(crew.find((e) => /finance/i.test(e))) || 'Finance';
+  switch (owner) {
+    case 'lead': return firstOf(terms.hiring_manager_email) || 'Hiring lead';
+    case 'candidate': return String(h.full_name || 'The hire').split(' ')[0];
+    case 'legal': return legal;
+    case 'counsel': return `Alex, ${legal} or Nadia`;
+    // Both sides sign: Alex and the hire (30 Oct 2026).
+    case 'signer': return `Alex / ${String(h.full_name || 'the hire').split(' ')[0]}`;
+    case 'finance': return finance;
+    case 'team': return 'Automatic';
+    // Creating the account is a button someone presses (it becomes automatic
+    // on signing once auto_provision_on_signed is on), so it is not "Automatic".
+    case 'approver': return 'Alex';
+    default: return HIRE_OWNER_LABEL[owner] || owner;
+  }
+}
+
+function renderHireChecklistHtml(h, ctx = {}) {
   const rows = renderHireChecklistHtml.rowsFor(h);
+  const terms = ctx.terms || offerTermsByHireId[h.id] || {};
   const mark = (st) => st === 'done' ? '✓' : st === 'current' ? '●' : st === 'cancelled' ? '×' : '○';
-  return `<ol class="hire-checklist">${rows.map((r) => `<li class="${r.state}">
+  return `<ol class="hire-checklist">${rows.map((r) => {
+    let body = hireChecklistExpansion(h, r, ctx);
+    // A step whose content is only buttons carries them ON its row, in one
+    // column just past the text, not in a box underneath (7 Oct 2026:
+    // "in the same row as the text… the same kind of buttons"). Only real
+    // content (the details grid, the terms editor, uploaded files) still
+    // opens underneath.
+    let rowActions = '';
+    const lead = /^<div class="hc-actions">([\s\S]*?)<\/div>/.exec(body);
+    if (lead) {
+      rowActions = `<span class="hc-row-actions">${lead[1]}</span>`;
+      body = body.slice(lead[0].length);
+    }
+    const filesOnly = /^<div data-hire-files="[^"]*"><\/div>$/.test(body);
+    // A step that holds a button someone can press opens on its own, not just
+    // the current one. The draft button sat inside a collapsed step and a click
+    // landed on a hidden element and did nothing (7 Oct 2026) — the same mistake
+    // as hiding the details behind a second button: if there is something to do,
+    // it has to be visible.
+    const open = Boolean(body) && (r.state === 'current' || body.includes('hc-actions'));
+    // The uploaded-files list fills in later and is usually empty: it sits
+    // under the row without a chevron of its own.
+    const toggles = Boolean(body) && !filesOnly;
+    const text = `<span class="hc-label">${escapeHtml(r.label)}</span>${r.detail ? `<span class="hc-detail">${escapeHtml(r.detail)}</span>` : ''}`;
+    return `<li class="${r.state}${toggles ? ' hc-has-body' : ''}">
       <span class="hc-mark">${mark(r.state)}</span>
-      <span class="hc-owner">${escapeHtml(HIRE_OWNER_LABEL[r.owner] || r.owner)}</span>
-      <span><span class="hc-label">${escapeHtml(r.label)}</span>${r.detail ? `<span class="hc-detail">${escapeHtml(r.detail)}</span>` : ''}</span>
-    </li>`).join('')}</ol>`;
+      <span class="hc-owner">${escapeHtml(hireOwnerName(h, r.owner, terms))}</span>
+      <span class="hc-line"><span class="hc-text">${toggles
+        ? `<button class="hc-toggle" data-hc-toggle="${h.id}:${r.key}" type="button" aria-expanded="${open ? 'true' : 'false'}"><span class="hc-chev" aria-hidden="true">${open ? '▾' : '▸'}</span>${text}</button>`
+        : text}</span>${rowActions}${hireChecklistInline(h, r)}</span>
+      ${body ? `<div class="hc-body${open || !toggles ? '' : ' hidden'}" data-hc-body="${h.id}:${r.key}">${body}</div>` : ''}
+    </li>`;
+  }).join('')}</ol>`;
 }
 
 // Rows for a hire, with the two facts the stage cannot tell: whether the
 // youragency account has been used (an employee row exists) and whether that
 // row has been activated.
+// @circle-omit Colony-only wiring
 renderHireChecklistHtml.rowsFor = function (h) {
   const norm = (v) => String(v || '').trim().toLowerCase();
   const emp = (state.employeeDirectory || []).find((e) => (h.work_email && norm(e.email) === norm(h.work_email)) || norm(e.full_name) === norm(h.full_name));
-  return hireChecklist(h, offerTermsByHireId[h.id] || {}, { hasEmployeeRow: Boolean(emp), activated: Boolean(emp && emp.setup_pending === false) });
+  return hireChecklist(h, offerTermsByHireId[h.id] || {}, { hasEmployeeRow: Boolean(emp), activated: Boolean(emp && emp.setup_pending === false), signedInAt: emp?.created_at || null, stageAt: hireStageAtById[h.id] || {}, sentBy: hireSenderName(hireSentById[h.id]), holidays: holidayDates(), today: istToday(), istHour: currentIstHour() });
 };
+// @circle-omit-end
+
+// First name of whoever clicked Approve & send, '' when not recorded.
+function hireSenderName(employeeId) {
+  if (!employeeId) return '';
+  const emp = (state.employeeDirectory || []).find((e) => e.id === employeeId);
+  return String(emp?.full_name || '').split(' ')[0];
+}
+
+// Fixed-term contracts (6 Oct 2026): fractional and consultant hires
+// choose Contract = Ongoing (no end date) or Fixed term (an end date, with
+// 3/6/12-month shortcuts from the start date). Full-time is always ongoing.
+// Shared by the New hire form and the offer-terms editor.
+function addMonthsIso(startIso, months) {
+  const d = new Date(`${startIso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
+  d.setUTCMonth(d.getUTCMonth() + months);
+  d.setUTCDate(d.getUTCDate() - 1); // a 6-month term from 1 Nov ends 30 Apr
+  return d.toISOString().slice(0, 10);
+}
+function termLengthLabel(startIso, endIso) {
+  if (!startIso || !endIso) return '';
+  const months = Math.round((Date.parse(endIso) - Date.parse(startIso)) / 2629800000);
+  return months > 0 ? `${months} month${months === 1 ? '' : 's'}` : '';
+}
+function contractPill(hire, terms) {
+  if (!hire || hire.hire_type === 'full-time') return '';
+  // Only a fixed term gets a tag. "Ongoing" read as a status next to "Hires in
+  // progress" (7 Oct 2026), so an open-ended contract shows nothing.
+  const end = terms?.contract_end_date;
+  return end ? `<span class="contract-pill is-fixed">Ends ${escapeHtml(formatDateForLabel(end))}</span>` : '';
+}
+// Option buttons (the selected one is solid with a tick): one radiogroup,
+// one value. Returns the chosen value.
+function setOptGroup(group, value) {
+  group?.querySelectorAll('.opt').forEach((b) => {
+    const on = b.dataset.opt === value;
+    b.classList.toggle('is-on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  return value;
+}
+function syncNewHireContract() {
+  const fixed = document.querySelector('[data-opt-group="nhContract"] .opt.is-on')?.dataset.opt === 'fixed';
+  document.getElementById('nhEndRow')?.classList.toggle('hidden', !fixed);
+  const start = document.getElementById('nhStartDate')?.value || '';
+  const endEl = document.getElementById('nhEndDate');
+  if (fixed && endEl && !endEl.value && start) {
+    endEl.value = addMonthsIso(start, Number(document.querySelector('#nhEndRow .opt-chip.is-on')?.dataset.termMonths) || 6);
+  }
+  const len = document.getElementById('nhTermLen');
+  if (len) len.textContent = fixed ? termLengthLabel(start, endEl?.value) : '';
+  // A fixed term still has a notice period: it ends on its date without one,
+  // and the notice is for ending it early (3 Nov 2026).
+}
 
 // The open-hire form follows the type: CTC for employees, a monthly fee for
 // anyone who invoices, and a client picker only for fractionals.
 function syncNewHireForm() {
   const type = document.getElementById('nhType')?.value || 'full-time';
+  // A number typed under "CTC (annual)" must not quietly become a monthly fee
+  // when the type changes (Modeera, 7 Oct 2026: 600000 was entered as an annual
+  // CTC and ended up filed as ₹6,00,000 a month). The label switches, so the
+  // amount has to go with it — the same rule the offer-terms editor follows when
+  // it clears the side that no longer applies.
+  const compKey = hireCompensationSpec(type).key;
+  const compEl = document.getElementById('nhComp');
+  if (compEl && syncNewHireForm.lastCompKey && syncNewHireForm.lastCompKey !== compKey && compEl.value) {
+    compEl.value = '';
+    setHiringNotice(`Enter the ${hireCompensationSpec(type).label.toLowerCase()} — the amount was cleared because the hire type changed.`, 'mini-meta warn');
+  }
+  syncNewHireForm.lastCompKey = compKey;
+  // Team is asked here so it travels with the hire, instead of the joiner being
+  // asked for it during onboarding (7 Oct 2026). Options arrive after the
+  // departments load, so fill it whenever the form syncs.
+  const deptSel = document.getElementById('nhDept');
+  if (deptSel && deptSel.options.length <= 1 && (state.departmentOptions || []).length) {
+    const keep = deptSel.value;
+    deptSel.innerHTML = '<option value="">— Select —</option>'
+      + state.departmentOptions.map((d) => `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}</option>`).join('');
+    if (keep) deptSel.value = keep;
+  }
+  document.getElementById('nhContractWrap')?.classList.toggle('hidden', type === 'full-time');
+  if (type === 'full-time') setOptGroup(document.querySelector('[data-opt-group="nhContract"]'), 'ongoing');
+  syncNewHireContract();
   const spec = hireCompensationSpec(type);
   const label = document.getElementById('nhCompLabel');
   const input = document.getElementById('nhComp');
   if (label) label.textContent = spec.label;
   if (input) input.placeholder = spec.placeholder;
+  // 7 days' notice is for consultants and fractionals, not employees (31 Oct 2026).
+  const seven = document.querySelector('#nhNotice option[data-not-salaried]');
+  if (seven) {
+    seven.hidden = seven.disabled = type === 'full-time';
+    if (type === 'full-time' && document.getElementById('nhNotice').value === '7') document.getElementById('nhNotice').value = '';
+  }
   const wrap = document.getElementById('nhClientsWrap');
   const box = document.getElementById('nhClients');
   if (wrap) wrap.classList.toggle('hidden', type !== 'fractional');
@@ -20580,7 +23591,96 @@ function clientCheckboxes(selectedIds, ns) {
   return (state.clients || []).filter((c) => c.is_active !== false)
     .map((c) => `<label><input type="checkbox" value="${escapeHtml(c.id)}" data-client-pick="${ns}"${chosen.has(String(c.id)) ? ' checked' : ''}> ${escapeHtml(c.name)}</label>`).join('');
 }
-document.getElementById('nhType')?.addEventListener('change', syncNewHireForm);
+document.getElementById('hireCreateContent')?.addEventListener('click', (e) => {
+  const opt = e.target.closest('[data-opt-group] .opt');
+  if (opt) {
+    const group = opt.closest('[data-opt-group]');
+    setOptGroup(group, opt.dataset.opt);
+    if (group.dataset.optGroup === 'nhType') {
+      document.getElementById('nhType').value = opt.dataset.opt;
+      syncNewHireForm();
+    } else if (group.dataset.optGroup === 'nhAccount') {
+      // Nothing else on the form depends on it.
+    } else {
+      syncNewHireContract();
+    }
+    return;
+  }
+  const chip = e.target.closest('#nhEndRow [data-term-months]');
+  if (chip) {
+    const start = document.getElementById('nhStartDate')?.value;
+    if (!start) { setHiringNotice('Set the start date first.', 'mini-meta warn'); return; }
+    document.querySelectorAll('#nhEndRow .opt-chip').forEach((c) => c.classList.toggle('is-on', c === chip));
+    document.getElementById('nhEndDate').value = addMonthsIso(start, Number(chip.dataset.termMonths));
+    syncNewHireContract();
+  }
+});
+document.getElementById('nhEndDate')?.addEventListener('change', () => {
+  document.querySelectorAll('#nhEndRow .opt-chip').forEach((c) => c.classList.remove('is-on'));
+  syncNewHireContract();
+});
+// @circle-omit Colony-only: hire start dates
+// A weekend or holiday start date gets a warning line under its field
+// (Manisha's Sunday start, 31 Oct 2026): New hire, Offer terms, joining form.
+function showStartDateWarning(input) {
+  if (!input) return '';
+  const msg = startDateWarning(input.value, getPublicHolidays());
+  const host = input.closest('label') || input.parentElement;
+  let line = host?.querySelector('[data-start-warn]');
+  if (!line && host) {
+    line = document.createElement('span');
+    line.className = 'mini-meta start-warn';
+    line.setAttribute('data-start-warn', '');
+    line.setAttribute('role', 'status');
+    host.appendChild(line);
+  }
+  if (line) { line.textContent = msg; line.hidden = !msg; }
+  return msg;
+}
+document.addEventListener('change', (e) => {
+  if (e.target.matches?.('#nhStartDate, #hfStartDate, [data-ot-hire="start_date"]')) showStartDateWarning(e.target);
+});
+// @circle-omit-end
+document.getElementById('nhStartDate')?.addEventListener('change', () => {
+  // Keep a chosen 3/6/12-month term in step with a changed start date.
+  const chip = document.querySelector('#nhEndRow .opt-chip.is-on');
+  const start = document.getElementById('nhStartDate').value;
+  if (chip && start) document.getElementById('nhEndDate').value = addMonthsIso(start, Number(chip.dataset.termMonths));
+  syncNewHireContract();
+});
+
+// Profile -> hiring record (30 Sep 2026). Hires and employees share no
+// key (personal Gmail vs work address), so this matches on first + last name,
+// the same way the hire checklist does. Hiring crew only: the record holds
+// PAN, bank and salary slips, and RLS returns nothing to anyone else anyway.
+let hireReturnProfile = null; // name to go back to after opening from a profile
+let pendingHireFocus = null;  // hire id to open once the Hiring list renders
+let pendingHireFocusQuiet = false; // re-opening after an action: don't jump the page
+async function renderProfileHireLink(fullName) {
+  // Leadership only (8 Oct 2026) — not the wider hiring crew.
+  if (!profileMetaLine || !state.supabase || !isLeadershipRole()) return;
+  const key = displayPersonName(fullName, '').toLowerCase();
+  if (!key) return;
+  const { data } = await state.supabase.from('hires').select('id, full_name, stage, hire_type').neq('stage', 'cancelled');
+  const hire = (data || []).find((h) => displayPersonName(h.full_name, '').toLowerCase() === key);
+  if (!hire || profileMetaLine.querySelector('[data-profile-hire]')) return;
+  // Fixed-term fractionals/consultants show their contract end (6 Oct 2026).
+  let contract = '';
+  if (hire.hire_type !== 'full-time') {
+    const { data: terms } = await state.supabase.from('hire_offer_terms').select('contract_end_date').eq('hire_id', hire.id).maybeSingle();
+    const pill = contractPill(hire, terms);
+    if (pill) contract = `<span class="dot">&middot;</span>${pill}`;
+  }
+  profileMetaLine.insertAdjacentHTML('beforeend', `${contract}<span class="dot">&middot;</span><a href="#hiring" class="profile-hire-link" data-profile-hire="${escapeHtml(hire.id)}">Hiring record →</a>`);
+}
+profileMetaLine?.addEventListener('click', (e) => {
+  const a = e.target.closest('[data-profile-hire]');
+  if (!a) return;
+  e.preventDefault();
+  pendingHireFocus = a.dataset.profileHire;
+  hireReturnProfile = document.getElementById('profileMainHeading')?.textContent || 'the profile';
+  navigateToScreen('hiring');
+});
 
 async function loadHiringPanel() {
   const panel = document.getElementById('hiringPanel');
@@ -20590,35 +23690,49 @@ async function loadHiringPanel() {
   if (!crew) return;
   const reportsTo = document.getElementById('nhReportsTo');
   if (reportsTo) { const keep = reportsTo.value; reportsTo.innerHTML = `<option value="">— Select —</option>${reportsToOptions(keep)}`; }
-  const [hiresRes, termsRes] = await Promise.all([
+  const [hiresRes, termsRes, historyRes] = await Promise.all([
     state.supabase.from('hires').select('*').order('created_at', { ascending: false }),
     // Crew-only table: a candidate or ordinary employee simply gets nothing.
-    state.supabase.from('hire_offer_terms').select('*')
+    state.supabase.from('hire_offer_terms').select('*'),
+    // When each step happened, for the dates on the checklist (crew-only too).
+    state.supabase.from('hire_stage_history').select('hire_id, stage, entered_at, changed_by_employee_id').order('entered_at', { ascending: true })
   ]);
   const { data, error } = hiresRes;
   if (error) { setHiringNotice('Could not load hires: ' + error.message, 'mini-meta warn'); return; }
   hiresCache = data || [];
   offerTermsByHireId = {};
   (termsRes.data || []).forEach((t) => { offerTermsByHireId[t.hire_id] = t; });
+  // Latest entry into each stage wins: a draft sent back and redone is dated
+  // by the redo.
+  hireStageAtById = {};
+  hireSentById = {};
+  (historyRes.data || []).forEach((r) => {
+    (hireStageAtById[r.hire_id] ||= {})[r.stage] = r.entered_at;
+    // 'reviewed' is entered by Approve & send; papersign-send stamps who.
+    if (r.stage === 'reviewed') hireSentById[r.hire_id] = r.changed_by_employee_id || null;
+  });
   // Only setup approvers create hires.
   // Leadership opens hires now, not only setup approvers (11 Sep 2026).
-  document.getElementById('hiringCreateBar')?.classList.toggle('hidden', !(state.hiringOnlyMode ? false : (isSetupApprover() || isLeadershipRole())));
+  // Only people who can open a hire see the New hire section at all; before
+  // it collapsed, Legal and Finance saw a half form (scope + Open hire).
+  const canOpenHire = !state.hiringOnlyMode && (isSetupApprover() || isLeadershipRole());
+  document.getElementById('hireCreatePanel')?.classList.toggle('hidden', !canOpenHire);
   syncNewHireForm();
   renderHiringList();
+  renderPendingSetupAdmin().catch(console.error);
 }
 
 // Offer terms, keyed by hire. Separate from hiresCache because they live in a
 // separate, crew-only table (compensation must stay off the candidate's row).
 let offerTermsByHireId = {};
-
-function hireStageChip(stage) {
-  return `<span class="brief-status-chip">${escapeHtml(HIRE_STAGE_LABEL[stage] || stage)}</span>`;
-}
+let hireStageAtById = {};
+let hireSentById = {};
 
 // The terms Your Agency agrees at offer, which Legal needs to draft the agreement
 // (Leo's checklist, 24 Aug 2026). We fill these — the candidate never sees
-// them, and the CTC breakup deliberately is not here: Blake works it out per
-// hire and it travels in the stage email.
+// them. For employees Finance (Blake) also enters the CTC breakup here; it
+// prints as Annexure B of the employment agreement (21 Sep 2026 — it
+// used to travel in a reply-all to the stage email).
 // "Reports to": who the hire will report to, picked from leadership rather
 // than typed (25 Aug 2026; renamed from "hiring manager" 11 Sep — only
 // Alex or Nadia ever hire, so the useful fact is the reporting line). The
@@ -20639,12 +23753,16 @@ function reportsToOptions(currentEmail) {
   return people.map((p) =>
     `<option value="${escapeHtml(p.email)}"${p.email === current ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
 }
+// Only leadership may change it (trg_guard_hiring_manager, 14 Oct 2026): the
+// hiring manager can activate the hire. Crew see it locked, and the save sends
+// the unchanged value, which the guard allows (audit 20 Oct 2026).
 function reportsToField(currentEmail) {
   const options = reportsToOptions(currentEmail);
+  const locked = isLeadershipRole() ? '' : ' disabled title="Only leadership can change who the hire reports to."';
   if (!options) {
-    return `<input type="email" data-ot="hiring_manager_email" value="${escapeHtml(currentEmail || '')}" placeholder="name@youragency.com">`;
+    return `<input type="email" data-ot="hiring_manager_email" value="${escapeHtml(currentEmail || '')}" placeholder="name@youragency.com"${locked}>`;
   }
-  return `<select data-ot="hiring_manager_email"><option value="">— Select —</option>${options}</select>`;
+  return `<select data-ot="hiring_manager_email"${locked}><option value="">— Select —</option>${options}</select>`;
 }
 
 function renderOfferTermsEditor(h) {
@@ -20664,6 +23782,11 @@ function renderOfferTermsEditor(h) {
         <button class="ghost small" data-save-offer-terms="${h.id}" type="button">Save offer terms</button>
       </div>
       <div class="form-grid offer-terms-grid">
+        <!-- Employment type is editable here, not only on the New hire form: it
+             changes mid-flight (7 Oct 2026). Switching it rewrites which
+             compensation field applies, so saving clears the one that no longer does. -->
+        <label class="form-field"><span>Employment type</span>
+          <select data-ot-hire="hire_type">${EMPLOYMENT_TYPES.map((v) => `<option value="${v}"${h.hire_type === v ? ' selected' : ''}>${escapeHtml(HIRE_TYPE_LABEL[v] || v)}</option>`).join('')}</select></label>
         <label class="form-field"><span>Designation</span>
           <input type="text" data-ot="designation" value="${escapeHtml(t.designation || '')}" placeholder="e.g. Copywriter"></label>
         <label class="form-field"><span>Department</span>
@@ -20671,11 +23794,12 @@ function renderOfferTermsEditor(h) {
         ${h.hire_type === 'full-time'
           ? `<label class="form-field"><span>CTC (annual, ₹)</span>
           <input type="number" data-ot="ctc_annual" min="0" step="1000" value="${t.ctc_annual != null ? escapeHtml(String(t.ctc_annual)) : ''}" placeholder="e.g. 1200000"></label>`
-          : `<label class="form-field"><span>Monthly fee (₹)</span>
+          : `<label class="form-field"><span>Monthly fee (₹, GST extra)</span>
           <input type="number" data-ot="monthly_fee" min="0" step="1000" value="${t.monthly_fee != null ? escapeHtml(String(t.monthly_fee)) : ''}" placeholder="e.g. 60000"></label>`}
-        <label class="form-field"><span>Notice period</span>
+        <label class="form-field" data-ot-notice-field><span>Notice period</span>
           <select data-ot="notice_period_days">
             <option value="">— Select —</option>
+            ${h.hire_type !== 'full-time' ? `<option value="7"${notice === 7 ? ' selected' : ''}>7 days</option>` : ''}
             <option value="30"${notice === 30 ? ' selected' : ''}>30 days</option>
             <option value="60"${notice === 60 ? ' selected' : ''}>60 days</option>
           </select></label>
@@ -20685,19 +23809,91 @@ function renderOfferTermsEditor(h) {
              this form: dates move, and it was only editable by the candidate
              (25 Aug 2026). Saved back to app.hires. -->
         <label class="form-field"><span>Start date</span>
-          <input type="date" data-ot-hire="start_date" value="${escapeHtml(h.start_date || '')}"></label>
+          <input type="date" data-ot-hire="start_date" value="${escapeHtml(h.start_date || '')}">
+          <span class="mini-meta start-warn" data-start-warn role="status"${startDateWarning(h.start_date, getPublicHolidays()) ? '' : ' hidden'}>${escapeHtml(startDateWarning(h.start_date, getPublicHolidays()))}</span></label>
+        ${h.hire_type !== 'full-time' ? `<div class="form-field nh-contract" data-ot-contract="${h.id}"><span>Contract</span>
+          <div class="opt-group" role="radiogroup" aria-label="Contract">
+            <button type="button" class="opt${t.contract_end_date ? '' : ' is-on'}" role="radio" aria-checked="${t.contract_end_date ? 'false' : 'true'}" data-opt="ongoing">Ongoing</button>
+            <button type="button" class="opt${t.contract_end_date ? ' is-on' : ''}" role="radio" aria-checked="${t.contract_end_date ? 'true' : 'false'}" data-opt="fixed">Fixed term</button>
+          </div>
+          <div class="nh-end${t.contract_end_date ? '' : ' hidden'}">
+            <input type="date" data-ot="contract_end_date" value="${escapeHtml(t.contract_end_date || '')}" aria-label="End date">
+            <span class="nh-term-len">${escapeHtml(termLengthLabel(h.start_date, t.contract_end_date))}</span>
+          </div></div>` : ''}
       </div>
       <label class="form-field" style="margin-top:12px;"><span>Scope of work</span>
         <textarea data-ot="scope_of_work" rows="3" placeholder="What this role covers — goes into the agreement.">${escapeHtml(t.scope_of_work || '')}</textarea></label>
-      ${h.hire_type === 'fractional' ? `<div class="form-field" style="margin-top:12px;"><span>Clients they cover <span class="mini-meta">(add more any time — this is what activation scopes them to)</span></span>
+      ${h.hire_type === 'full-time' ? renderCtcBreakupEditor(h.id, t) : ''}
+      ${h.hire_type === 'fractional' ? `<div class="form-field" style="margin-top:12px;"><span>Clients they cover <span class="mini-meta">(used when they're activated; after that, change them on their profile)</span></span>
         <div class="check-grid" data-ot-clients="${h.id}">${clientCheckboxes(t.scoped_client_ids || [], 'ot')}</div></div>` : ''}
     </div>`;
+}
+
+// Annexure B: each CTC component and its annual amount. Finance fills it once
+// the candidate's details are in; the agreement will not draft until the rows
+// add up to the CTC above.
+// Annexure B in the Papersign template has ten lines: nine components and the
+// total (papersign.js MAX_BREAKUP_COMPONENTS). Keep the two in step.
+const CTC_BREAKUP_MAX_ROWS = 9;
+
+function ctcBreakupRowHtml(row = {}) {
+  return `<div class="ctc-breakup-row" data-ctc-row>
+      <input type="text" data-ctc-component value="${escapeHtml(row.component || '')}" placeholder="Component, e.g. Basic" aria-label="Component">
+      <input type="number" data-ctc-annual min="0" step="1" value="${row.annual != null ? escapeHtml(String(row.annual)) : ''}" placeholder="Annual ₹" aria-label="Annual amount (₹)">
+      <button class="ghost small" type="button" data-ctc-remove aria-label="Remove component">✕</button>
+    </div>`;
+}
+
+function renderCtcBreakupEditor(hireId, t) {
+  const rows = Array.isArray(t.ctc_breakup) && t.ctc_breakup.length ? t.ctc_breakup : [{}, {}];
+  const total = ctcBreakupTotalText(rows, t.ctc_annual);
+  return `<div class="form-field ctc-breakup" style="margin-top:12px;" data-ctc-breakup="${hireId}">
+      <span>CTC breakup — Annexure B <span class="mini-meta">(Finance · annual amounts, must add up to the CTC)</span></span>
+      <div class="ctc-breakup-rows">${rows.map(ctcBreakupRowHtml).join('')}</div>
+      <div class="ctc-breakup-foot">
+        <button class="ghost small" type="button" data-ctc-add>+ Add component</button>
+        <span class="mini-meta${total.off ? ' ctc-off' : ''}" data-ctc-total>${escapeHtml(total.text)}</span>
+      </div>
+    </div>`;
+}
+
+function readCtcBreakup(wrap) {
+  return [...wrap.querySelectorAll('[data-ctc-row]')]
+    .map((r) => ({
+      component: r.querySelector('[data-ctc-component]')?.value.trim() || '',
+      annual: Number(r.querySelector('[data-ctc-annual]')?.value || 0)
+    }))
+    .filter((r) => r.component || r.annual);
+}
+
+// "Adds up to ₹X of ₹Y", so a mismatch shows before anyone tries to draft.
+function ctcBreakupTotalText(rows, ctcValue) {
+  const total = (rows || []).reduce((sum, r) => sum + (Number(r.annual) || 0), 0);
+  const ctc = Number(ctcValue || 0);
+  const fmt = (n) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+  if (!total) return { text: '', off: false };
+  const off = Boolean(ctc) && Math.round(total) !== Math.round(ctc);
+  if (!ctc) return { text: `Adds up to ${fmt(total)}`, off };
+  return { text: `Adds up to ${fmt(total)} of ${fmt(ctc)}${off ? ` — ${fmt(Math.abs(ctc - total))} ${total < ctc ? 'short' : 'over'}` : ' ✓'}`, off };
+}
+
+function updateCtcBreakupTotal(wrap) {
+  const box = wrap?.querySelector('[data-ctc-breakup]');
+  const out = box?.querySelector('[data-ctc-total]');
+  if (!out) return;
+  const { text, off } = ctcBreakupTotalText(readCtcBreakup(box), wrap.querySelector('[data-ot="ctc_annual"]')?.value);
+  out.textContent = text;
+  out.classList.toggle('ctc-off', off);
 }
 
 async function saveOfferTerms(hireId) {
   const wrap = document.querySelector(`[data-offer-terms="${hireId}"]`);
   const notice = document.querySelector(`[data-offer-terms-notice="${hireId}"]`);
   if (!wrap || !state.supabase) return;
+  const newStart = wrap.querySelector('[data-ot-hire="start_date"]')?.value || null;
+  const startWarn = newStart && newStart !== (hiresCache.find((x) => x.id === hireId)?.start_date || null)
+    ? startDateWarning(newStart, getPublicHolidays()) : '';
+  if (startWarn && !await appConfirm(`${startWarn} Keep ${shortHireDate(newStart)} as the start date?`, { title: 'Start date', confirmLabel: 'Keep the date' })) return;
   const val = (name) => wrap.querySelector(`[data-ot="${name}"]`)?.value?.trim() || '';
   const payload = {
     hire_id: hireId,
@@ -20713,6 +23909,27 @@ async function saveOfferTerms(hireId) {
   // is what the form shows for employees. Whichever is absent stays as it was.
   const feeEl = wrap.querySelector('[data-ot="monthly_fee"]');
   if (feeEl) payload.monthly_fee = feeEl.value ? Number(feeEl.value) : null;
+  const breakupBox = wrap.querySelector('[data-ctc-breakup]');
+  if (breakupBox) {
+    const rows = readCtcBreakup(breakupBox);
+    if (rows.some((r) => !r.component || !(r.annual > 0))) {
+      if (notice) notice.textContent = 'Each breakup row needs a component and an amount.';
+      return;
+    }
+    if (rows.length > CTC_BREAKUP_MAX_ROWS) {
+      if (notice) notice.textContent = `The agreement fits ${CTC_BREAKUP_MAX_ROWS} breakup components — combine some.`;
+      return;
+    }
+    payload.ctc_breakup = rows.length ? rows.map((r) => ({ component: r.component, annual: Math.round(r.annual) })) : null;
+  }
+  // Fixed term: Ongoing clears the end date (6 Oct 2026).
+  const contractBox = wrap.querySelector(`[data-ot-contract="${hireId}"]`);
+  if (contractBox) {
+    const fixed = contractBox.querySelector('.opt.is-on')?.dataset.opt === 'fixed';
+    const end = contractBox.querySelector('[data-ot="contract_end_date"]')?.value || null;
+    if (fixed && !end) { if (notice) notice.textContent = 'Pick the end date, or choose Ongoing.'; return; }
+    payload.contract_end_date = fixed ? end : null;
+  }
   const clientBox = wrap.querySelector(`[data-ot-clients="${hireId}"]`);
   if (clientBox) payload.scoped_client_ids = [...clientBox.querySelectorAll('input:checked')].map((cb) => cb.value);
   if (notice) notice.textContent = 'Saving…';
@@ -20720,13 +23937,29 @@ async function saveOfferTerms(hireId) {
   if (error) { if (notice) notice.textContent = 'Could not save: ' + error.message; return; }
   offerTermsByHireId[hireId] = { ...(offerTermsByHireId[hireId] || {}), ...payload };
 
-  // Start date is a column on app.hires, so it saves separately.
+  // Start date and employment type are columns on app.hires, so they save separately.
   const startDate = wrap.querySelector('[data-ot-hire="start_date"]')?.value || null;
+  const newType = wrap.querySelector('[data-ot-hire="hire_type"]')?.value || null;
   const hire = hiresCache.find((x) => x.id === hireId);
-  if (hire && (hire.start_date || null) !== startDate) {
-    const { error: hireErr } = await state.supabase.from('hires').update({ start_date: startDate }).eq('id', hireId);
-    if (hireErr) { if (notice) notice.textContent = 'Terms saved, but start date failed: ' + hireErr.message; return; }
+  const typeChanged = Boolean(hire && newType && EMPLOYMENT_TYPES.includes(newType) && newType !== hire.hire_type);
+  if (hire && ((hire.start_date || null) !== startDate || typeChanged)) {
+    const hirePatch = { start_date: startDate };
+    if (typeChanged) hirePatch.hire_type = newType;
+    const { error: hireErr } = await state.supabase.from('hires').update(hirePatch).eq('id', hireId);
+    if (hireErr) { if (notice) notice.textContent = 'Terms saved, but the hire did not update: ' + hireErr.message; return; }
     hire.start_date = startDate;
+    if (typeChanged) {
+      hire.hire_type = newType;
+      // The money follows the type: a salaried hire has no monthly fee and no
+      // fixed term; one who invoices has no CTC and no breakup. Clearing the
+      // stale side stops a consultant carrying a CTC into the agreement.
+      const stale = newType === 'full-time'
+        ? { monthly_fee: null, contract_end_date: null }
+        : { ctc_annual: null, ctc_breakup: null };
+      const { error: staleErr } = await state.supabase.from('hire_offer_terms').update(stale).eq('hire_id', hireId);
+      if (staleErr) { if (notice) notice.textContent = 'Type saved, but the old pay fields remain: ' + staleErr.message; return; }
+      offerTermsByHireId[hireId] = { ...(offerTermsByHireId[hireId] || {}), ...stale };
+    }
     renderHiringList();
     // Re-rendering replaces this drawer, so reopen it and report there.
     const detail = document.querySelector(`[data-hire-detail="${hireId}"]`);
@@ -20741,15 +23974,31 @@ async function saveOfferTerms(hireId) {
 async function renderHiringList() {
   const listEl = document.getElementById('hiringList');
   if (!listEl) return;
-  const showDone = document.getElementById('hiringShowDone')?.checked;
+  // A re-render (data arriving, Refresh, a save) must not fold the hire you
+  // are looking at. It did, and an email link that had opened Manisha's hire
+  // collapsed under you and left the page on Payal's (30 Oct 2026).
+  const keepOpen = [...listEl.querySelectorAll('[data-hire-detail]:not(.hidden)')].map((d) => d.dataset.hireDetail);
+  // Steps inside a hire you opened or folded by hand stay that way too.
+  const keepSteps = new Map([...listEl.querySelectorAll('[data-hc-toggle]')].map((t) => [t.dataset.hcToggle, t.getAttribute('aria-expanded') === 'true']));
+  const hireFilter = document.querySelector('#hiringFilters .opt-chip.is-on')?.dataset.hireFilter || 'active';
   // "Done" means the checklist is done, not that payroll is: a hire at
   // payroll_done with no account yet, or not signed in, or not activated, is
   // the one most in need of showing (Asha sat there for three days).
   const isFinished = (h) => {
     if (h.stage === 'cancelled') return true;
-    return renderHireChecklistHtml.rowsFor(h).every((r) => r.state === 'done');
+    return renderHireChecklistHtml.rowsFor(h).every((r) => r.state === 'done' || r.nonBlocking);
   };
-  const rows = hiresCache.filter(h => showDone || !isFinished(h));
+  // Three buckets, so completed and cancelled are each reachable on their own
+  // rather than lumped behind one 'done' toggle (7 Oct 2026).
+  const bucketOf = (h) => (h.stage === 'cancelled' ? 'cancelled' : (isFinished(h) ? 'completed' : 'active'));
+  const counts = { active: 0, completed: 0, cancelled: 0, all: hiresCache.length };
+  hiresCache.forEach(h => { counts[bucketOf(h)] += 1; });
+  document.querySelectorAll('#hiringFilters .opt-chip').forEach(chip => {
+    const k = chip.dataset.hireFilter;
+    const base = { active: 'In progress', completed: 'Completed', cancelled: 'Cancelled', all: 'All' }[k];
+    chip.textContent = `${base} (${counts[k] || 0})`;
+  });
+  const rows = hiresCache.filter(h => hireFilter === 'all' || bucketOf(h) === hireFilter);
   if (!rows.length) {
     // No empty-state copy: the create row above already says what this is for.
     listEl.innerHTML = '';
@@ -20758,103 +24007,85 @@ async function renderHiringList() {
   const isApprover = !state.hiringOnlyMode && isSetupApprover();
   const mySignerTurn = isSuperadminUser();
   listEl.innerHTML = rows.map(h => {
-    const details = [
-      ['Type', HIRE_TYPE_LABEL[h.hire_type] || h.hire_type],
-      ['Start date', h.start_date],
-      ['Personal email', h.personal_email],
-      ['Mobile', h.phone],
-      ['DOB', h.date_of_birth],
-      ['PAN', h.pan],
-      ['Address', h.address],
-      ['Bank', h.bank_account_name ? `${h.bank_account_name} · ${h.bank_account_number} · ${h.bank_ifsc}` : ''],
-      ['Slips', h.no_salary_slips ? 'Candidate did not have salary slips' : ''],
-      ['Slips note', h.salary_slips_note],
-      ['Tax regime', h.tax_regime ? (h.tax_regime === 'old' ? 'Old' : 'New') : ''],
-      ['HRA/80C/80D', h.tax_declarations_note]
-    ].filter(([, v]) => v && String(v).trim() !== '');
-    // Everything for one person on one line: stage, the step they are waiting
-    // on, Details, then Cancel last (24 Aug 2026 — he asked for Cancel
-    // beside Details rather than on its own row). Cancel keeps its red
-    // treatment and stays last, so it is never adjacent to the button someone
-    // actually came here to click.
-    const actions = [];
-    if (h.stage === 'details_submitted') {
-      actions.push(`<label class="ghost small" style="cursor:pointer;">Upload contract draft<input type="file" data-hire-contract="${h.id}" accept=".pdf,.doc,.docx" style="display:none;"></label>`);
-    }
-    if (h.stage === 'contract_uploaded' && isApprover) {
-      actions.push(`<button class="ghost small" data-hire-action="reviewed" data-hire-id="${h.id}" type="button">Approve draft</button>`);
-      actions.push(`<button class="ghost small" data-hire-action="details_submitted" data-hire-id="${h.id}" type="button">Send back</button>`);
-    }
-    // Legal can correct a draft at ANY point before signature. Previously the
-    // upload control existed only at 'details_submitted', so a typo spotted
-    // after approval had no route back at all — not even for an approver
-    // (Maya's contract, 25 Aug 2026). Replacing an APPROVED draft returns it
-    // to review: the thing that was approved no longer exists.
-    const viaPapersign = Boolean(state.runtimeConfig?.papersign);
+    // One drawer, not two. Checklist and Details used to sit side by side
+    // showing different facts about the same person, so you had to remember
+    // which held what (7 Oct 2026). Now every step opens where it stands
+    // and carries its own action; the header is just who this is and where they
+    // are. Kept on data-hire-detail so ?open=hire: and ?open=hireterms: still land.
     const terms = offerTermsByHireId[h.id] || {};
-    if (viaPapersign) {
-      // Contracts through Papersign (11 Sep 2026): draft from the template,
-      // Leo reviews it there, an approver sends it, the webhook files it.
-      if (h.stage === 'details_submitted' && !terms.papersign_draft_id) {
-        actions.push(`<button class="ghost small" data-hire-ps-draft="${h.id}" type="button">Draft agreement in Papersign</button>`);
-      }
-      if (terms.papersign_draft_id && !terms.papersign_sent_at) {
-        actions.push(`<a class="ghost small" href="https://paperform.co/sign" target="_blank" rel="noopener">Review draft ↗</a>`);
-        if (isApprover) actions.push(`<button class="ghost small" data-hire-ps-send="${h.id}" type="button">Approve &amp; send for signing</button>`);
-      }
-      if (terms.papersign_sent_at && !terms.papersign_completed_at) {
-        actions.push(`<span class="mini-meta">Out for signature since ${escapeHtml(briefDateLabel(terms.papersign_sent_at))}</span>`);
-      }
-    } else {
-      if (['contract_uploaded', 'reviewed'].includes(h.stage)) {
-        actions.push(`<label class="ghost small" style="cursor:pointer;">Replace draft<input type="file" data-hire-contract="${h.id}" accept=".pdf,.doc,.docx" style="display:none;"></label>`);
-      }
-      if (h.stage === 'reviewed' && mySignerTurn) {
-        actions.push(`<label class="ghost small" style="cursor:pointer;">Upload signed contract<input type="file" data-hire-signed="${h.id}" accept=".pdf" style="display:none;"></label>`);
-      }
-    }
-    if (h.stage === 'signed') {
-      actions.push(`<button class="ghost small" data-hire-action="payroll_done" data-hire-id="${h.id}" type="button">Payroll started ✓</button>`);
-    }
-    // Payroll done is not the end: they cannot appear in Colony until their
-    // @youragency.com account exists, and nothing else in the app asks for it.
+    const viaPapersign = Boolean(state.runtimeConfig?.papersign);
     const workspace = hireWorkspaceState(h, hireHasEmployeeRow(h));
-    const checklistHtml = renderHireChecklistHtml(h);
-    if (workspace === 'needed' && isApprover) {
-      actions.push(`<button class="ghost small" data-hire-workspace="${h.id}" type="button">${state.runtimeConfig?.workspaceProvisioning ? 'Create' : 'Request'} @youragency.com account</button>`);
-    }
+    const checklistHtml = renderHireChecklistHtml(h, { isApprover, mySignerTurn, terms, viaPapersign, workspace });
     const canCancel = isApprover && !['payroll_done', 'cancelled'].includes(h.stage);
     return `<div class="hire-row" data-hire-row="${h.id}">
       <div class="hire-row-head">
         <span class="hire-row-name">${escapeHtml(h.full_name)}</span>
-        ${hireStageChip(h.stage)}
-        ${actions.join('')}
-        <span class="hire-row-now">${(() => { const cur = renderHireChecklistHtml.rowsFor(h).find((r) => r.state === 'current'); return cur ? `now: <b>${escapeHtml(cur.label)}</b> · ${escapeHtml(HIRE_OWNER_LABEL[cur.owner] || cur.owner)}` : ''; })()}</span>
-        <button class="ghost small" data-hire-checklist-toggle="${h.id}" type="button">Checklist</button>
-        <button class="ghost small" data-hire-toggle="${h.id}" type="button">Details</button>
+        <span class="brief-status-chip">${escapeHtml(hireStepStatus(renderHireChecklistHtml.rowsFor(h), h.stage))}</span>
+        ${contractPill(h, terms)}
+        <button class="ghost small" data-hire-toggle="${h.id}" type="button">Open</button>
+        <!-- Refresh, as a circle, on the hire's own row (30 Oct 2026):
+             hires move fast and a full reload lost your place. -->
+        <button class="ghost small hire-refresh" data-hire-refresh type="button" title="Refresh" aria-label="Refresh hires"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+        ${isApprover && canSkipHireStage(h.stage) ? `<button class="ghost small" data-hire-skip="${h.id}" type="button">Skip this step</button>` : ''}
         ${canCancel ? `<button class="ghost small danger-text" data-hire-action="cancelled" data-hire-id="${h.id}" type="button">Cancel</button>` : ''}
-        ${isApprover && canSkipHireStage(h.stage) ? `<button class="ghost small" data-hire-skip="${h.id}" type="button" title="This step happened outside Colony">Skip</button>` : ''}
         <span class="hire-row-status mini-meta" data-hire-status="${h.id}"></span>
       </div>
-      <!-- Collapsed by default (11 Sep 2026): the header says what is
-           happening now; the full checklist is one click away. -->
-      <div class="hidden" data-hire-checklist="${h.id}">
-        ${(h.skipped_stages || []).length ? `<p class="mini-meta hire-skipped-note">Skipped (done outside Colony): ${escapeHtml(skippedHireStageLabels(h).join(', '))}</p>` : ''}
-        ${workspace === 'needed' ? '<p class="mini-meta hire-next-step">Waiting on their @youragency.com account — they cannot sign in until it exists.</p>' : ''}
-        ${checklistHtml}
-        ${workspace === 'requested' ? `<p class="mini-meta hire-next-step">Account requested ${escapeHtml(briefDateLabel(h.workspace_requested_at))} — waiting for their first sign-in.</p>` : ''}
-      </div>
+      <!-- Collapsed by default (11 Sep 2026). -->
       <div class="hidden" data-hire-detail="${h.id}">
-        <dl class="brief-summary-grid">${details.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
-        ${renderOfferTermsEditor(h)}
-        <div data-hire-files="${h.id}"><p class="mini-meta">Loading files…</p></div>
+        ${(h.skipped_stages || []).length ? `<p class="mini-meta hire-skipped-note">Skipped (done outside Colony): ${escapeHtml(skippedHireStageLabels(h).join(', '))}</p>` : ''}
+        ${checklistHtml}
+        <p class="hire-detail-foot"><button class="ghost small" data-hire-close="${h.id}" type="button">${hireReturnProfile ? `← Back to ${escapeHtml(hireReturnProfile)}` : '← Back to all hires'}</button></p>
       </div>
     </div>`;
   }).join('');
 
   // A heading so the list reads as a list of people, not as stray text under
   // the form — 'Maya Rao' on its own did not announce itself as a name.
-  listEl.innerHTML = `<p class="hire-list-heading">${showDone ? 'Hires' : 'Active hires'}</p>` + listEl.innerHTML;
+  const headingFor = { active: 'Hires in progress', completed: 'Completed hires', cancelled: 'Cancelled hires', all: 'All hires' };
+  listEl.innerHTML = `<p class="hire-list-heading">${headingFor[hireFilter] || 'Hires'}</p>` + listEl.innerHTML;
+  keepOpen.forEach((id) => {
+    const detail = listEl.querySelector(`[data-hire-detail="${cssEscape(id)}"]`);
+    if (!detail) return;
+    detail.classList.remove('hidden');
+    const btn = listEl.querySelector(`[data-hire-toggle="${cssEscape(id)}"]`);
+    if (btn) btn.textContent = 'Hide details';
+    renderHireFiles(id).catch(console.error);
+  });
+  keepSteps.forEach((wasOpen, key) => {
+    const t = listEl.querySelector(`[data-hc-toggle="${cssEscape(key)}"]`);
+    const body = listEl.querySelector(`[data-hc-body="${cssEscape(key)}"]`);
+    if (!t || !body || (t.getAttribute('aria-expanded') === 'true') === wasOpen) return;
+    body.classList.toggle('hidden', !wasOpen);
+    t.setAttribute('aria-expanded', wasOpen ? 'true' : 'false');
+    const chev = t.querySelector('.hc-chev');
+    if (chev) chev.textContent = wasOpen ? '▾' : '▸';
+  });
+  focusPendingHire();
+}
+
+// Opened from an employee profile: show finished hires, unfold that one.
+function focusPendingHire() {
+  if (!pendingHireFocus) return;
+  const id = pendingHireFocus;
+  const chips = document.querySelectorAll('#hiringFilters .opt-chip');
+  const onAll = document.querySelector('#hiringFilters .opt-chip[data-hire-filter="all"]')?.classList.contains('is-on');
+  if (!document.querySelector(`[data-hire-row="${id}"]`) && chips.length && !onAll) {
+    chips.forEach(c => c.classList.toggle('is-on', c.dataset.hireFilter === 'all'));
+    renderHiringList();
+    return;
+  }
+  pendingHireFocus = null;
+  const detail = document.querySelector(`[data-hire-detail="${id}"]`);
+  if (!detail) return;
+  detail.classList.remove('hidden');
+  const btn = document.querySelector(`[data-hire-toggle="${id}"]`);
+  if (btn) btn.textContent = 'Hide details';
+  renderHireFiles(id).catch(console.error);
+  const quiet = pendingHireFocusQuiet;
+  pendingHireFocusQuiet = false;
+  const row = document.querySelector(`[data-hire-row="${id}"]`);
+  row?.scrollIntoView({ block: quiet ? 'nearest' : 'start', behavior: 'instant' });
+  if (row && !quiet) { row.classList.add('notify-anchor-flash'); setTimeout(() => row.classList.remove('notify-anchor-flash'), 2400); }
 }
 
 async function renderHireFiles(hireId) {
@@ -20880,7 +24111,7 @@ async function renderHireFiles(hireId) {
   };
   wrap.innerHTML = out.length
     ? out.map(f => `<div class="brief-deliv-row"><span style="flex:1;">${f.folder === 'contract' ? '📄' : '📎'} ${escapeHtml(f.name.replace(/^\d+_(draft|signed)_/, '').replace(/^\d+_/, ''))}</span>${tagFor(f)}<button class="ghost small" data-hire-file="${escapeHtml(f.path)}" type="button">Download</button></div>`).join('')
-    : '<p class="mini-meta">No files yet.</p>';
+    : '';
 }
 
 async function startHire() {
@@ -20892,11 +24123,34 @@ async function startHire() {
   const compensation = Number(val('nhComp')) || 0;
   const scope_of_work = val('nhScope');
   const scopedClients = [...document.querySelectorAll('#nhClients input:checked')].map((o) => o.value).filter(Boolean);
-  const notice_period_days = Number(val('nhNotice')) || 0;
+  const noticePicked = Number(val('nhNotice')) || 0;
   const reports_to = normalizeEmail(val('nhReportsTo'));
   const designation = val('nhDesignation');
+  const department = val('nhDept') || null;
+  const fixedTerm = hire_type !== 'full-time'
+    && document.querySelector('[data-opt-group="nhContract"] .opt.is-on')?.dataset.opt === 'fixed';
+  const contract_end_date = fixedTerm ? (val('nhEndDate') || null) : null;
+  // Every contract has a notice period for ending it early, fixed term
+  // included (3 Nov 2026).
+  const notice_period_days = noticePicked;
+  const workspace_not_needed = document.querySelector('[data-opt-group="nhAccount"] .opt.is-on')?.dataset.opt === 'not-needed';
   if (!full_name || !personal_email.includes('@')) {
     setHiringNotice('Enter the candidate\'s name and personal email.', 'mini-meta warn');
+    return;
+  }
+  // Name and email used to be the whole gate, so a hire could be opened with no
+  // team, no pay and no manager — and then sit in the checklist that way
+  // (Modeera, 7 Oct 2026). Everything the agreement and the joiner's account get
+  // built from is asked for here, once.
+  const needed = [
+    [department, 'Team'],
+    [designation, 'Designation'],
+    [compensation > 0, hireCompensationSpec(hire_type).label],
+    [reports_to.includes('@'), 'Reports to'],
+    [start_date, 'Start date']
+  ].filter(([v]) => !v).map(([, label]) => label);
+  if (needed.length) {
+    setHiringNotice(`Still needed: ${needed.join(', ')}.`, 'mini-meta warn');
     return;
   }
   // Everything the rest of the checklist works from is set here, once
@@ -20905,25 +24159,33 @@ async function startHire() {
   if (!start_date) { setHiringNotice('Set the start date — activation happens on it.', 'mini-meta warn'); return; }
   if (!compensation) { setHiringNotice(`Enter the ${hireCompensationSpec(hire_type).label.toLowerCase()} — Finance and Legal work from it.`, 'mini-meta warn'); return; }
   if (!scope_of_work) { setHiringNotice('Write a line of scope — it goes into the agreement.', 'mini-meta warn'); return; }
-  if (![30, 60].includes(notice_period_days)) { setHiringNotice('Pick the notice period — 30 or 60 days.', 'mini-meta warn'); return; }
+  const noticeOk = hire_type === 'full-time' ? [30, 60] : [7, 30, 60];
+  if (!noticeOk.includes(notice_period_days)) { setHiringNotice(`Pick the notice period: ${hire_type === 'full-time' ? '30 or 60' : '7, 30 or 60'} days.`, 'mini-meta warn'); return; }
   if (!reports_to) { setHiringNotice('Pick who they report to — it becomes their manager in Colony.', 'mini-meta warn'); return; }
+  const startWarn = startDateWarning(start_date, getPublicHolidays());
+  if (startWarn && !await appConfirm(`${startWarn} Keep ${shortHireDate(start_date)} as the start date?`, { title: 'Start date', confirmLabel: 'Keep the date' })) return;
   if (!designation) { setHiringNotice('Give the role a designation — it goes into the agreement and onto their profile.', 'mini-meta warn'); return; }
   if (personal_email.endsWith(ANT_DOMAIN)) {
     setHiringNotice('Use their personal email — the youragency.com account comes later.', 'mini-meta warn');
     return;
   }
+  if (fixedTerm && !contract_end_date) { setHiringNotice('Pick the end date, or choose Ongoing.', 'mini-meta warn'); return; }
+  if (contract_end_date && contract_end_date <= start_date) { setHiringNotice('The end date must be after the start date.', 'mini-meta warn'); return; }
   setHiringNotice('Creating…');
   const { data, error } = await state.supabase.from('hires')
-    .insert({ full_name, personal_email, start_date, hire_type, created_by: state.currentEmployeeId })
+    .insert({ full_name, personal_email, start_date, hire_type, workspace_not_needed, created_by: state.currentEmployeeId })
     .select();
   if (error) { setHiringNotice('Could not create: ' + error.message, 'mini-meta warn'); return; }
   // Offer terms are a crew-only table; the candidate never sees them.
   const spec = hireCompensationSpec(hire_type);
-  const terms = { hire_id: data[0].id, [spec.key]: compensation, scope_of_work, notice_period_days, hiring_manager_email: reports_to, designation, scoped_client_ids: scopedClients, updated_by_employee_id: state.currentEmployeeId || null };
+  const terms = { hire_id: data[0].id, [spec.key]: compensation, scope_of_work, notice_period_days, hiring_manager_email: reports_to, designation, department, scoped_client_ids: scopedClients, contract_end_date, updated_by_employee_id: state.currentEmployeeId || null };
   const { error: termsErr } = await state.supabase.from('hire_offer_terms').upsert(terms, { onConflict: 'hire_id' });
   if (termsErr) { setHiringNotice(`${full_name} created, but the terms did not save: ${termsErr.message}`, 'mini-meta warn'); }
-  ['nhName', 'nhEmail', 'nhStartDate', 'nhComp', 'nhScope', 'nhNotice', 'nhReportsTo', 'nhDesignation'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  ['nhName', 'nhEmail', 'nhStartDate', 'nhComp', 'nhScope', 'nhNotice', 'nhReportsTo', 'nhDesignation', 'nhEndDate', 'nhDept'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   document.querySelectorAll('#nhClients input:checked').forEach((cb) => { cb.checked = false; });
+  document.getElementById('nhType').value = setOptGroup(document.querySelector('[data-opt-group="nhType"]'), 'full-time');
+  setOptGroup(document.querySelector('[data-opt-group="nhAccount"]'), 'not-needed');
+  syncNewHireForm();
   notifyHireEvent('invited', data?.[0]?.id);
   setHiringNotice(`✓ ${full_name} invited — they've been emailed instructions.`);
   await loadHiringPanel();
@@ -20953,6 +24215,8 @@ async function uploadHireContract(hireId, file, signed) {
 
   if (signed) {
     await updateHireStage(hireId, 'signed');
+    // Nothing for Finance to set up for someone who invoices: straight on.
+    if (!isSalariedHire(hire)) await updateHireStage(hireId, 'payroll_done');
     setHireRowStatus(hireId, '✓ Signed contract uploaded — finance notified.');
     return;
   }
@@ -20991,7 +24255,7 @@ async function skipHireStage(hireId) {
   const from = HIRE_STAGE_LABEL[hire.stage] || hire.stage;
   const to = HIRE_STAGE_LABEL[toStage] || toStage;
   if (!await appConfirm(
-    `Skip "${from}" for ${hire.full_name}? Use this when it was handled outside Colony. It moves to "${to}", records the step as skipped, and sends no email.`,
+    `Skip "${from}" for ${hire.full_name}? Use this when it was handled outside Colony. It moves to "${to}" and records the step as skipped. ${skipShouldNotify(toStage) ? `Whoever acts on "${to}" is still emailed.` : 'No email is sent.'}`,
     { title: 'Skip this step', confirmLabel: 'Skip' }
   )) return;
   setHireRowStatus(hireId, `Skipping ${from}`, { busy: true });
@@ -21023,24 +24287,18 @@ async function requestWorkspaceAccount(hireId) {
   const address = await appPrompt(
     canProvision
       ? `Create which @youragency.com address for ${hire.full_name}? They'll be emailed a one-time password at ${hire.personal_email}.`
-      : `Which address should Example Reseller create for ${hire.full_name}?`,
-    { title: canProvision ? 'Create @youragency.com account' : 'Request @youragency.com account',
-      okLabel: canProvision ? 'Create account' : 'Open request', placeholder: suggestWorkEmail(hire.full_name) }
+      : `Which address did you create for ${hire.full_name}?`,
+    { title: canProvision ? 'Create @youragency.com account' : 'Add @youragency.com account',
+      okLabel: canProvision ? 'Create account' : 'Continue', placeholder: suggestWorkEmail(hire.full_name) }
   );
   if (address === null) return;
   const workEmail = (address || '').trim() || suggestWorkEmail(hire.full_name);
   if (canProvision) { await provisionWorkspaceAccount(hireId, hire, workEmail); return; }
-  const { subject, body } = workspaceRequestEmail(hire, workEmail);
-  const href = `mailto:${encodeURIComponent(WORKSPACE_VENDOR_TO)}`
-    + `?cc=${encodeURIComponent(WORKSPACE_VENDOR_CC.join(','))}`
-    + `&subject=${encodeURIComponent(subject)}`
-    + `&body=${encodeURIComponent(body)}`;
-  window.open(href, '_blank');
   // Only stamped once the person says they sent it — a draft that was opened
   // and abandoned must not read as done.
   if (!await appConfirm(
-    `Opened the request for ${workEmail}. Mark it as requested once you have sent it?`,
-    { title: 'Account requested?', confirmLabel: 'Yes, sent' }
+    `Have you created ${workEmail}? Colony will wait for their first sign-in.`,
+    { title: 'Account created?', confirmLabel: 'Yes, created' }
   )) return;
   setHireRowStatus(hireId, 'Saving', { busy: true });
   const { data, error } = await state.supabase.from('hires')
@@ -21055,35 +24313,137 @@ async function requestWorkspaceAccount(hireId) {
 
 // The automated path. The function does the work and holds the password for
 // one request; this side only reports what happened.
-async function provisionWorkspaceAccount(hireId, hire, workEmail) {
-  setHireRowStatus(hireId, 'Creating account', { busy: true });
+async function provisionWorkspaceAccount(hireId, hire, workEmail, requestLicence = false) {
+  setHireRowStatus(hireId, requestLicence ? 'Asking Example Reseller' : 'Creating account', { busy: true });
   let result = {};
   let ok = false;
   try {
     const res = await fetch('/api/workspace-provision', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session.access_token}` },
-      body: JSON.stringify({ hireId, workEmail })
+      body: JSON.stringify({ hireId, workEmail, requestLicence })
     });
     result = await res.json().catch(() => ({}));
     ok = res.ok || res.status === 207;
   } catch (e) { result = { error: e.message }; }
+  // Out of licences: a seat costs money and can't be removed, so Colony asks
+  // here before it emails Example Reseller (4 Nov 2026).
+  if (result.needsApproval && !requestLicence) {
+    setHireRowStatus(hireId, '');
+    if (!await appConfirm(`The Google Workspace licence limit is over. Add one more for ${hire.full_name}? Colony will email Example Reseller for the seat (it can't be removed later) and create the account once it's added.`,
+      { title: 'Add a Google licence?', confirmLabel: 'Ask Example Reseller' })) {
+      setHireRowStatus(hireId, 'No licence requested. Nothing was sent to Example Reseller.');
+      return;
+    }
+    await provisionWorkspaceAccount(hireId, hire, workEmail, true);
+    return;
+  }
+  // Once asked, Colony retries by itself, so the row just says so.
+  if (result.licence) { await loadHiringPanel(); setHireRowStatus(hireId, result.error); return; }
   if (!ok) { setHireRowStatus(hireId, `Could not create the account: ${result.error || 'unknown error'}`, { warn: true }); return; }
   await loadHiringPanel();
   if (result.warning) { setHireRowStatus(hireId, result.warning, { warn: true }); return; }
-  setHireRowStatus(hireId, `✓ ${result.workEmail} created — sign-in details emailed to ${hire.personal_email}.`);
+  // The account is fine either way; the all@ add is reported, not fatal.
+  if (result.groupNote) { setHireRowStatus(hireId, `✓ ${result.workEmail} created and sign-in details emailed. ${result.groupNote}`, { warn: true }); return; }
+  setHireRowStatus(hireId, `✓ ${result.workEmail} created and added to all@youragency.com — sign-in details emailed to ${hire.personal_email}.`);
 }
 
-document.getElementById('startHireBtn')?.addEventListener('click', () => startHire().catch(console.error));
-document.getElementById('hiringShowDone')?.addEventListener('change', () => renderHiringList());
+document.getElementById('startHireBtn')?.addEventListener('click', () => startHire().catch(actionFailed));
+document.getElementById('hiringFilters')?.addEventListener('click', (e) => {
+  const chip = e.target.closest('.opt-chip[data-hire-filter]');
+  if (!chip) return;
+  document.querySelectorAll('#hiringFilters .opt-chip').forEach(c => c.classList.toggle('is-on', c === chip));
+  renderHiringList();
+});
+document.getElementById('hiringList')?.addEventListener('input', (e) => {
+  if (e.target.closest('[data-ctc-breakup]') || e.target.matches('[data-ot="ctc_annual"]')) {
+    updateCtcBreakupTotal(e.target.closest('[data-offer-terms]'));
+  }
+});
 document.getElementById('hiringList')?.addEventListener('click', (e) => {
+  const contractOpt = e.target.closest('[data-ot-contract] .opt');
+  if (contractOpt) {
+    const box = contractOpt.closest('[data-ot-contract]');
+    setOptGroup(box.querySelector('.opt-group'), contractOpt.dataset.opt);
+    box.querySelector('.nh-end')?.classList.toggle('hidden', contractOpt.dataset.opt !== 'fixed');
+    return;
+  }
   const skip = e.target.closest('[data-hire-skip]');
-  if (skip) { skipHireStage(skip.dataset.hireSkip).catch(console.error); return; }
+  if (skip) { skipHireStage(skip.dataset.hireSkip).catch(actionFailed); return; }
+  const actNow = e.target.closest('[data-hire-activate-now]');
+  if (actNow) { activateHire(actNow.dataset.hireActivateNow).catch(actionFailed); return; }
+  const sched = e.target.closest('[data-hire-schedule]');
+  if (sched) {
+    const id = sched.dataset.hireSchedule;
+    const on = document.querySelector(`[data-hire-activate-on="${cssEscape(id)}"]`)?.value;
+    if (!on) { setHireRowStatus(id, 'Pick a day first.', { warn: true }); return; }
+    activateHire(id, on).catch(actionFailed);
+    return;
+  }
+  const unsched = e.target.closest('[data-hire-unschedule]');
+  if (unsched) {
+    const id = unsched.dataset.hireUnschedule;
+    state.supabase.rpc('cancel_hire_activation', { p_hire_id: id }).then(async ({ error }) => {
+      if (error) { setHireRowStatus(id, error.message, { warn: true }); return; }
+      pendingHireFocus = id; pendingHireFocusQuiet = true;
+      await loadHiringPanel();
+    }).catch(actionFailed);
+    return;
+  }
+  const hcT = e.target.closest('[data-hc-toggle]');
+  if (hcT) {
+    const body = document.querySelector(`[data-hc-body="${hcT.dataset.hcToggle}"]`);
+    if (body) {
+      const nowOpen = body.classList.toggle('hidden') === false;
+      hcT.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
+      const chev = hcT.querySelector('.hc-chev');
+      if (chev) chev.textContent = nowOpen ? '▾' : '▸';
+    }
+    return;
+  }
   const ws = e.target.closest('[data-hire-workspace]');
-  if (ws) { requestWorkspaceAccount(ws.dataset.hireWorkspace).catch(console.error); return; }
+  if (ws) { requestWorkspaceAccount(ws.dataset.hireWorkspace).catch(actionFailed); return; }
   const saveTerms = e.target.closest('[data-save-offer-terms]');
   if (saveTerms) {
-    saveOfferTerms(saveTerms.dataset.saveOfferTerms).catch(console.error);
+    saveOfferTerms(saveTerms.dataset.saveOfferTerms).catch(actionFailed);
+    return;
+  }
+  const addCtc = e.target.closest('[data-ctc-add]');
+  if (addCtc) {
+    const rowsEl = addCtc.closest('[data-ctc-breakup]')?.querySelector('.ctc-breakup-rows');
+    if (rowsEl && rowsEl.querySelectorAll('[data-ctc-row]').length >= CTC_BREAKUP_MAX_ROWS) {
+      const out = addCtc.closest('[data-ctc-breakup]')?.querySelector('[data-ctc-total]');
+      if (out) out.textContent = `The agreement fits ${CTC_BREAKUP_MAX_ROWS} components — combine some to add another.`;
+      return;
+    }
+    rowsEl?.insertAdjacentHTML('beforeend', ctcBreakupRowHtml());
+    rowsEl?.lastElementChild?.querySelector('[data-ctc-component]')?.focus();
+    return;
+  }
+  const removeCtc = e.target.closest('[data-ctc-remove]');
+  if (removeCtc) {
+    const wrap = removeCtc.closest('[data-offer-terms]');
+    removeCtc.closest('[data-ctc-row]')?.remove();
+    updateCtcBreakupTotal(wrap);
+    return;
+  }
+  const close = e.target.closest('[data-hire-close]');
+  if (close) {
+    // Came from an employee profile: go back there. Otherwise fold the hire
+    // and bring its row back into view (the detail is long; 30 Sep 2026).
+    if (hireReturnProfile) { hireReturnProfile = null; history.back(); return; }
+    const id = close.dataset.hireClose;
+    document.querySelector(`[data-hire-detail="${id}"]`)?.classList.add('hidden');
+    const btn = document.querySelector(`[data-hire-toggle="${id}"]`);
+    if (btn) btn.textContent = 'Details';
+    document.querySelector(`[data-hire-row="${id}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    return;
+  }
+  if (e.target.closest('[data-hire-refresh]')) { refreshHiringList().catch(actionFailed); return; }
+  const noAcct = e.target.closest('[data-hire-account-not-needed], [data-hire-account-needed]');
+  if (noAcct) {
+    const id = noAcct.dataset.hireAccountNotNeeded || noAcct.dataset.hireAccountNeeded;
+    setHireAccountNeeded(id, Boolean(noAcct.dataset.hireAccountNeeded)).catch(actionFailed);
     return;
   }
   const toggle = e.target.closest('[data-hire-toggle]');
@@ -21091,48 +24451,100 @@ document.getElementById('hiringList')?.addEventListener('click', (e) => {
     const detail = document.querySelector(`[data-hire-detail="${toggle.dataset.hireToggle}"]`);
     if (detail) {
       detail.classList.toggle('hidden');
+      toggle.textContent = detail.classList.contains('hidden') ? 'Details' : 'Hide details';
       if (!detail.classList.contains('hidden')) renderHireFiles(toggle.dataset.hireToggle).catch(console.error);
     }
     return;
   }
   const action = e.target.closest('[data-hire-action]');
-  if (action) { updateHireStage(action.dataset.hireId, action.dataset.hireAction).catch(console.error); return; }
+  if (action) { updateHireStage(action.dataset.hireId, action.dataset.hireAction).catch(actionFailed); return; }
   const file = e.target.closest('[data-hire-file]');
   if (file) {
     state.supabase.storage.from('hires').createSignedUrl(file.dataset.hireFile, 300)
       .then(({ data }) => { if (data?.signedUrl) window.open(data.signedUrl, '_blank', 'noopener'); });
   }
 });
+// A hire with no @youragency.com account ends at signing (30 Oct 2026).
+async function setHireAccountNeeded(hireId, needed) {
+  const hire = hiresCache.find((h) => h.id === hireId);
+  if (!hire) return;
+  if (!needed && !await appConfirm(`No @youragency.com account for ${hire.full_name}? They won't get Colony, the welcome email, meetings or Slack, and will invoice by email.`, { title: 'No account', confirmLabel: 'Not needed' })) return;
+  const { data, error } = await state.supabase.from('hires').update({ workspace_not_needed: !needed }).eq('id', hireId).select('id');
+  if (error || !data?.length) { notSaved('the account choice', error || new Error('permission?')); return; }
+  pendingHireFocus = hireId;
+  pendingHireFocusQuiet = true;
+  await loadHiringPanel();
+}
+
+// Reload the hires without reloading Colony (open hires stay open: the list
+// keeps them itself).
+async function refreshHiringList() {
+  const btns = [...document.querySelectorAll('[data-hire-refresh]')];
+  if (btns.some((b) => b.disabled)) return;
+  btns.forEach((b) => { b.disabled = true; b.classList.add('is-spinning'); });
+  try {
+    // Signed in and access switched on are read from the staff directory, so
+    // reload it too: Refresh alone left Manisha 'not signed in' (30 Oct 2026).
+    await loadEmployeeDirectoryFromSupabase();
+    await loadHiringPanel();
+  } finally {
+    // loadHiringPanel re-renders the list, so these are usually new buttons.
+    document.querySelectorAll('[data-hire-refresh]').forEach((b) => { b.disabled = false; b.classList.remove('is-spinning'); });
+  }
+}
 // Papersign: draft, then send. Both are functions; the panel only reports.
 async function papersignAction(kind, hireId) {
   const hire = hiresCache.find((h) => h.id === hireId);
   if (!hire) return;
+  // One request at a time, and the button says so (30 Oct 2026: the
+  // draft button gave no sign of working and was clicked three times).
+  const key = `${kind}:${hireId}`;
+  papersignAction.inFlight = papersignAction.inFlight || new Set();
+  if (papersignAction.inFlight.has(key)) return;
   if (kind === 'send' && !await appConfirm(`Send ${hire.full_name}'s agreement for signature? It goes to them and to Alex through Papersign.`, { title: 'Send for signing', confirmLabel: 'Send' })) return;
-  setHireRowStatus(hireId, kind === 'draft' ? 'Drafting in Papersign' : 'Sending', { busy: true });
+  papersignAction.inFlight.add(key);
+  const btn = document.querySelector(`[data-hire-ps-${kind}="${hireId}"]`);
+  const label = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.classList.add('is-working'); btn.textContent = kind === 'draft' ? 'Drafting…' : 'Sending…'; }
+  setHireRowStatus(hireId, kind === 'draft' ? 'This takes a few seconds' : '', { busy: true });
   let out = {}; let ok = false;
   try {
     const res = await fetch(`/api/papersign-${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.session.access_token}` }, body: JSON.stringify({ hireId }) });
     out = await res.json().catch(() => ({})); ok = res.ok;
-  } catch (e) { out = { error: e.message }; }
-  if (!ok) { setHireRowStatus(hireId, out.error || 'Papersign failed', { warn: true }); return; }
+  } catch (e) { out = { error: e.message }; } finally { papersignAction.inFlight.delete(key); }
+  // Someone else sent it while this page was open: show the hire as it is
+  // now instead of a button that can only fail (30 Oct 2026).
+  if (!ok && out.alreadySent) {
+    pendingHireFocus = hireId;
+    pendingHireFocusQuiet = true;
+    await loadHiringPanel();
+    setHireRowStatus(hireId, 'Already sent for signature, so nothing to do.', { warn: true });
+    return;
+  }
+  if (!ok) {
+    if (btn) { btn.disabled = false; btn.classList.remove('is-working'); btn.textContent = label; }
+    setHireRowStatus(hireId, out.error || 'Papersign failed', { warn: true });
+    return;
+  }
+  // Stay on this hire: re-render it open instead of collapsing the list
+  // (7 Oct 2026). The re-rendered step itself now says what happened
+  // ("✓ Sent for signature · today", or the new draft's Review button).
+  pendingHireFocus = hireId;
+  pendingHireFocusQuiet = true;
   await loadHiringPanel();
-  setHireRowStatus(hireId, kind === 'draft' ? `✓ Draft created in Papersign — Leo can review it there.` : `✓ Sent for signature.`);
   if (kind === 'draft') notifyHireEvent('contract_uploaded', hireId);
 }
 document.getElementById('hiringList')?.addEventListener('click', (e) => {
-  const d = e.target.closest('[data-hire-ps-draft]'); if (d) { papersignAction('draft', d.dataset.hirePsDraft).catch(console.error); return; }
-  const s2 = e.target.closest('[data-hire-ps-send]'); if (s2) { papersignAction('send', s2.dataset.hirePsSend).catch(console.error); }
+  const d = e.target.closest('[data-hire-ps-draft]'); if (d) { papersignAction('draft', d.dataset.hirePsDraft).catch(actionFailed); return; }
+  const s2 = e.target.closest('[data-hire-ps-send]'); if (s2) { papersignAction('send', s2.dataset.hirePsSend).catch(actionFailed); }
 });
 document.getElementById('hiringList')?.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-hire-checklist-toggle]');
-  if (!t) return;
-  document.querySelector(`[data-hire-checklist="${t.dataset.hireChecklistToggle}"]`)?.classList.toggle('hidden');
 });
 document.getElementById('hiringList')?.addEventListener('change', (e) => {
   if (e.target.matches('[data-hire-contract]')) {
-    uploadHireContract(e.target.dataset.hireContract, e.target.files?.[0], false).catch(console.error);
+    uploadHireContract(e.target.dataset.hireContract, e.target.files?.[0], false).catch(actionFailed);
   } else if (e.target.matches('[data-hire-signed]')) {
-    uploadHireContract(e.target.dataset.hireSigned, e.target.files?.[0], true).catch(console.error);
+    uploadHireContract(e.target.dataset.hireSigned, e.target.files?.[0], true).catch(actionFailed);
   }
 });
 
@@ -21145,6 +24557,7 @@ async function loadPartnerFeedback() {
   // Circle to answer them.
   if (!state.supabase) return;
   if (!state.partnerProfile && !state.staffOnCircle) return;
+  await loadCircleSuperadmin();
   const [postsRes, repliesRes] = await Promise.all([
     state.supabase.from('feature_requests')
       .select('id, request_text, request_type, status, created_at, author_name, author_partner_id')
@@ -21212,6 +24625,11 @@ function renderPartnerFeedback() {
   // Your Agency raises its own work elsewhere; on Circle a reviewer only answers.
   applyStaffOnCircleReadOnly();
   empty.classList.toggle('hidden', partnerFeedbackCache.length > 0);
+  // Among Your Agency staff only Alex can read client feedback (6 Oct 2026), so
+  // another reviewer's wall is empty by design, not because nothing was sent.
+  if (state.staffOnCircle && !state.partnerProfile && !circleStaffIsSuperadmin()) {
+    empty.textContent = 'Client feedback goes straight to Alex.';
+  }
   const replyWho = (r) => {
     if (!r.author_partner_id) return r.author_name || 'Your Agency';
     if (r.author_partner_id === state.partnerProfile?.id) return 'You';
@@ -21245,6 +24663,10 @@ function renderPartnerFeedback() {
       ${canReply ? `<div class="action-row pf-reply-row">
         <input type="text" data-pf-reply-input="${p.id}" placeholder="Reply…">
         <button class="ghost small" data-pf-reply="${p.id}" type="button">Reply</button>
+      </div>` : ''}
+      ${canFixFeedback() && p.status !== 'done' ? `<div class="action-row pf-reply-row">
+        ${p.status === 'requested' ? `<button class="ghost small" data-pf-status="in_progress" data-pf-id-btn="${p.id}" type="button">Mark in progress</button>` : ''}
+        <button class="small" data-pf-status="done" data-pf-id-btn="${p.id}" type="button">Mark fixed</button>
       </div>` : ''}
     </div>`;
   };
@@ -21310,14 +24732,61 @@ async function submitPartnerFeedbackReply(frId) {
       reply_text: text
     };
   const { error } = await state.supabase.from('feature_request_replies').insert(row);
-  if (error) { console.error(error); return; }
+  if (error) { notSaved("Couldn't post your reply", error); return; }
+  // Your Agency's answer reaches the client by email too, with a Circle link
+  // (the function picks the owner and audience; best-effort).
+  if (asStaff) notifyPartnerFeedback('reply', frId);
   loadPartnerFeedback().catch(console.error);
 }
 
-document.getElementById('pfSubmitBtn')?.addEventListener('click', () => submitPartnerFeedback().catch(console.error));
+// Client feedback is Alex's to fix (6 Oct 2026). The database lets only the
+// superadmin read or change a client post among staff; this only decides
+// whether the buttons are drawn.
+function canFixFeedback() {
+  return Boolean(state.staffOnCircle) && !state.partnerProfile && circleStaffIsSuperadmin();
+}
+
+// On Circle the superadmin address is redacted from the bundle, so
+// isSuperadminUser() is always false there (found testing 6 Oct 2026). Ask the
+// database once per signed-in user instead; loadPartnerFeedback fills it.
+function circleStaffIsSuperadmin() {
+  const uid = state.session?.user?.id;
+  return Boolean(uid) && state.circleSuperadmin?.uid === uid && state.circleSuperadmin.yes === true;
+}
+
+async function loadCircleSuperadmin() {
+  const uid = state.session?.user?.id;
+  if (!uid || !state.staffOnCircle || state.partnerProfile || state.circleSuperadmin?.uid === uid) return;
+  const { data, error } = await state.supabase.rpc('is_superadmin');
+  state.circleSuperadmin = { uid, yes: !error && data === true };
+}
+
+function notifyPartnerFeedback(type, frId) {
+  const token = state.session?.access_token;
+  if (!token) return;
+  fetch('/api/feature-request-notify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ type, featureRequestId: frId })
+  }).catch(() => {});
+}
+
+// Marking a post fixed tells the client and stops the 2-day reminders.
+async function setPartnerFeedbackStatus(frId, status) {
+  if (!canFixFeedback() || !['in_progress', 'done'].includes(status)) return;
+  const { data, error } = await state.supabase.from('feature_requests')
+    .update({ status, updated_at: new Date().toISOString() }).eq('id', frId).select('id');
+  if (error || !data?.length) { notSaved("Couldn't change the status", error); return; }
+  notifyPartnerFeedback('status_change', frId);
+  loadPartnerFeedback().catch(console.error);
+}
+
+document.getElementById('pfSubmitBtn')?.addEventListener('click', () => submitPartnerFeedback().catch(actionFailed));
 document.getElementById('pfList')?.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-pf-reply]');
-  if (btn) submitPartnerFeedbackReply(btn.dataset.pfReply).catch(console.error);
+  if (btn) submitPartnerFeedbackReply(btn.dataset.pfReply).catch(actionFailed);
+  const statusBtn = e.target.closest('[data-pf-status]');
+  if (statusBtn) setPartnerFeedbackStatus(statusBtn.dataset.pfIdBtn, statusBtn.dataset.pfStatus).catch(actionFailed);
 });
 
 
@@ -21348,10 +24817,10 @@ function renderPartnerTimeline() {
             : (briefTimelinePosition(b.status).badge
                 ? `<span class="brief-status-chip st-pending_info">${escapeHtml(briefTimelinePosition(b.status).badge)}</span>`
                 : '');
-          const due = b.deadline ? `<span class="mini-meta pt-row-due">${escapeHtml(formatDealDate(b.deadline))}</span>` : '';
+          const due = briefDueDate(b) ? `<span class="mini-meta pt-row-due">${escapeHtml(formatDealDate(briefDueDate(b)))}</span>` : '';
           return `<div class="pt-row" data-open-brief="${b.id}">
             <span class="pt-row-title">${escapeHtml(b.title)}</span>
-            ${badge}${due}
+            ${badge}${due}${briefWasHtml(b, '')}
           </div>`;
         }).join('')}
       </div>
@@ -21373,6 +24842,13 @@ function placeOrgContactsPanel(mode) {
   const panel = document.getElementById('orgContactsPanel');
   if (!panel) return;
   if (!orgContactsPanelHome) orgContactsPanelHome = { parent: panel.parentElement, next: panel.nextElementSibling };
+  // Folded on Colony (a reference beside the board), open on Circle, where it
+  // is the client's own team page (27 Sep 2026).
+  const fold = document.getElementById('orgContactsCollapsible');
+  if (fold) {
+    fold.classList.toggle('collapsed', mode !== 'partner');
+    fold.querySelector('.collapsible-toggle')?.setAttribute('aria-expanded', String(mode === 'partner'));
+  }
   if (mode === 'partner') {
     document.getElementById('orgContactsPanelSlotPartner')?.appendChild(panel);
   } else if (orgContactsPanelHome.parent && panel.parentElement?.id === 'orgContactsPanelSlotPartner') {
@@ -21412,7 +24888,8 @@ function renderOrgContacts() {
   // Clients see their own org named; Colony keeps the neutral title.
   const orgName = state.partnerProfile?.org;
   const titleEl = document.getElementById('orgContactsTitle');
-  if (titleEl) titleEl.textContent = orgName ? `${orgName} stakeholders` : 'Client stakeholders';
+  // "Team directory" clashed with the People screen (T2, 8 Oct 2026).
+  if (titleEl) titleEl.textContent = orgName ? `${orgName} team` : 'Client contacts';
   const list = document.getElementById('orgContactsList');
   const form = document.getElementById('orgContactsForm');
   if (!list) return;
@@ -21497,7 +24974,7 @@ function resetOrgContactForm(prefill = null) {
   document.getElementById('ocCancelBtn')?.classList.toggle('hidden', !prefill);
 }
 
-document.getElementById('ocSaveBtn')?.addEventListener('click', () => saveOrgContact().catch(console.error));
+document.getElementById('ocSaveBtn')?.addEventListener('click', () => saveOrgContact().catch(actionFailed));
 document.getElementById('ocCancelBtn')?.addEventListener('click', () => resetOrgContactForm());
 document.getElementById('orgContactsList')?.addEventListener('click', async (e) => {
   const editBtn = e.target.closest('[data-oc-edit]');

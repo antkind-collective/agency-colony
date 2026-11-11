@@ -71,8 +71,8 @@ async function handler(event) {
   const [briefRes, partnerRes, sentRes, cfgRes] = await Promise.all([
     supabase.from('briefs')
       .select('id, org, title, request_type, status, deadline, created_at, paused_at, submitted_by_partner_id')
-      .eq('status', 'submitted').limit(2000),
-    supabase.from('partners').select('id, email, full_name, org, partner_role, is_active').limit(500),
+      .eq('status', 'submitted').is('archived_at', null).limit(2000),
+    supabase.from('partners').select('id, email, full_name, org, partner_role, is_active, email_opt_out').limit(500),
     supabase.from('notification_log').select('payload').eq('kind', 'brief_approval_nudge').limit(5000),
     supabase.from('app_config').select('value').eq('key', 'brief_reviewer_emails').maybeSingle()
   ]);
@@ -108,9 +108,12 @@ async function handler(event) {
     if (alreadySent.has(key)) { summary.skippedAlreadySent += 1; continue; }
 
     const raisedBy = partnerById.get(brief.submitted_by_partner_id);
-    const to = coordinators.map((c) => c.email);
+    // Opted-out logins (Your Agency people approving on the client's behalf, 30 Sep 2026)
+    // can still approve; they just get no client emails.
+    const to = coordinators.filter((c) => !c.email_opt_out).map((c) => c.email);
     const cc = [...ccLeads];
-    if (raisedBy?.email && !to.includes(raisedBy.email)) cc.push(raisedBy.email);
+    if (raisedBy?.email && !raisedBy.email_opt_out && !to.includes(raisedBy.email)) cc.push(raisedBy.email);
+    if (!to.length) { summary.skippedOptedOut = (summary.skippedOptedOut || 0) + 1; continue; }
 
     const waitedText = plural(hit.waited, 'working day');
     const subject = hit.urgent

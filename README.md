@@ -4,6 +4,20 @@
 
 Free and open source. Built for a real agency of about twenty people, and used there every day.
 
+## Get your own, in about 10 minutes
+
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/antkind-collective/agency-colony)
+
+1. Press the button and sign in to Netlify with GitHub. It copies Colony to your account and puts it online.
+2. Open your new site. A setup page appears.
+3. Paste two tokens (the page shows where to get them), enter your company name and email, and tick only the tools you use.
+
+Colony builds its own database and connects everything. There is no code to edit and nothing to install. Netlify and Supabase both have free plans.
+
+Don't use Papersign, Slack, Google Workspace or AI? Skip them. To change anything else without coding, see [CUSTOMIZE.md](CUSTOMIZE.md).
+
+Prefer to do it by hand? See [SETUP.md](SETUP.md).
+
 ---
 
 ## The problem it solves
@@ -69,7 +83,7 @@ Hiring used to be the part of running an agency that lived entirely in email. It
 |---|---|---|
 | **Open the hire** | hiring lead | name, start date, designation, who they report to, notice period, and the pay: an annual CTC for full-time staff, a monthly fee for consultants and fractional people |
 | **Details** | the candidate | a joining checklist: personal details, address, tax regime, salary slips, bank details |
-| **Pay breakup** | finance | full-time hires only — consultants and fractional people invoice |
+| **Pay breakup** | finance | full-time hires only: each salary component entered in Colony, checked against the CTC, and printed into the agreement's annexure — consultants and fractional people invoice |
 | **Agreement** | legal | drafted from your template in Papersign, reviewed, then sent |
 | **Signed by both** | Papersign | the signed PDF is filed against the hire automatically |
 | **Payroll or vendor set-up** | finance | emailed with the start date and the figure, the moment it's signed |
@@ -83,7 +97,7 @@ Each step emails the person whose turn it is, with a link straight to that hire 
 
 Colony doesn't generate PDFs; it drives [Papersign](https://paperform.co/products/papersign/), so the agreement you already have stays the agreement.
 
-1. Upload your employment and consulting agreements to Papersign once, as **templates**, and mark the fill-in spots with these variable keys: `hire_name`, `start_date`, `notice_period_days`, `compensation`, `compensation_label`, `scope_of_work`, `designation`, `current_address`, `permanent_address`, `pan`.
+1. Upload your employment and consulting agreements to Papersign once, as **templates**, and mark the fill-in spots with these variable keys: `hire_name`, `hire_email`, `start_date`, `notice_period_days`, `notice_period_words`, `compensation`, `compensation_label`, `ctc_amount`, `ctc_words`, `ctc_breakup_1` … `ctc_breakup_10`, `fee_amount`, `fee_words`, `scope_of_work`, `designation`, `department`, `current_address`, `permanent_address`, `pan`. Amounts come both ways — "₹15,00,000 per annum" and "15,00,000" / "Fifteen Lakh" — so the template's own wording reads right.
 2. On a hire, **Draft in Papersign** copies the right template and fills every variable from what's already in Colony. Nothing is retyped.
 3. Legal reviews the draft inside Papersign and changes whatever needs changing.
 4. **Approve and send** sends it for signature to the hire and your agency's signer, with automatic reminders.
