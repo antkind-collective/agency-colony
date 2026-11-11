@@ -77,16 +77,16 @@ test('brief-notify refuses staff who can read a brief but not work it', async ()
   const run = async ({ canWork, partner = null }) => {
     const sent = [];
     const chain = (table) => {
-      const c = { select: () => c, eq: () => c,
+      const c = { select: () => c, eq: () => c, order: () => c, limit: () => c,
         maybeSingle: async () => ({ data: table === 'partners' ? partner : null }),
-        single: async () => ({ data: { id: briefId, title: 'T', org: 'O', status: 'in_creative' } }),
+        single: async () => ({ data: { id: briefId, title: 'T', org: 'O', status: 'delivered' } }),
         then: (ok) => ok({ data: [{ id: 'p', email: 'client@example.com', full_name: 'C', partner_role: 'coordinator', is_active: true }] }) };
       return c;
     };
     const stubs = {
       './lib/supabase-admin': { getSupabaseAdmin: () => ({ auth: { getUser: async () => ({ data: { user: { id: 'u', email: 'staff@youragency.com' } } }) }, from: chain }) },
       './lib/email': { sendEmail: async (m) => { sent.push(m); return { skipped: false }; } },
-      './lib/notifications': { logNotification: async () => {} },
+      './lib/notifications': { logNotification: async () => {}, alreadyNotified: async () => false },
       './lib/config': { getConfig: () => ({ appBaseUrl: 'https://a', circleBaseUrl: 'https://c' }) },
       './lib/caller': { callerCanSee: async () => true, callerCanWorkBrief: async () => canWork },
       './lib/brief-approvers': { approverRecipients: () => [], shortDate: (d) => d }

@@ -232,11 +232,12 @@ test('skipping stays silent, except when it hands someone a real job', () => {
   assert.equal(f('details_submitted'), false);
   assert.equal(f('contract_uploaded'), false);
   assert.equal(f('reviewed'), false);
-  // These announce where the hire has ARRIVED. Dev reached 'signed' by
+  // 'signed' announces where the hire has ARRIVED. Dev reached it by
   // Skip on 8 Sep 2026 and finance was never told to set him up, so he sat at
   // "Hiring complete" with payroll never actually requested.
   assert.equal(f('signed'), true);
-  assert.equal(f('payroll_done'), true);
+  // hire-notify sends nothing for payroll_done, so the dialog can't promise it.
+  assert.equal(f('payroll_done'), false);
 });
 
 // ── hireSignInPrompt: the moment a hire must switch accounts ──────────────

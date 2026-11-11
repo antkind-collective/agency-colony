@@ -13,7 +13,7 @@
 // somebody else.
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
-const { logNotification } = require('./lib/notifications');
+const { logNotification, alreadyNotified } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
 
 
@@ -46,7 +46,7 @@ exports.handler = async (event) => {
   const authUserId = userResponse.data.user.id;
   const { data: emp, error: empError } = await supabase
     .from('employees')
-    .select('id, full_name, email, employment_type, setup_pending, current_city, requested_department:departments!employees_requested_department_id_fkey(name)')
+    .select('id, full_name, email, employment_type, setup_pending, activated_at, current_city, requested_department:departments!employees_requested_department_id_fkey(name)')
     .eq('auth_user_id', authUserId)
     .maybeSingle();
   if (empError) return jsonResponse(500, { error: empError.message });
@@ -54,6 +54,11 @@ exports.handler = async (event) => {
   // Only notify for someone actually awaiting setup — so a replayed call after
   // activation can't re-ping the approvers.
   if (!emp.setup_pending) return jsonResponse(200, { skipped: 'not pending' });
+  // Once while pending (audit S24). Rows from before their last activation
+  // don't count: someone switched back to pending needs setting up again.
+  if (await alreadyNotified(supabase, 'new_employee_joined', { employee_id: emp.id }, emp.activated_at)) {
+    return jsonResponse(200, { skipped: 'already sent' });
+  }
 
   const { appBaseUrl } = getConfig();
 

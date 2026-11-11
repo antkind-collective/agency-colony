@@ -17,6 +17,21 @@ async function logNotification({ kind, recipientEmail, subject, payload = {}, st
   }
 }
 
+// Has this notification already gone out? Fire-and-forget notify functions can
+// be POSTed again (a stale tab, a retry, a script), and each POST used to mean
+// another email (audit S22b, S24). `match` compares payload fields; `since`
+// limits the search to rows written after a moment, for things that can
+// legitimately happen twice (delivered, revised, delivered again). A failed
+// lookup answers no: one duplicate beats a lost email.
+async function alreadyNotified(supabase, kind, match = {}, since = null) {
+  let query = supabase.from('notification_log').select('id').eq('kind', kind);
+  for (const [field, value] of Object.entries(match)) query = query.eq(`payload->>${field}`, String(value));
+  if (since) query = query.gte('created_at', since);
+  const { data, error } = await query.limit(1);
+  if (error) { console.error('Notification lookup failed:', error.message); return false; }
+  return Boolean(data?.length);
+}
+
 // Wrap a scheduled function so every run (success, partial, or crash) writes a
 // heartbeat row to notification_log — a dead scheduler must be visible in
 // Admin Settings within a day, not discovered months later by accident.
@@ -101,6 +116,7 @@ function withCronHeartbeat(functionName, run) {
 
 module.exports = {
   logNotification,
+  alreadyNotified,
   withCronHeartbeat,
   quietRunNeedsBeacon
 };

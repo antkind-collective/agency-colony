@@ -215,12 +215,13 @@ function workspaceRequestEmail(hire, workEmail) {
 // Skipping suppresses the stage email, because those emails describe work that
 // did not happen ("the contract draft is uploaded and waiting for review").
 //
-// But TWO of them announce a state you have arrived at, not work you did, and
-// they are addressed to someone who must now act. Dev reached "signed" by
-// Skip on 8 Sep and finance was never told to set him up — he sat at "Hiring
+// But "signed" announces a state you have arrived at, not work you did, and it
+// is addressed to someone who must now act. Dev reached "signed" by Skip
+// on 8 Sep and finance was never told to set him up — he sat at "Hiring
 // complete" with payroll never requested (Alex). Arriving is arriving,
-// however you got there.
-const SKIP_STILL_NOTIFIES = ['signed', 'payroll_done'];
+// however you got there. "payroll_done" is not mailed at all since 7 Oct, so
+// the skip dialog must not promise it (S24).
+const SKIP_STILL_NOTIFIES = ['signed'];
 
 function skipShouldNotify(toStage) {
   return SKIP_STILL_NOTIFIES.includes(toStage);

@@ -197,7 +197,7 @@ exports.handler = async (event) => {
       break;
     case 'reviewed':
       // Covered by the draft-ready mail; a second one added nothing.
-      return json(200, { skipped: 'reviewed is not mailed' });
+      return jsonResponse(200, { skipped: 'reviewed is not mailed' });
     case 'signed':
       // Everything Finance needs, in the mail itself, so nobody opens Colony to
       // copy a bank account across (7 Oct 2026).
@@ -221,7 +221,7 @@ exports.handler = async (event) => {
     case 'payroll_done':
       // Not mailed. Signing in is announced by setup-approval-notify ("switch
       // their access on"), the one email where the manager has to act.
-      return json(200, { skipped: 'payroll_done is not mailed' });
+      return jsonResponse(200, { skipped: 'payroll_done is not mailed' });
   }
 
   const norm = (list) => [...new Set((list || []).filter(Boolean).map((e) => String(e).toLowerCase()))];

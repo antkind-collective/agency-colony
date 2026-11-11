@@ -1,6 +1,6 @@
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
-const { logNotification } = require('./lib/notifications');
+const { logNotification, alreadyNotified } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
 const { callerCanSee, callerDisplayName } = require('./lib/caller');
 
@@ -87,6 +87,10 @@ exports.handler = async (event) => {
       .eq('id', dealId)
       .single();
     if (error || !deal) return jsonResponse(404, { error: 'Deal not found.' });
+    // Once per deal (audit S24).
+    if (await alreadyNotified(supabase, 'deal_contracted', { deal_id: deal.id })) {
+      return jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
+    }
 
     const dealName = deal.deal_name || 'Unnamed deal';
     const amount = deal.amount != null ? `${deal.currency || ''} ${deal.amount}`.trim() : '—';
@@ -109,10 +113,16 @@ exports.handler = async (event) => {
     if (!clientId) return jsonResponse(400, { error: 'clientId required.' });
     const { data: client, error } = await supabase
       .from('clients')
-      .select('id, name')
+      .select('id, name, is_active, updated_at')
       .eq('id', clientId)
       .single();
     if (error || !client) return jsonResponse(404, { error: 'Client not found.' });
+    // Only a client that really is archived (audit S24), once per archive:
+    // archiving bumps updated_at, so restoring and archiving again mails again.
+    if (client.is_active !== false) return jsonResponse(200, { ok: true, skipped: true, reason: 'Client is not archived.' });
+    if (await alreadyNotified(supabase, 'client_archived', { client_id: client.id }, client.updated_at)) {
+      return jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
+    }
 
     const clientName = client.name || 'Unnamed client';
     subject = `Client archived: ${clientName} — anything for press?`;

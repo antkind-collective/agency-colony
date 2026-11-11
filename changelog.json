@@ -1,6 +1,12 @@
 [
   {
     "date": "2026-11-11",
+    "text": "Hiring: skipping to the last step no longer says Finance will be emailed, because no email goes at that step. Skipping to Signed still tells Finance.",
+    "audience": "hiring",
+    "area": "Hiring"
+  },
+  {
+    "date": "2026-11-11",
     "text": "Deal Flow: New Deal works again, and so does reviving a cold deal. Both were failing with a database error.",
     "audience": "leadership",
     "area": "Deal Flow"

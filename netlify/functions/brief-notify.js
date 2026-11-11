@@ -5,7 +5,7 @@
 // app_config brief_reviewer_emails), or a deliverable assignee.
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
-const { logNotification } = require('./lib/notifications');
+const { logNotification, alreadyNotified } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
 const { callerCanSee, callerCanWorkBrief } = require('./lib/caller');
 const { approverRecipients, shortDate } = require('./lib/brief-approvers');
@@ -17,6 +17,27 @@ const EVENTS = ['submitted', 'ga_approved', 'changes_requested', 'locked', 'deli
 // What a client's own buttons fire (submit, approve, ask for a revision). The
 // rest are Your Agency's moves; a partner token announcing "Delivered" is forged.
 const PARTNER_EVENTS = ['submitted', 'ga_approved', 'revision_requested'];
+// The state each event announces (audit S24): it can only be true of a brief
+// that is there. date_changed isn't about a state and has its own check below.
+const IN_PRODUCTION = ['in_creative', 'under_revision'];
+const EVENT_STATES = {
+  submitted: ['submitted'],
+  ga_approved: ['ready_for_review'],
+  changes_requested: ['pending_info'],
+  locked: ['locked', 'in_creative'],
+  delivered: ['delivered'],
+  reopened: IN_PRODUCTION,
+  revision_requested: ['under_revision'],
+  deliverable_assigned: IN_PRODUCTION,
+  deliverable_ready: IN_PRODUCTION
+};
+function briefIsInEventState(brief, briefEvent) {
+  if (briefEvent === 'date_changed') return true;
+  // A coordinator's quick request has no approval step: it stays 'submitted',
+  // and their screen announces it as ga_approved.
+  if (briefEvent === 'ga_approved' && brief.request_type === 'notify_only' && brief.status === 'submitted') return true;
+  return (EVENT_STATES[briefEvent] || []).includes(brief.status);
+}
 
 function escapeHtml(value) {
   return String(value || '')
@@ -71,6 +92,22 @@ exports.handler = async (event) => {
     .eq('id', briefId).single();
   if (briefRes.error || !briefRes.data) return jsonResponse(404, { error: 'Brief not found.' });
   const brief = briefRes.data;
+
+  if (!briefIsInEventState(brief, briefEvent)) return jsonResponse(200, { ok: true, skipped: true, reason: 'Brief is not in that state.' });
+
+  // Once per brief, event and time it entered that state (audit S24), so
+  // delivered, revised, delivered again mails twice but a re-POST doesn't.
+  // A new date counts from when that date was set.
+  let since = brief.revised_deadline_at;
+  if (briefEvent !== 'date_changed') {
+    const { data: entry } = await supabase.from('brief_status_history').select('entered_at')
+      .eq('brief_id', briefId).order('entered_at', { ascending: false }).limit(1);
+    since = entry?.[0]?.entered_at || null;
+  }
+  const assigneeMatch = briefEvent === 'deliverable_assigned' ? { assignee_employee_id: assigneeEmployeeId } : {};
+  if (await alreadyNotified(supabase, 'brief_notify', { brief_id: briefId, event: briefEvent, ...assigneeMatch }, since)) {
+    return jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
+  }
 
   const partnersRes = await supabase.from('partners')
     .select('id, email, full_name, partner_role, is_active, email_opt_out')
@@ -222,7 +259,7 @@ exports.handler = async (event) => {
         kind: 'brief_notify',
         recipientEmail: email,
         subject,
-        payload: { brief_id: briefId, event: briefEvent, actor_email: actorEmail },
+        payload: { brief_id: briefId, event: briefEvent, actor_email: actorEmail, ...assigneeMatch },
         status: emailResult.skipped ? 'skipped' : 'sent'
       });
       results.push({ email, ok: true });

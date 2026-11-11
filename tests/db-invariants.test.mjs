@@ -15,7 +15,7 @@ import { test as nodeTest } from 'node:test';
 const queued = [];
 const test = (name, opts, fn) => queued.push(typeof opts === 'function' ? [name, {}, opts] : [name, opts, fn]);
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const envPath = fileURLToPath(new URL('../.env', import.meta.url));
@@ -215,6 +215,24 @@ test('Deal Flow writes only columns that exist on deals', { skip: !live && 'no .
   const rows = await sql("select column_name from information_schema.columns where table_schema='app' and table_name='deals';");
   const columns = new Set(rows.map((r) => r.column_name));
   assert.deepEqual(keys.filter((k) => !columns.has(k)), [], 'app.js writes columns deals does not have');
+});
+
+// logNotification only logs a failed insert to the console, so a kind missing
+// from the enum loses its rows silently, and the once-only checks in the notify
+// functions can't see them (client_archived and deal_contracted, S24).
+test('every notification kind the functions log exists in the enum', { skip: !live && 'no .env — live invariants skipped' }, async () => {
+  const dir = new URL('../netlify/functions/', import.meta.url);
+  const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => new URL(f, dir)),
+    ...readdirSync(new URL('lib/', dir)).filter((f) => f.endsWith('.js')).map((f) => new URL(`lib/${f}`, dir))].map((u) => readFileSync(u, 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+  const kinds = new Set(sources.flatMap((s) => [...s.matchAll(/\bkind:\s*'([a-z_]+)'/g)].map((m) => m[1])));
+  // client-status-notify logs under its RECIPIENTS keys (kind: type).
+  const recipients = readFileSync(new URL('client-status-notify.js', dir), 'utf8').match(/const RECIPIENTS = \{([\s\S]*?)\n\};/)?.[1];
+  assert.ok(recipients, 'RECIPIENTS not found in client-status-notify.js');
+  for (const m of recipients.matchAll(/^\s*([a-z_]+):/gm)) kinds.add(m[1]);
+  assert.ok(kinds.size > 20, `only found ${kinds.size} kinds; has the scan broken?`);
+  const rows = await sql("select enumlabel from pg_enum e join pg_type t on t.oid=e.enumtypid where t.typname='notification_kind';");
+  const labels = new Set(rows.map((r) => r.enumlabel));
+  assert.deepEqual([...kinds].filter((k) => !labels.has(k)), [], 'kinds missing from app.notification_kind');
 });
 
 test('the Security Advisor reports no ERROR-level lint', { skip: !live && 'no .env — live invariants skipped' }, async () => {

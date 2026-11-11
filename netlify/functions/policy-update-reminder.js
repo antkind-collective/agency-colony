@@ -6,6 +6,8 @@ const { logNotification, withCronHeartbeat } = require('./lib/notifications');
 // Checks policy_documents for reminder_month matching the current month
 // If the policy hasn't been updated this month, sends a reminder to admin
 
+const escapeHtml = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
 const run = async (event) => {
   // Allow only Netlify-scheduler invocations. Scheduled functions ARE invoked
   // via HTTP POST under the hood, so checking event.httpMethod alone rejected
@@ -49,7 +51,7 @@ const run = async (event) => {
 
     const updatedDate = updatedAt.toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
     const subject = `Reminder: Review "${policy.title}"`;
-    const html = `<p>The <strong>${policy.title}</strong> was last updated on ${updatedDate}.</p><p>Please review and update it for the coming year.</p><p><a href="https://app.youragency.com/#admin-settings">Open Admin Settings</a></p>`;
+    const html = `<p>The <strong>${escapeHtml(policy.title)}</strong> was last updated on ${updatedDate}.</p><p>Please review and update it for the coming year.</p><p><a href="https://app.youragency.com/#admin-settings">Open Admin Settings</a></p>`;
     const text = `The ${policy.title} was last updated on ${updatedDate}. Please review and update it. https://app.youragency.com/#admin-settings`;
 
     try {

@@ -1,6 +1,6 @@
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
-const { logNotification } = require('./lib/notifications');
+const { logNotification, alreadyNotified } = require('./lib/notifications');
 const { formatDateInIST, getConfig } = require('./lib/config');
 
 function escapeHtml(value) {
@@ -136,6 +136,10 @@ exports.handler = async (event) => {
     }
     const to = String(leaveRequest.employee?.email || '').toLowerCase();
     if (!to) return jsonResponse(200, { ok: true, skipped: true, reason: 'No email for this person.' });
+    // Once per entry (audit S24): a re-POST of the same id must not email again.
+    if (await alreadyNotified(supabase, 'leave_submitted', { leave_request_id: leaveRequest.id, marked_by: leaveRequest.marked_by_employee_id })) {
+      return jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
+    }
     const { data: marker } = await supabase.from('employees').select('full_name').eq('id', leaveRequest.marked_by_employee_id).maybeSingle();
     const first = (n) => String(n || '').trim().split(/\s+/)[0] || 'Your manager';
     const who = first(marker?.full_name);
@@ -169,6 +173,11 @@ exports.handler = async (event) => {
     return jsonResponse(422, {
       error: 'No approver emails configured for this leave request.'
     });
+  }
+
+  // Once per request (audit S24).
+  if (await alreadyNotified(supabase, 'leave_submitted', { leave_request_id: leaveRequest.id })) {
+    return jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
   }
 
   const employeeName = leaveRequest.employee?.full_name || 'Employee';

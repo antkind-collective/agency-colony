@@ -1,6 +1,6 @@
 const { getSupabaseAdmin } = require('./lib/supabase-admin');
 const { sendEmail } = require('./lib/email');
-const { logNotification } = require('./lib/notifications');
+const { logNotification, alreadyNotified } = require('./lib/notifications');
 const { getConfig } = require('./lib/config');
 const { callerCanSee, callerDisplayName } = require('./lib/caller');
 
@@ -136,6 +136,10 @@ exports.handler = async (event) => {
 
   // --- New post (bug or feature) → notify admin@youragency.com ---
   if (type === 'new_bug') {
+    // Once per post and caller (audit S24).
+    if (await alreadyNotified(supabase, 'new_bug_report', { feature_request_id: featureRequestId, reporter_email: callerEmail })) {
+      return jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
+    }
     const adminEmail = 'admin@youragency.com';
     const isBug = fr.request_type === 'bug';
     const subject = isBug ? `🐛 New bug reported by ${actor}` : `💡 New feature request from ${actor}`;
@@ -209,18 +213,45 @@ exports.handler = async (event) => {
     notifKind = 'feature_request_status';
   }
 
+  const skipRepeat = () => jsonResponse(200, { ok: true, skipped: true, reason: 'Already sent.' });
+
+  // Upvotes: only a real one, and one email per post and caller however often
+  // it is toggled (audit S24).
+  if (type === 'upvote') {
+    const { data: vote } = caller.employeeId
+      ? await supabase.from('feature_request_upvotes').select('employee_id')
+        .eq('feature_request_id', featureRequestId).eq('employee_id', caller.employeeId).limit(1)
+      : { data: [] };
+    if (!vote?.length) return jsonResponse(200, { ok: true, skipped: true, reason: 'No upvote by the caller.' });
+    if (await alreadyNotified(supabase, notifKind, { feature_request_id: featureRequestId, actor_email: callerEmail })) return skipRepeat();
+  }
+
+  // Status: skip only if the last status email already announced this status.
+  // Compared on the subject because older rows have no status in the payload,
+  // and so done → in progress → done again still tells the owner.
+  if (type === 'status_change') {
+    const { data: last } = await supabase.from('notification_log').select('subject')
+      .eq('kind', notifKind).eq('payload->>feature_request_id', featureRequestId)
+      .order('created_at', { ascending: false }).limit(1);
+    if (last?.[0]?.subject === subject) return skipRepeat();
+  }
+
   // Include the comment itself for replies — "someone commented" without the
   // comment forces a login just to find out what was said.
   let replyText = '';
+  let replyId = null;
   if (type === 'reply') {
     const authorCol = caller.employeeId ? 'employee_id' : 'author_partner_id';
     const authorId = caller.employeeId || caller.partnerId;
     const { data: latest } = authorId
-      ? await supabase.from('feature_request_replies').select('reply_text')
+      ? await supabase.from('feature_request_replies').select('id, reply_text')
         .eq('feature_request_id', featureRequestId).eq(authorCol, authorId)
         .order('created_at', { ascending: false }).limit(1)
       : { data: [] };
     if (!latest?.length) return jsonResponse(200, { ok: true, skipped: true, reason: 'No reply by the caller.' });
+    replyId = latest[0].id;
+    // Once per reply (audit S24): a new reply mails, a re-POST of this one doesn't.
+    if (await alreadyNotified(supabase, notifKind, { feature_request_id: featureRequestId, reply_id: replyId })) return skipRepeat();
     replyText = String(latest[0].reply_text || '').trim();
   }
   const replyHtml = replyText
@@ -260,7 +291,9 @@ exports.handler = async (event) => {
       payload: {
         feature_request_id: featureRequestId,
         type,
-        actor_email: callerEmail
+        actor_email: callerEmail,
+        ...(replyId ? { reply_id: replyId } : {}),
+        ...(type === 'status_change' ? { status: fr.status } : {})
       },
       status: emailResult.skipped ? 'skipped' : 'sent'
     });

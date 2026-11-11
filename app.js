@@ -24266,7 +24266,7 @@ async function skipHireStage(hireId) {
     setHireRowStatus(hireId, 'Could not skip: ' + (error?.message || 'permission?'), { warn: true });
     return;
   }
-  // Arriving at signed or payroll_done still tells whoever must act next.
+  // Arriving at signed still tells Finance, who must act next.
   if (skipShouldNotify(toStage)) notifyHireEvent(toStage, hireId);
   await loadHiringPanel();
   setHireRowStatus(hireId, `✓ ${from} skipped — now at ${to}.`
